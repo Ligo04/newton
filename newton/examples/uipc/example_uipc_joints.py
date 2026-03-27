@@ -218,7 +218,7 @@ class Example:
         self.model = builder.finalize()
         self.state_0 = self.model.state()
 
-        self.solver = newton.solvers.SolverUIPC(self.model, dt=self.sim_dt, logger_level=uipc.Logger.Info)
+        self.solver = newton.solvers.SolverUIPC(self.model, dt=self.sim_dt, logger_level=uipc.Logger.Error)
 
         self.state_1 = self.model.state()
         self.control = self.model.control()
