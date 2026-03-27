@@ -237,19 +237,11 @@ def newton_transform_to_mat4(pos: np.ndarray, quat: np.ndarray) -> np.ndarray:
         4x4 homogeneous transformation matrix (float64).
     """
     x, y, z, w = quat.astype(np.float64)
+    px, py, pz = pos.astype(np.float64)
 
-    # m = np.array(
-    #     [
-    #         [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w), 2.0 * (x * z + y * w), px],
-    #         [2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - x * w), py],
-    #         [2.0 * (x * z - y * w), 2.0 * (y * z + x * w), 1.0 - 2.0 * (x * x + y * y), pz],
-    #         [0.0, 0.0, 0.0, 1.0],
-    #     ],
-    #     dtype=np.float64,
-    # )
     tran = Transform.Identity()
-    tran.rotate(Quaternion([w, x, y, z]))
-    tran.translate(pos.astype(np.float64))
+    tran.rotate(Quaternion(wp.quat(w, x, y, z)))
+    tran.pretranslate(wp.vec3(px, py, pz))
     return tran.matrix()
 
 
