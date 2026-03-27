@@ -9,6 +9,7 @@ from .mujoco import SolverMuJoCo
 from .semi_implicit import SolverSemiImplicit
 from .solver import SolverBase
 from .style3d.solver_style3d import SolverStyle3D
+from .uipc import SolverUIPC
 from .vbd import SolverVBD
 from .xpbd import SolverXPBD
 
@@ -21,6 +22,7 @@ __all__ = [
     "SolverNotifyFlags",
     "SolverSemiImplicit",
     "SolverStyle3D",
+    "SolverUIPC",
     "SolverVBD",
     "SolverXPBD",
 ]
