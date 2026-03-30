@@ -32,7 +32,7 @@ from uipc.constitution import (
     AffineBodySphericalJoint,
     SoftTransformConstraint,
 )
-from uipc.geometry import label_surface, linemesh, pointcloud
+from uipc.geometry import linemesh, pointcloud
 from uipc.geometry import trimesh as uipc_trimesh
 from uipc.unit import MPa
 
@@ -70,6 +70,7 @@ class ArticulationBuilder:
         abd: AffineBodyConstitution | None = None,
         contact_elem: Any | None = None,
         kappa: float = 100 * MPa,
+        joint_range: tuple[int, int] | None = None,
     ) -> None:
         self._model = model
         self._scene = scene
@@ -78,6 +79,8 @@ class ArticulationBuilder:
         self._abd = abd or AffineBodyConstitution()
         self._contact_elem = contact_elem
         self._kappa = kappa
+        # When set, only joints in [start, end) are processed.
+        self._joint_range = joint_range
 
         # Per-articulation runtime objects (populated by build_joints)
         self.articulations: dict[int, Articulation] = {}
@@ -116,30 +119,21 @@ class ArticulationBuilder:
         if any(a is None for a in required):
             return
 
-        # NumPy snapshots of model arrays
-        joint_type_np = model.joint_type.numpy()
-        joint_parent_np = model.joint_parent.numpy()
-        joint_child_np = model.joint_child.numpy()
-        joint_X_p_np = model.joint_X_p.numpy()
-        joint_X_c_np = model.joint_X_c.numpy() if model.joint_X_c is not None else None
-        joint_axis_np = model.joint_axis.numpy()
-        joint_q_start_np = model.joint_q_start.numpy()
-        joint_qd_start_np = model.joint_qd_start.numpy()
+        # Determine joint iteration range
+        jstart, jend = self._joint_range if self._joint_range else (0, model.joint_count)
 
-        joint_articulation_np = (
+        # Collect articulation indices referenced by joints in range
+        joint_articulation = (
             model.joint_articulation.numpy()
             if model.joint_articulation is not None
             else np.zeros(model.joint_count, dtype=np.int32)
         )
+        art_indices_in_range = set()
+        for j in range(jstart, jend):
+            art_indices_in_range.add(int(joint_articulation[j]))
 
-        joint_limit_lower_np = model.joint_limit_lower.numpy() if model.joint_limit_lower is not None else None
-        joint_limit_upper_np = model.joint_limit_upper.numpy() if model.joint_limit_upper is not None else None
-
-        state = model.state()
-        joint_q_np = state.joint_q.numpy() if state.joint_q is not None else None
-
-        # Create Articulation objects up front
-        for a in range(max(model.articulation_count, 1)):
+        # Create Articulation objects for referenced articulations
+        for a in art_indices_in_range:
             label = (
                 model.articulation_label[a]
                 if (model.articulation_label and a < len(model.articulation_label))
@@ -147,11 +141,12 @@ class ArticulationBuilder:
             )
             self.articulations[a] = Articulation(name=label, dt=self._dt)
 
-        # Process each joint
-        for j in range(model.joint_count):
-            joint_type = JointType(joint_type_np[j])
-            parent_body = int(joint_parent_np[j])
-            child_body = int(joint_child_np[j])
+        # Process each joint in range
+        state = model.state()
+        for j in range(jstart, jend):
+            joint_type = JointType(model.joint_type.numpy()[j])
+            parent_body = int(model.joint_parent.numpy()[j])
+            child_body = int(model.joint_child.numpy()[j])
 
             if child_body not in self._mapping.body_geo_slots:
                 continue
@@ -160,7 +155,7 @@ class ArticulationBuilder:
             parent_slot = self._mapping.body_geo_slots.get(parent_body)
 
             # Joint world-frame transform
-            jp_tf = joint_X_p_np[j]
+            jp_tf = model.joint_X_p.numpy()[j]
             jp_mat = newton_transform_to_mat4(jp_tf[:3], jp_tf[3:])
             if parent_body >= 0 and body_transforms is not None:
                 joint_world_mat = body_transforms[parent_body] @ jp_mat
@@ -169,7 +164,7 @@ class ArticulationBuilder:
             pivot = joint_world_mat[:3, 3].copy()
 
             # Resolve owning articulation
-            art_idx = int(joint_articulation_np[j])
+            art_idx = int(joint_articulation[j])
             if art_idx not in self.articulations:
                 self.articulations[art_idx] = Articulation(
                     name=f"articulation_{art_idx}",
@@ -186,12 +181,12 @@ class ArticulationBuilder:
                     joint_world_mat,
                     parent_slot,
                     child_slot,
-                    joint_axis_np,
-                    joint_qd_start_np,
-                    joint_q_start_np,
-                    joint_q_np,
-                    joint_limit_lower_np,
-                    joint_limit_upper_np,
+                    model.joint_axis,
+                    model.joint_qd_start,
+                    model.joint_q_start,
+                    state.joint_q,
+                    model.joint_limit_lower,
+                    model.joint_limit_upper,
                 )
 
             elif joint_type == JointType.PRISMATIC:
@@ -200,13 +195,17 @@ class ArticulationBuilder:
                     j,
                     pivot,
                     joint_world_mat,
+                    parent_body,
                     parent_slot,
+                    child_body,
                     child_slot,
-                    joint_axis_np,
-                    joint_qd_start_np,
-                    joint_q_start_np,
-                    joint_limit_lower_np,
-                    joint_limit_upper_np,
+                    model.joint_axis,
+                    model.joint_qd_start,
+                    model.joint_q_start,
+                    state.joint_q,
+                    model.joint_limit_lower,
+                    model.joint_limit_upper,
+                    body_transforms,
                 )
 
             elif joint_type == JointType.FIXED:
@@ -228,7 +227,8 @@ class ArticulationBuilder:
                 )
 
             elif joint_type == JointType.BALL:
-                child_xform_tf = joint_X_c_np[j] if joint_X_c_np is not None else None
+                joint_X_c = model.joint_X_c.numpy() if model.joint_X_c is not None else None
+                child_xform_tf = joint_X_c[j] if joint_X_c is not None else None
                 self._build_ball_joint(
                     j,
                     pivot,
@@ -314,7 +314,6 @@ class ArticulationBuilder:
                 tabular.insert(self._anchor_contact_elem, self._contact_elem, 0.0, 0.0, False)
         self._anchor_contact_elem.apply_to(sc)
         self._abd.apply_to(sc=sc, kappa=self._kappa, mass_density=1000.0)
-        label_surface(sc)
 
         # Mark as fixed so it doesn't move
         view(sc.instances().find(uipc_builtin.is_fixed))[:] = 1  # type: ignore  # pyright: ignore[reportArgumentType]
@@ -374,12 +373,12 @@ class ArticulationBuilder:
         joint_world_mat: np.ndarray,
         parent_slot: Any,
         child_slot: Any,
-        joint_axis_np: np.ndarray,
-        joint_qd_start_np: np.ndarray,
-        joint_q_start_np: np.ndarray,
-        joint_q_np: np.ndarray | None,
-        joint_limit_lower_np: np.ndarray | None,
-        joint_limit_upper_np: np.ndarray | None,
+        joint_axis: wp.array,
+        joint_qd_start: wp.array,
+        joint_q_start: wp.array,
+        joint_q: wp.array | None,
+        joint_limit_lower: wp.array | None,
+        joint_limit_upper: wp.array | None,
     ) -> None:
         """Create a UIPC revolute joint and register it with *art*."""
         if parent_slot is None:
@@ -388,11 +387,11 @@ class ArticulationBuilder:
                 pivot,
             )
 
-        qd_start = joint_qd_start_np[j]
-        axis_world = joint_world_mat[:3, :3] @ joint_axis_np[qd_start]
+        qd_start = int(joint_qd_start.numpy()[j])
+        axis_world = joint_world_mat[:3, :3] @ joint_axis.numpy()[qd_start]
         axis_world = axis_world / (np.linalg.norm(axis_world) + 1e-12)
 
-        q_start = joint_q_start_np[j]
+        q_start = int(joint_q_start.numpy()[j])
 
         vs = np.array([pivot, pivot + axis_world], dtype=np.float64)
         jm = linemesh(vs, np.array([[0, 1]], dtype=np.int32))
@@ -411,9 +410,9 @@ class ArticulationBuilder:
         # Apply joint limits via UIPC constitution
         lower, upper = self._extract_limits(
             j,
-            joint_q_start_np,
-            joint_limit_lower_np,
-            joint_limit_upper_np,
+            joint_q_start,
+            joint_limit_lower,
+            joint_limit_upper,
         )
         if lower is not None and upper is not None:
             AffineBodyRevoluteJointLimit().apply_to(jm, lower, upper)
@@ -422,7 +421,8 @@ class ArticulationBuilder:
         jslot, _ = jobj.geometries().create(jm)
 
         # Register with the Articulation runtime
-        art.register_joint(j, q_start, int(qd_start), 0.0)
+        init_angle = float(joint_q.numpy()[q_start]) if joint_q is not None else 0.0
+        art.register_joint(j, q_start, qd_start, init_angle)
         art.joint_geo_slots[j] = jslot
         art.joint_mesh[j] = jm
 
@@ -440,13 +440,17 @@ class ArticulationBuilder:
         j: int,
         pivot: np.ndarray,
         joint_world_mat: np.ndarray,
+        parent_body: int,
         parent_slot: Any,
+        child_body: int,
         child_slot: Any,
-        joint_axis_np: np.ndarray,
-        joint_qd_start_np: np.ndarray,
-        joint_q_start_np: np.ndarray,
-        joint_limit_lower_np: np.ndarray | None,
-        joint_limit_upper_np: np.ndarray | None,
+        joint_axis: wp.array,
+        joint_qd_start: wp.array,
+        joint_q_start: wp.array,
+        joint_q: wp.array | None,
+        joint_limit_lower: wp.array | None,
+        joint_limit_upper: wp.array | None,
+        body_transforms: np.ndarray | None,
     ) -> None:
         """Create a UIPC prismatic joint and register it with *art*."""
         if parent_slot is None:
@@ -455,13 +459,13 @@ class ArticulationBuilder:
                 pivot,
             )
 
-        qd_start = joint_qd_start_np[j]
-        axis_world = joint_world_mat[:3, :3] @ joint_axis_np[qd_start]
+        qd_start = int(joint_qd_start.numpy()[j])
+        axis_world = joint_world_mat[:3, :3] @ joint_axis.numpy()[qd_start]
         axis_world = axis_world / (np.linalg.norm(axis_world) + 1e-12)
 
-        q_start = joint_q_start_np[j]
+        q_start = int(joint_q_start.numpy()[j])
 
-        vs = np.array([pivot, pivot - axis_world], dtype=np.float64)
+        vs = np.array([pivot, pivot + axis_world], dtype=np.float64)
         jm = linemesh(vs, np.array([[0, 1]], dtype=np.int32))
 
         AffineBodyPrismaticJoint().apply_to(
@@ -478,18 +482,31 @@ class ArticulationBuilder:
         # Apply joint limits via UIPC constitution
         lower, upper = self._extract_limits(
             j,
-            joint_q_start_np,
-            joint_limit_lower_np,
-            joint_limit_upper_np,
+            joint_q_start,
+            joint_limit_lower,
+            joint_limit_upper,
         )
         if lower is not None and upper is not None:
             AffineBodyPrismaticJointLimit().apply_to(jm, lower, upper)
 
+        # Compute init_distance from parent/child body world positions
+        # projected onto the joint axis direction.
+        if body_transforms is not None and parent_body >= 0:
+            parent_pos = body_transforms[parent_body][:3, 3]
+            child_pos = body_transforms[child_body][:3, 3]
+            init_dist = float(np.dot(child_pos - parent_pos, axis_world))
+        elif body_transforms is not None:
+            # Parent is world (fixed anchor at pivot)
+            child_pos = body_transforms[child_body][:3, 3]
+            init_dist = float(np.dot(child_pos - pivot, axis_world))
+        else:
+            init_dist = float(joint_q.numpy()[q_start]) if joint_q is not None else 0.0
+        print("init_dist", init_dist)
+        view(jm.edges().find("init_distance"))[0] = init_dist  # ty:ignore[no-matching-overload]  # pyright: ignore[reportArgumentType]
+
         jobj = self._scene.objects().create(f"joint_{j}_prismatic")
         jslot, _ = jobj.geometries().create(jm)
-
-        # Register with the Articulation runtime
-        art.register_joint(j, int(q_start), int(qd_start))
+        art.register_joint(j, q_start, qd_start, init_dist)
         art.joint_geo_slots[j] = jslot
         art.joint_mesh[j] = jm
 
@@ -583,25 +600,25 @@ class ArticulationBuilder:
     @staticmethod
     def _extract_limits(
         j: int,
-        joint_q_start_np: np.ndarray,
-        joint_limit_lower_np: np.ndarray | None,
-        joint_limit_upper_np: np.ndarray | None,
+        joint_q_start: wp.array,
+        joint_limit_lower: wp.array | None,
+        joint_limit_upper: wp.array | None,
     ) -> tuple[float | None, float | None]:
         """Extract joint limits from model arrays.
 
         Args:
             j: Newton joint index.
-            joint_q_start_np: Joint position-coordinate start indices.
-            joint_limit_lower_np: Lower limit array, or ``None``.
-            joint_limit_upper_np: Upper limit array, or ``None``.
+            joint_q_start: Joint position-coordinate start indices.
+            joint_limit_lower: Lower limit array, or ``None``.
+            joint_limit_upper: Upper limit array, or ``None``.
 
         Returns:
             ``(lower, upper)`` floats, either or both may be ``None``
             if no limit is defined.
         """
-        q_start = joint_q_start_np[j]
-        lower = float(joint_limit_lower_np[q_start]) if joint_limit_lower_np is not None else None
-        upper = float(joint_limit_upper_np[q_start]) if joint_limit_upper_np is not None else None
+        q_start = int(joint_q_start.numpy()[j])
+        lower = float(joint_limit_lower.numpy()[q_start]) if joint_limit_lower is not None else None
+        upper = float(joint_limit_upper.numpy()[q_start]) if joint_limit_upper is not None else None
         return lower, upper
 
     # ------------------------------------------------------------------
@@ -624,22 +641,26 @@ class ArticulationBuilder:
         if model.joint_type is None or model.joint_q_start is None or model.joint_qd_start is None:
             return
 
-        joint_type_np = model.joint_type.numpy()
-        joint_q_start_np = model.joint_q_start.numpy()
-        joint_qd_start_np = model.joint_qd_start.numpy()
-        target_pos_np = control.joint_target_pos.numpy() if control.joint_target_pos is not None else None
-        target_vel_np = control.joint_target_vel.numpy() if control.joint_target_vel is not None else None
-        joint_f_np = control.joint_f.numpy() if control.joint_f is not None else None
+        if model.joint_target_mode is None:
+            return
+
+        # Ensure model arrays are on CPU for the kernel
+        joint_type_cpu = model.joint_type.to("cpu")
+        joint_target_mode_cpu = model.joint_target_mode.to("cpu")
+
+        # Control arrays (per-step, may be None)
+        target_pos_cpu = control.joint_target_pos.to("cpu") if control.joint_target_pos is not None else None
+        target_vel_cpu = control.joint_target_vel.to("cpu") if control.joint_target_vel is not None else None
+        joint_f_cpu = control.joint_f.to("cpu") if control.joint_f is not None else None
 
         for art in self.articulations.values():
             if art.num_active_joints > 0:
                 art.cache_control(
-                    joint_type_np,
-                    joint_q_start_np,
-                    joint_qd_start_np,
-                    target_pos_np,
-                    target_vel_np,
-                    joint_f_np,
+                    joint_type_cpu,
+                    joint_target_mode_cpu,
+                    target_pos_cpu,
+                    target_vel_cpu,
+                    joint_f_cpu,
                 )
 
     def write_joint_readback(self, state_out: State) -> None:
@@ -655,26 +676,21 @@ class ArticulationBuilder:
         if model.joint_q_start is None or model.joint_qd_start is None:
             return
 
-        has_q = state_out.joint_q is not None
-        if not has_q:
+        if state_out.joint_q is None:
             return
 
-        joint_q_out = state_out.joint_q.numpy()
-        joint_qd_out = state_out.joint_qd.numpy() if state_out.joint_qd is not None else None
+        # CPU staging arrays for the kernel to scatter into
+        joint_q_cpu = state_out.joint_q.to("cpu")
+        joint_qd_cpu = state_out.joint_qd.to("cpu") if state_out.joint_qd is not None else None
 
         for art in self.articulations.values():
             if art.num_active_joints > 0:
-                art.write_readback(joint_q_out, joint_qd_out)
+                art.write_readback(joint_q_cpu, joint_qd_cpu)
 
-        state_out.joint_q.assign(wp.from_numpy(joint_q_out, dtype=wp.float32, device=model.device))
-        if joint_qd_out is not None:
-            state_out.joint_qd.assign(
-                wp.from_numpy(
-                    joint_qd_out,
-                    dtype=wp.float32,
-                    device=model.device,
-                )
-            )
+        # Copy back to device
+        wp.copy(state_out.joint_q, joint_q_cpu)
+        if joint_qd_cpu is not None and state_out.joint_qd is not None:
+            wp.copy(state_out.joint_qd, joint_qd_cpu)
 
     def increment_step(self) -> None:
         """Increment the step counter on all articulations."""

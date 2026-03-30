@@ -41,6 +41,7 @@ class RigidBodyBuilder:
         mapping: UIpcMappingInfo,
         kappa: float,
         default_mass_density: float,
+        body_range: tuple[int, int] | None = None,
     ):
         self._model = model
         self._scene = scene
@@ -49,6 +50,8 @@ class RigidBodyBuilder:
         self._mapping = mapping
         self._kappa = kappa
         self._default_mass_density = default_mass_density
+        # When set, only bodies in [start, end) are processed.
+        self._body_range = body_range
 
     def build_ground_planes(self) -> np.ndarray | None:
         """Create UIPC halfplanes for Newton ground plane shapes (body == -1).
@@ -78,7 +81,6 @@ class RigidBodyBuilder:
                 center = tf[:3].copy()
 
                 g = halfplane(center.astype(np.float64), normal.astype(np.float64))
-                print(center, normal)
                 ground_obj = self._scene.objects().create(f"ground_plane_{s}")
                 ground_obj.geometries().create(g)
 
@@ -93,9 +95,10 @@ class RigidBodyBuilder:
             return
 
         shape_body_np = model.shape_body.numpy()
+        bstart, bend = self._body_range if self._body_range else (0, model.body_count)
         for s in range(model.shape_count):
             b = shape_body_np[s]
-            if b >= 0:
+            if bstart <= b < bend:
                 self._mapping.body_shapes[b].append(s)
 
     def build_affine_bodies(self, body_transforms: np.ndarray | None) -> None:
@@ -122,7 +125,8 @@ class RigidBodyBuilder:
         body_q_np = state.body_q.numpy()
         body_flags_np = model.body_flags.numpy()
 
-        for b in range(model.body_count):
+        bstart, bend = self._body_range if self._body_range else (0, model.body_count)
+        for b in range(bstart, bend):
             mesh_data = build_body_mesh(model, b)
             if mesh_data is None:
                 warnings.warn(f"Body {b}: no mesh shapes found, skipping", stacklevel=2)

@@ -110,7 +110,7 @@ class Example:
         b_pri = builder.add_link(
             xform=wp.transform(
                 p=wp.vec3(x, drop_y - cuboid_hy, 0.0),
-                q=wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), 0.12),
+                q=wp.quat_identity(),
             ),
             label="b_pri",
         )
@@ -164,6 +164,7 @@ class Example:
                 p=wp.vec3(x, drop_y + radius + cuboid_hy + y_offset, 0.0),
                 q=wp.quat_identity(),
             ),
+            is_kinematic=True,
         )
         b_ball = builder.add_link(
             xform=wp.transform(
@@ -183,7 +184,7 @@ class Example:
             parent=-1,
             child=a_ball,
             parent_xform=wp.transform(
-                p=wp.vec3(x, drop_y + radius + cuboid_hz + y_offset, 0.0),
+                p=wp.vec3(x, drop_y + radius + cuboid_hy + y_offset, 0.0),
                 q=wp.quat_identity(),
             ),
             child_xform=wp.transform(

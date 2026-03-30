@@ -48,6 +48,7 @@ class ClothBuilder:
         default_thickness: float = 0.001,
         default_poisson_ratio: float = 0.3,
         default_bending_stiffness: float = 0.01,
+        particle_range: tuple[int, int] | None = None,
     ):
         self._model = model
         self._scene = scene
@@ -56,6 +57,8 @@ class ClothBuilder:
         self._default_thickness = default_thickness
         self._default_poisson_ratio = default_poisson_ratio
         self._default_bending_stiffness = default_bending_stiffness
+        # When set, only particles in [start, end) are considered.
+        self._particle_range = particle_range
 
     @property
     def has_cloth(self) -> bool:
@@ -79,6 +82,11 @@ class ClothBuilder:
 
         # Identify cloth particles: referenced by triangles but NOT by tetrahedra
         tri_particle_set = set(tri_indices_np.flatten())
+
+        # Filter by particle range if specified
+        if self._particle_range is not None:
+            pstart, pend = self._particle_range
+            tri_particle_set = {p for p in tri_particle_set if pstart <= p < pend}
 
         tet_particle_set: set[int] = set()
         if model.tet_count > 0 and model.tet_indices is not None:
