@@ -43,15 +43,15 @@ class Example:
         cartpole.joint_q[-3:] = [0.0, 0.3, 0.0]
 
         if self.world_count > 1:
-            builder = newton.ModelBuilder()
-            builder.replicate(cartpole, self.world_count, spacing=(1.0, 0.0, 2.0))
+            builder = newton.ModelBuilder(newton.Axis.Y)
+            builder.replicate(cartpole, self.world_count, spacing=(0.1, 0.0, 0.2))
         else:
             builder = cartpole
 
         self.model = builder.finalize()
         self.state_0 = self.model.state()
 
-        self.solver = newton.solvers.SolverUIPC(self.model, dt=self.sim_dt, logger_level=uipc.Logger.Info)
+        self.solver = newton.solvers.SolverUIPC(self.model, dt=self.sim_dt, logger_level=uipc.Logger.Critical)
 
         self.state_1 = self.model.state()
         self.control = self.model.control()
@@ -59,7 +59,7 @@ class Example:
 
         self.viewer.set_model(self.model)
         self.viewer.set_camera(
-            pos=wp.vec3(5.0, 3.0, 8.0),
+            pos=wp.vec3(9.5, 3.5, 5),
             pitch=-10.0,
             yaw=-160.0,
         )

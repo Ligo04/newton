@@ -8,7 +8,7 @@ from __future__ import annotations
 import warnings
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import numpy as np
 import uipc.builtin as uipc_builtin
@@ -17,46 +17,6 @@ from uipc import Quaternion, Transform
 
 from ...geometry import GeoType, Mesh
 from ...sim import Model
-
-if TYPE_CHECKING:
-    from uipc.constitution import AffineBodyConstitution
-    from uipc.core import AffineBodyStateAccessorFeature
-
-    from .articulation_builder import ArticulationBuilder
-    from .cloth import ClothBuilder
-    from .deformable_body import DeformableBodyBuilder
-    from .rigid_body import RigidBodyBuilder
-
-
-@dataclass
-class WorldContext:
-    """Bundles all per-world UIPC state for multi-world simulation.
-
-    Each Newton world maps to one independent UIPC Engine/World/Scene.
-    The builders and mapping use **global** Newton indices so that the
-    existing GPU sync kernels write directly to the correct positions
-    in the Newton state arrays.
-    """
-
-    engine: Any
-    world: Any
-    scene: Any
-    mapping: UIpcMappingInfo
-    abd: Any  # AffineBodyConstitution
-    abd_accessor: Any  # AffineBodyStateAccessorFeature
-    abd_state_geo: Any  # SimplicialComplex
-    transforms_wp: wp.array | None
-    velocities_wp: wp.array | None
-    rigid_body_builder: Any  # RigidBodyBuilder
-    articulation_builder: Any  # ArticulationBuilder
-    cloth_builder: Any | None  # ClothBuilder
-    deformable_builder: Any | None  # DeformableBodyBuilder
-    contact_elem: Any
-    body_offset: int  # body_world_start[w]
-    body_count: int
-    joint_offset: int
-    joint_count: int
-
 
 # ---------------------------------------------------------------------------
 # Warp kernels for batch transform conversion
@@ -262,22 +222,20 @@ def _read_from_backend_kernel(
 # ---------------------------------------------------------------------------
 
 
-def newton_transform_to_mat4(pos: np.ndarray, quat: np.ndarray) -> np.ndarray:
-    """Convert Newton transform (pos, quat) to a 4x4 homogeneous matrix.
+def newton_transform_to_mat4(tf: wp.transform) -> np.ndarray:  # pyright: ignore[reportArgumentType]
+    """Convert a Newton transform to a 4x4 homogeneous matrix.
 
     Args:
-        pos: Translation vector, shape (3,).
-        quat: Quaternion in (x, y, z, w) format (Warp convention), shape (4,).
+        tf: A ``wp.transform`` value (``p``: vec3, ``q``: quat).
 
     Returns:
         4x4 homogeneous transformation matrix (float64).
     """
-    x, y, z, w = quat.astype(np.float64)
-    px, py, pz = pos.astype(np.float64)
-
+    # Warp stores quaternions as (x, y, z, w) but UIPC Quaternion expects (w, x, y, z)
+    q = tf.q
     tran = Transform.Identity()
-    tran.rotate(Quaternion(wp.quat(w, x, y, z)))
-    tran.pretranslate(wp.vec3(px, py, pz))
+    tran.rotate(Quaternion(wp.quat(q[3], q[0], q[1], q[2])))
+    tran.pretranslate(tf.p)
     return tran.matrix()
 
 
@@ -320,11 +278,18 @@ class UIpcMappingInfo:
 # ---------------------------------------------------------------------------
 
 
-def _transform_points(points: np.ndarray, pos: np.ndarray, quat: np.ndarray, scale: np.ndarray) -> np.ndarray:
-    """Apply Newton shape transform (pos, quat, scale) to mesh points."""
+def _transform_points(points: np.ndarray, tf: wp.transform, scale: np.ndarray) -> np.ndarray:  # pyright: ignore[reportArgumentType]
+    """Apply Newton shape transform to mesh points.
+
+    Args:
+        points: Vertex positions, shape ``(N, 3)``.
+        tf: A ``wp.transform`` value.
+        scale: Per-axis scale factors, shape ``(3,)``.
+    """
     scaled = points * scale
-    mat = newton_transform_to_mat4(pos, quat)
+    mat = newton_transform_to_mat4(tf)
     rot = mat[:3, :3]
+    pos = mat[:3, 3]
     return (rot @ scaled.T).T + pos
 
 
@@ -404,9 +369,7 @@ def build_body_mesh(model: Model, body_idx: int) -> tuple[np.ndarray, np.ndarray
 
     for s in shape_indices:
         geo_type = GeoType(shape_type_np[s])
-        tf = shape_transform_np[s]
-        pos = tf[:3].astype(np.float64)
-        quat = tf[3:].astype(np.float64)
+        tf_np = shape_transform_np[s]
         scale = shape_scale_np[s]
 
         verts = None
@@ -452,12 +415,13 @@ def build_body_mesh(model: Model, body_idx: int) -> tuple[np.ndarray, np.ndarray
         if verts is not None and faces is not None:
             effective_scale = np.ones(3) if scale_baked else scale.astype(np.float64)
             is_identity = (
-                np.allclose(pos, 0.0, atol=1e-7)
-                and np.allclose(quat, [0, 0, 0, 1], atol=1e-7)
+                np.allclose(tf_np[:3], 0.0, atol=1e-7)
+                and np.allclose(tf_np[3:], [0, 0, 0, 1], atol=1e-7)
                 and np.allclose(effective_scale, 1.0, atol=1e-7)
             )
             if not is_identity:
-                verts = _transform_points(verts, pos, quat, effective_scale)
+                tf_wp = wp.transform(tf_np[:3], tf_np[3:])
+                verts = _transform_points(verts, tf_wp, effective_scale)
             all_faces.append(faces + vert_offset)
             all_verts.append(verts)
             vert_offset += len(verts)

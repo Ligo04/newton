@@ -55,8 +55,10 @@ class Example:
         builder.replicate(cartpole, self.world_count, spacing=(1.0, 2.0, 0.0))
 
         # finalize model
+        builder.color()
         self.model = builder.finalize()
 
+        # self.solver = newton.solvers.SolverVBD(self.model)
         self.solver = newton.solvers.SolverMuJoCo(self.model)
         # self.solver = newton.solvers.SolverSemiImplicit(self.model, joint_attach_ke=1600.0, joint_attach_kd=20.0)
         # self.solver = newton.solvers.SolverFeatherstone(self.model)
@@ -64,7 +66,7 @@ class Example:
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
         self.control = self.model.control()
-        # we do not need to evaluate contacts for this example
+        # we do not need to evaluate contacts for this exajoint_qmple
         self.contacts = None
 
         # Evaluating forward kinematics is needed only for maximal-coordinate solvers
@@ -83,6 +85,7 @@ class Example:
             self.viewer.camera.fov = 90.0
 
         self.capture()
+        self.viewer._paused = True
 
     def capture(self):
         self.graph = None
@@ -129,34 +132,37 @@ class Example:
             self.model,
             self.state_0,
             "cart only moves along y direction",
-            lambda q, qd: qd[0] == 0.0
-            and abs(qd[1]) > 0.05
-            and qd[2] == 0.0
-            and wp.length_sq(wp.spatial_bottom(qd)) == 0.0,
+            lambda q, qd: (
+                qd[0] == 0.0 and abs(qd[1]) > 0.05 and qd[2] == 0.0 and wp.length_sq(wp.spatial_bottom(qd)) == 0.0
+            ),
             indices=[i * num_bodies_per_world for i in range(self.world_count)],
         )
         newton.examples.test_body_state(
             self.model,
             self.state_0,
             "pole1 only has y-axis linear velocity and x-axis angular velocity",
-            lambda q, qd: qd[0] == 0.0
-            and abs(qd[1]) > 0.05
-            and qd[2] == 0.0
-            and abs(qd[3]) > 0.3
-            and qd[4] == 0.0
-            and qd[5] == 0.0,
+            lambda q, qd: (
+                qd[0] == 0.0
+                and abs(qd[1]) > 0.05
+                and qd[2] == 0.0
+                and abs(qd[3]) > 0.3
+                and qd[4] == 0.0
+                and qd[5] == 0.0
+            ),
             indices=[i * num_bodies_per_world + 1 for i in range(self.world_count)],
         )
         newton.examples.test_body_state(
             self.model,
             self.state_0,
             "pole2 only has yz-plane linear velocity and x-axis angular velocity",
-            lambda q, qd: qd[0] == 0.0
-            and abs(qd[1]) > 0.05
-            and abs(qd[2]) > 0.05
-            and abs(qd[3]) > 0.2
-            and qd[4] == 0.0
-            and qd[5] == 0.0,
+            lambda q, qd: (
+                qd[0] == 0.0
+                and abs(qd[1]) > 0.05
+                and abs(qd[2]) > 0.05
+                and abs(qd[3]) > 0.2
+                and qd[4] == 0.0
+                and qd[5] == 0.0
+            ),
             indices=[i * num_bodies_per_world + 2 for i in range(self.world_count)],
         )
         qd = self.state_0.body_qd.numpy()
