@@ -70,12 +70,15 @@ class DeformableBodyBuilder:
         contact_elem: Any,
         mapping: UIpcMappingInfo,
         default_mass_density: float = 1000.0,
+        particle_range: tuple[int, int] | None = None,
     ):
         self._model = model
         self._scene = scene
         self._contact_elem = contact_elem
         self._mapping = mapping
         self._default_mass_density = default_mass_density
+        # When set, only particles in [start, end) are considered.
+        self._particle_range = particle_range
 
     @property
     def has_deformable(self) -> bool:
@@ -99,7 +102,14 @@ class DeformableBodyBuilder:
         tet_count = model.tet_count
 
         # Identify deformable particles: all particles referenced by tetrahedra
-        tet_particle_set = sorted(set(tet_indices_np.flatten()))
+        tet_particle_set_raw = set(tet_indices_np.flatten())
+
+        # Filter by particle range if specified
+        if self._particle_range is not None:
+            pstart, pend = self._particle_range
+            tet_particle_set_raw = {p for p in tet_particle_set_raw if pstart <= p < pend}
+
+        tet_particle_set = sorted(tet_particle_set_raw)
         if not tet_particle_set:
             return
 

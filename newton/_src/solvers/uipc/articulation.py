@@ -10,27 +10,88 @@ logic that creates these objects lives in :mod:`.articulation_builder`.
 
 from __future__ import annotations
 
-from enum import IntEnum
 from typing import Any
 
 import numpy as np
+import warp as wp
 from uipc import view
 from uipc.core import Animation as UIPCAnimation
 
-from ...sim import JointType
+from ...sim import JointTargetMode, JointType
+
+# -- Warp kernels (CPU) ---------------------------------------------------
 
 
-class JointControlMode(IntEnum):
-    """Control mode for UIPC-backed joints.
+@wp.kernel
+def _cache_control_kernel(
+    active_joints: wp.array(dtype=wp.int32),
+    local_q_start: wp.array(dtype=wp.int32),
+    local_qd_start: wp.array(dtype=wp.int32),
+    joint_type: wp.array(dtype=wp.int32),
+    joint_target_mode: wp.array(dtype=wp.int32),
+    target_pos: wp.array(dtype=wp.float32),
+    target_vel: wp.array(dtype=wp.float32),
+    joint_f: wp.array(dtype=wp.float32),
+    has_target_pos: int,
+    has_target_vel: int,
+    has_joint_f: int,
+    # outputs (double precision for UIPC)
+    out_target_pos: wp.array(dtype=wp.float64),
+    out_target_vel: wp.array(dtype=wp.float64),
+    out_target_force: wp.array(dtype=wp.float64),
+    out_is_constrained: wp.array(dtype=wp.int32),
+    out_is_force_constrained: wp.array(dtype=wp.int32),
+):
+    local = wp.tid()
+    newton_idx = active_joints[local]
+    jtype = joint_type[newton_idx]
 
-    - ``NONE``:     No position/velocity driving.  Use effort for force/torque.
-    - ``POSITION``: Position-target driving.
-    - ``VELOCITY``: Velocity-target driving.
-    """
+    if jtype != JointType.REVOLUTE and jtype != JointType.PRISMATIC:
+        return
 
-    NONE = 0
-    POSITION = 1
-    VELOCITY = 2
+    q_idx = local_q_start[local]
+    qd_idx = local_qd_start[local]
+    mode = joint_target_mode[qd_idx]
+
+    # Position driving (POSITION or POSITION_VELOCITY)
+    if mode == JointTargetMode.POSITION or mode == JointTargetMode.POSITION_VELOCITY:
+        out_is_constrained[local] = 1
+        if has_target_pos != 0:
+            out_target_pos[local] = wp.float64(target_pos[q_idx])
+    else:
+        out_is_constrained[local] = 0
+
+    # Velocity target
+    if has_target_vel != 0:
+        out_target_vel[local] = wp.float64(target_vel[qd_idx])
+
+    # Force/torque control (EFFORT mode)
+    if mode == JointTargetMode.EFFORT and has_joint_f != 0:
+        out_target_force[local] = wp.float64(joint_f[qd_idx])
+        out_is_force_constrained[local] = 1
+    else:
+        out_is_force_constrained[local] = 0
+
+
+@wp.kernel
+def _write_readback_kernel(
+    local_q_start: wp.array(dtype=wp.int32),
+    local_qd_start: wp.array(dtype=wp.int32),
+    joint_position: wp.array(dtype=wp.float64),
+    joint_velocity: wp.array(dtype=wp.float64),
+    joint_q_out: wp.array(dtype=wp.float32),
+    joint_qd_out: wp.array(dtype=wp.float32),
+    has_qd: int,
+):
+    local = wp.tid()
+    joint_q_out[local_q_start[local]] = wp.float32(joint_position[local])
+    if has_qd != 0:
+        joint_qd_out[local_qd_start[local]] = wp.float32(joint_velocity[local])
+
+
+# -- Placeholder for empty warp arrays passed to kernels -------------------
+_EMPTY_F32 = wp.zeros(1, dtype=wp.float32, device="cpu")
+_EMPTY_F64 = wp.zeros(1, dtype=wp.float64, device="cpu")
 
 
 class Articulation:
@@ -39,6 +100,11 @@ class Articulation:
     Manages UIPC joint geometry references, per-joint control caching,
     UIPC :class:`Animator` callbacks, and state readback for every joint
     that belongs to one Newton articulation.
+
+    All internal state and control cache arrays are stored as
+    ``wp.array(device="cpu")``.  Numpy views (zero-copy on CPU) are
+    maintained for fast element-wise access inside UIPC animation
+    callbacks.
 
     State arrays have shape ``(J,)`` where *J* is the number of *active*
     (driven) joints — currently :attr:`~newton.JointType.REVOLUTE` and
@@ -52,15 +118,15 @@ class Articulation:
        :meth:`register_joint` / :meth:`set_joint_limits` for every
        active joint discovered during the build.
     2. After all joints are registered, :meth:`setup_state` allocates
-       the numpy arrays.
+       the warp arrays and numpy views.
     3. Each simulation step:
 
-       a. :meth:`cache_control` copies Newton ``Control`` values into
-          the internal cache arrays.
+       a. :meth:`cache_control` launches a warp kernel to copy Newton
+          ``Control`` values into the internal cache arrays.
        b. UIPC ``world.advance()`` fires the registered animation
           callbacks (:meth:`revolute_joint_anim`, :meth:`prismatic_joint_anim`).
-       c. :meth:`write_readback` copies the latest joint positions
-          and velocities back into Newton ``State`` arrays.
+       c. :meth:`write_readback` launches a warp kernel to scatter the
+          latest joint positions and velocities back into Newton arrays.
        d. :meth:`increment_step` bumps the internal frame counter.
     """
 
@@ -87,16 +153,19 @@ class Articulation:
         # -- Build-time temporaries (consumed by setup_state) -----------
         self._init_values: dict[int, float] = {}
 
-        # -- State arrays (allocated by setup_state) --------------------
-        self.joint_position: np.ndarray | None = None  # (J,)
-        self.joint_velocity: np.ndarray | None = None  # (J,)
+        # -- Warp arrays on CPU (allocated by setup_state) --------------
+        self.joint_position: wp.array | None = None  # (J,) float64
+        self.joint_velocity: wp.array | None = None  # (J,) float64
+        self.target_position: wp.array | None = None  # (J,) float64
+        self.target_velocity: wp.array | None = None  # (J,) float64
+        self.target_force: wp.array | None = None  # (J,) float64
+        self.is_constrained: wp.array | None = None  # (J,) int32
+        self.is_force_constrained: wp.array | None = None  # (J,) int32
 
-        # -- Control cache arrays (allocated by setup_state) ------------
-        self.target_position: np.ndarray | None = None  # (J,)
-        self.target_velocity: np.ndarray | None = None  # (J,)
-        self.target_force: np.ndarray | None = None  # (J,)
-        self.is_constrained: np.ndarray | None = None  # (J,) bool
-        self.has_force: np.ndarray | None = None  # (J,) bool
+        # -- Mapping arrays for kernel dispatch (allocated by setup_state)
+        self._active_joints_wp: wp.array | None = None  # (J,) int32
+        self._local_q_start_wp: wp.array | None = None  # (J,) int32
+        self._local_qd_start_wp: wp.array | None = None  # (J,) int32
 
     # ------------------------------------------------------------------
     # Properties
@@ -142,28 +211,43 @@ class Articulation:
     # ------------------------------------------------------------------
 
     def setup_state(self) -> None:
-        """Allocate state and control arrays.
+        """Allocate warp arrays and numpy views.
 
         Must be called after all joints are registered via
         :meth:`register_joint`.
         """
         J = self.num_active_joints
 
-        # Readback state
-        self.joint_position = np.zeros(J, dtype=np.float32)
-        self.joint_velocity = np.zeros(J, dtype=np.float32)
+        # -- Mapping arrays for kernel dispatch ----------------------------
+        active_np = np.array(self.active_joint_indices, dtype=np.int32)
+        q_starts = np.array(
+            [self._joint_q_start[idx] for idx in self.active_joint_indices],
+            dtype=np.int32,
+        )
+        qd_starts = np.array(
+            [self._joint_qd_start[idx] for idx in self.active_joint_indices],
+            dtype=np.int32,
+        )
+        self._active_joints_wp = wp.array(active_np, dtype=wp.int32, device="cpu")
+        self._local_q_start_wp = wp.array(q_starts, dtype=wp.int32, device="cpu")
+        self._local_qd_start_wp = wp.array(qd_starts, dtype=wp.int32, device="cpu")
+
+        # -- State arrays (wp.array on CPU) --------------------------------
+        self.joint_position = wp.zeros(J, dtype=wp.float64, device="cpu")
+        self.joint_velocity = wp.zeros(J, dtype=wp.float64, device="cpu")
 
         # Initialise positions from build-time values
+        pos_np = self.joint_position.numpy()
         for newton_idx in self.active_joint_indices:
             local = self._joint_to_local[newton_idx]
-            self.joint_position[local] = self._init_values.get(newton_idx, 0.0)
+            pos_np[local] = self._init_values.get(newton_idx, 0.0)
 
-        # Control cache
-        self.target_position = np.zeros(J, dtype=np.float32)
-        self.target_velocity = np.zeros(J, dtype=np.float32)
-        self.target_force = np.zeros(J, dtype=np.float32)
-        self.is_constrained = np.zeros(J, dtype=bool)
-        self.has_force = np.zeros(J, dtype=bool)
+        # -- Control cache arrays (wp.array on CPU) ------------------------
+        self.target_position = wp.zeros(J, dtype=wp.float64, device="cpu")
+        self.target_velocity = wp.zeros(J, dtype=wp.float64, device="cpu")
+        self.target_force = wp.zeros(J, dtype=wp.float64, device="cpu")
+        self.is_constrained = wp.zeros(J, dtype=wp.int32, device="cpu")
+        self.is_force_constrained = wp.zeros(J, dtype=wp.int32, device="cpu")
 
     def increment_step(self) -> None:
         """Increment internal step counter (call once per simulation step)."""
@@ -197,9 +281,8 @@ class Articulation:
         assert self.joint_position is not None
         assert self.joint_velocity is not None
         assert self.is_constrained is not None
-        assert self.has_force is not None
+        assert self.is_force_constrained is not None
         assert self.target_force is not None
-        assert self.target_velocity is not None
         assert self.target_position is not None
 
         try:
@@ -208,29 +291,30 @@ class Articulation:
             return
 
         local = self._joint_to_local[newton_joint_idx]
-        curr_angle = float(view(geo.edges().find("angle"))[0])
+        pos_np = self.joint_position.numpy()
+        vel_np = self.joint_velocity.numpy()
+        curr_angle = view(geo.edges().find("angle"))[0]
 
-        # Update readback
+        # Update readback (numpy view writes through to wp.array on CPU)
         if self._step_count > 0:
-            self.joint_velocity[local] = (curr_angle - self.joint_position[local]) / self._dt
-        self.joint_position[local] = curr_angle
+            vel_np[local] = (curr_angle - pos_np[local]) / self._dt
+        pos_np[local] = curr_angle
 
         # Constraint and force flags
-        driving = self.is_constrained[local]
-        has_force = self.has_force[local]
-        force_only = has_force and not driving
+        driving = bool(self.is_constrained.numpy()[local])
+        is_force_constrained = bool(self.is_force_constrained.numpy()[local])
+        force_only = is_force_constrained and not driving
 
-        view(geo.edges().find("driving/is_constrained"))[:] = driving.astype(int)
+        view(geo.edges().find("driving/is_constrained"))[:] = int(driving)
         view(geo.edges().find("external_torque/is_constrained"))[:] = int(force_only)
 
         # Force/torque control
         if force_only:
-            view(geo.edges().find("external_force"))[:] = float(self.target_force[local])
+            view(geo.edges().find("external_force"))[:] = self.target_force.numpy()[local]
 
         # Position/velocity driving
         if driving:
-            target = float(self.target_position[local])
-            view(geo.edges().find("aim_angle"))[:] = target
+            view(geo.edges().find("aim_angle"))[:] = self.target_position.numpy()[local]
 
     def prismatic_joint_anim(
         self,
@@ -247,9 +331,8 @@ class Articulation:
         assert self.joint_position is not None
         assert self.joint_velocity is not None
         assert self.is_constrained is not None
-        assert self.has_force is not None
+        assert self.is_force_constrained is not None
         assert self.target_force is not None
-        assert self.target_velocity is not None
         assert self.target_position is not None
 
         try:
@@ -258,27 +341,28 @@ class Articulation:
             return
 
         local = self._joint_to_local[newton_joint_idx]
-        curr_dist = float(view(geo.edges().find("distance"))[0])
-
-        # Update readback
+        pos_np = self.joint_position.numpy()
+        vel_np = self.joint_velocity.numpy()
+        curr_dist = view(geo.edges().find("distance"))[0]
+        # print("curr_dist", curr_dist)
+        # Update readback (numpy view writes through to wp.array on CPU)
         if self._step_count > 0:
-            self.joint_velocity[local] = (curr_dist - self.joint_position[local]) / self._dt
-        self.joint_position[local] = curr_dist
+            vel_np[local] = (curr_dist - pos_np[local]) / self._dt
+        pos_np[local] = curr_dist
 
         # Constraint and force flags
-        driving = bool(self.is_constrained[local])
-        has_force = bool(self.has_force[local])
-        force_only = has_force and not driving
+        driving = bool(self.is_constrained.numpy()[local])
+        is_force_constrained = bool(self.is_force_constrained.numpy()[local])
+        force_only = is_force_constrained and not driving
 
         view(geo.edges().find("driving/is_constrained"))[:] = int(driving)
         view(geo.edges().find("external_force/is_constrained"))[:] = int(force_only)
 
         if force_only:
-            view(geo.edges().find("external_force"))[:] = float(self.target_force[local])
+            view(geo.edges().find("external_force"))[:] = self.target_force.numpy()[local]
 
         if driving:
-            target = float(self.target_position[local])
-            view(geo.edges().find("aim_distance"))[:] = target
+            view(geo.edges().find("aim_distance"))[:] = self.target_position.numpy()[local]
 
     # ------------------------------------------------------------------
     # Per-step control caching & state readback
@@ -286,85 +370,92 @@ class Articulation:
 
     def cache_control(
         self,
-        joint_type_np: np.ndarray,
-        joint_q_start_np: np.ndarray,
-        joint_qd_start_np: np.ndarray,
-        target_pos_np: np.ndarray | None,
-        target_vel_np: np.ndarray | None,
-        joint_f_np: np.ndarray | None,
+        joint_type: wp.array,
+        joint_target_mode: wp.array,
+        target_pos: wp.array | None,
+        target_vel: wp.array | None,
+        joint_f: wp.array | None,
     ) -> None:
-        """Cache Newton control values for the animation callbacks.
+        """Cache Newton control values via a warp kernel.
 
         Called once per step **before** ``world.advance()``.
 
+        The :class:`~newton.JointTargetMode` per DOF determines which
+        control path is active:
+
+        - ``POSITION`` / ``POSITION_VELOCITY``: position driving
+          (``is_constrained``).
+        - ``EFFORT``: force/torque control (``is_force_constrained``).
+        - ``NONE`` / ``VELOCITY``: passive, no constraint written.
+
         Args:
-            joint_type_np: Joint types array from the model.
-            joint_q_start_np: Joint position-coordinate start indices.
-            joint_qd_start_np: Joint velocity-DOF start indices.
-            target_pos_np: Target positions from :class:`Control`, or ``None``.
-            target_vel_np: Target velocities from :class:`Control`, or ``None``.
-            joint_f_np: Joint forces from :class:`Control`, or ``None``.
+            joint_type: Joint types array from the model (CPU).
+            joint_target_mode: Per-DOF target mode from the model (CPU).
+            target_pos: Target positions from :class:`Control` (CPU),
+                or ``None``.
+            target_vel: Target velocities from :class:`Control` (CPU),
+                or ``None``.
+            joint_f: Joint forces from :class:`Control` (CPU),
+                or ``None``.
         """
         if not self._ensure_state():
             return
-        assert self.target_position is not None
-        assert self.target_velocity is not None
-        assert self.target_force is not None
-        assert self.is_constrained is not None
-        assert self.has_force is not None
 
-        for newton_idx in self.active_joint_indices:
-            local = self._joint_to_local[newton_idx]
-            jtype = JointType(joint_type_np[newton_idx])
-
-            if jtype not in (JointType.REVOLUTE, JointType.PRISMATIC):
-                continue
-
-            q_idx = joint_q_start_np[newton_idx]
-            qd_idx = joint_qd_start_np[newton_idx]
-
-            # Position target
-            if target_pos_np is not None:
-                self.target_position[local] = target_pos_np[q_idx]
-                self.is_constrained[local] = True
-            else:
-                self.is_constrained[local] = False
-
-            # Velocity target (used as fallback when no position target)
-            if target_vel_np is not None:
-                self.target_velocity[local] = float(target_vel_np[qd_idx])
-
-            # Force/torque
-            if joint_f_np is not None:
-                f = float(joint_f_np[qd_idx])
-                self.target_force[local] = f
-                self.has_force[local] = abs(f) > 1e-12
-            else:
-                self.has_force[local] = False
+        J = self.num_active_joints
+        wp.launch(
+            _cache_control_kernel,
+            dim=J,
+            inputs=[
+                self._active_joints_wp,
+                self._local_q_start_wp,
+                self._local_qd_start_wp,
+                joint_type,
+                joint_target_mode,
+                target_pos if target_pos is not None else _EMPTY_F32,
+                target_vel if target_vel is not None else _EMPTY_F32,
+                joint_f if joint_f is not None else _EMPTY_F32,
+                int(target_pos is not None),
+                int(target_vel is not None),
+                int(joint_f is not None),
+            ],
+            outputs=[
+                self.target_position,
+                self.target_velocity,
+                self.target_force,
+                self.is_constrained,
+                self.is_force_constrained,
+            ],
+            device="cpu",
+        )
 
     def write_readback(
         self,
-        joint_q_out: np.ndarray,
-        joint_qd_out: np.ndarray | None,
+        joint_q_out: wp.array,
+        joint_qd_out: wp.array | None,
     ) -> None:
-        """Write cached joint positions and velocities to Newton arrays.
+        """Scatter cached positions/velocities into Newton arrays via kernel.
 
         Called once per step **after** ``world.advance()``.
 
         Args:
-            joint_q_out: Mutable joint-position array (modified in-place).
-            joint_qd_out: Mutable joint-velocity array, or ``None``.
+            joint_q_out: Mutable joint-position array on CPU.
+            joint_qd_out: Mutable joint-velocity array on CPU, or ``None``.
         """
         if not self._ensure_state():
             return
-        assert self.joint_position is not None
-        assert self.joint_velocity is not None
 
-        for newton_idx in self.active_joint_indices:
-            local = self._joint_to_local[newton_idx]
-            q_start = self._joint_q_start[newton_idx]
-            joint_q_out[q_start] = self.joint_position[local]
-
-            if joint_qd_out is not None:
-                qd_start = self._joint_qd_start[newton_idx]
-                joint_qd_out[qd_start] = self.joint_velocity[local]
+        J = self.num_active_joints
+        wp.launch(
+            _write_readback_kernel,
+            dim=J,
+            inputs=[
+                self._local_q_start_wp,
+                self._local_qd_start_wp,
+                self.joint_position,
+                self.joint_velocity,
+                joint_q_out,
+                joint_qd_out if joint_qd_out is not None else _EMPTY_F32,
+                int(joint_qd_out is not None),
+            ],
+            device="cpu",
+        )

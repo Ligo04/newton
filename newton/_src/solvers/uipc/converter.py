@@ -19,7 +19,43 @@ from ...geometry import GeoType, Mesh
 from ...sim import Model
 
 if TYPE_CHECKING:
-    pass
+    from uipc.constitution import AffineBodyConstitution
+    from uipc.core import AffineBodyStateAccessorFeature
+
+    from .articulation_builder import ArticulationBuilder
+    from .cloth import ClothBuilder
+    from .deformable_body import DeformableBodyBuilder
+    from .rigid_body import RigidBodyBuilder
+
+
+@dataclass
+class WorldContext:
+    """Bundles all per-world UIPC state for multi-world simulation.
+
+    Each Newton world maps to one independent UIPC Engine/World/Scene.
+    The builders and mapping use **global** Newton indices so that the
+    existing GPU sync kernels write directly to the correct positions
+    in the Newton state arrays.
+    """
+
+    engine: Any
+    world: Any
+    scene: Any
+    mapping: UIpcMappingInfo
+    abd: Any  # AffineBodyConstitution
+    abd_accessor: Any  # AffineBodyStateAccessorFeature
+    abd_state_geo: Any  # SimplicialComplex
+    transforms_wp: wp.array | None
+    velocities_wp: wp.array | None
+    rigid_body_builder: Any  # RigidBodyBuilder
+    articulation_builder: Any  # ArticulationBuilder
+    cloth_builder: Any | None  # ClothBuilder
+    deformable_builder: Any | None  # DeformableBodyBuilder
+    contact_elem: Any
+    body_offset: int  # body_world_start[w]
+    body_count: int
+    joint_offset: int
+    joint_count: int
 
 
 # ---------------------------------------------------------------------------

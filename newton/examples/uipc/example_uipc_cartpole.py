@@ -7,7 +7,7 @@
 # Shows how to set up a simulation of a rigid-body cartpole articulation
 # from a USD stage using the SolverUIPC backend.
 #
-# Command: python -m newton.examples uipc_cartpole
+# Command: python -m newton.examples uipc_cartpole --world-count 4
 #
 ###########################################################################
 
@@ -26,20 +26,27 @@ class Example:
         self.sim_substeps = 1
         self.sim_dt = self.frame_dt
 
+        self.world_count = args.world_count
         self.viewer = viewer
 
-        builder = newton.ModelBuilder(up_axis=newton.Axis.Y)
-        builder.default_shape_cfg.density = 100.0
-        builder.default_joint_cfg.armature = 0.1
-        builder.default_body_armature = 0.1
+        cartpole = newton.ModelBuilder(up_axis=newton.Axis.Y)
+        cartpole.default_shape_cfg.density = 100.0
+        cartpole.default_joint_cfg.armature = 0.1
+        cartpole.default_body_armature = 0.1
 
-        builder.add_usd(
+        cartpole.add_usd(
             newton.examples.get_asset("cartpole.usda"),
             enable_self_collisions=False,
             collapse_fixed_joints=True,
         )
         # Set initial joint positions
-        builder.joint_q[-3:] = [0.0, 0.3, 0.0]
+        cartpole.joint_q[-3:] = [0.0, 0.3, 0.0]
+
+        if self.world_count > 1:
+            builder = newton.ModelBuilder()
+            builder.replicate(cartpole, self.world_count, spacing=(1.0, 0.0, 2.0))
+        else:
+            builder = cartpole
 
         self.model = builder.finalize()
         self.state_0 = self.model.state()
@@ -83,6 +90,7 @@ class Example:
         # After simulation the cart should have moved and poles should be swinging.
         # Bodies: 0=cart, 1=pole1, 2=pole2
         # (rail is collapsed into the fixed joint since collapse_fixed_joints=True)
+        num_bodies_per_world = self.model.body_count // self.world_count
 
         # Cart should remain near ground level with correct orientation
         newton.examples.test_body_state(
@@ -90,7 +98,7 @@ class Example:
             self.state_0,
             "cart is near ground level",
             lambda q, qd: abs(float(q[1])) < 1.0,
-            [0],
+            indices=[i * num_bodies_per_world for i in range(self.world_count)],
         )
 
         # Poles should have non-zero angular velocity from swinging
@@ -99,7 +107,7 @@ class Example:
             self.state_0,
             "pole1 is swinging",
             lambda q, qd: abs(qd[3]) > 0.01 or abs(qd[4]) > 0.01 or abs(qd[5]) > 0.01,
-            [1],
+            indices=[i * num_bodies_per_world + 1 for i in range(self.world_count)],
         )
 
         # Poles should still be above ground
@@ -108,18 +116,38 @@ class Example:
             self.state_0,
             "pole1 above ground",
             lambda q, qd: float(q[1]) > -0.5,
-            [1],
+            indices=[i * num_bodies_per_world + 1 for i in range(self.world_count)],
         )
         newton.examples.test_body_state(
             self.model,
             self.state_0,
             "pole2 above ground",
             lambda q, qd: float(q[1]) > -0.5,
-            [2],
+            indices=[i * num_bodies_per_world + 2 for i in range(self.world_count)],
         )
+
+        # Verify cross-world consistency when using multiple worlds
+        if self.world_count > 1:
+            qd = self.state_0.body_qd.numpy()
+            world0_cart_vel = wp.spatial_vector(*qd[0])
+            newton.examples.test_body_state(
+                self.model,
+                self.state_0,
+                "cart velocities match across worlds",
+                lambda q, qd: newton.math.vec_allclose(qd, world0_cart_vel),
+                indices=[i * num_bodies_per_world for i in range(self.world_count)],
+            )
+
+    @staticmethod
+    def create_parser():
+        parser = newton.examples.create_parser()
+        newton.examples.add_world_count_arg(parser)
+        parser.set_defaults(world_count=1)
+        return parser
 
 
 if __name__ == "__main__":
-    viewer, args = newton.examples.init()
+    parser = Example.create_parser()
+    viewer, args = newton.examples.init(parser)
     example = Example(viewer, args)
     newton.examples.run(example, args)
