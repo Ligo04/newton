@@ -10,6 +10,7 @@ from typing import Any
 
 import numpy as np
 import uipc.builtin as uipc_builtin
+import warp as wp
 from uipc import view
 from uipc.constitution import AffineBodyConstitution
 from uipc.geometry import halfplane, label_surface
@@ -30,6 +31,9 @@ class RigidBodyBuilder:
     Converts Newton :class:`~newton.Model` rigid bodies (links with shapes)
     into UIPC ``AffineBodyConstitution`` geometries. Also handles ground plane
     creation and body-shape index mapping.
+
+    A single instance can be reused across multiple Newton worlds by calling
+    the build methods with different ``body_range`` / ``subscene_elem`` arguments.
     """
 
     def __init__(
@@ -37,29 +41,29 @@ class RigidBodyBuilder:
         model: Model,
         scene: Any,
         contact_elem: Any,
-        abd: AffineBodyConstitution,
         mapping: UIpcMappingInfo,
         kappa: float,
         default_mass_density: float,
-        body_range: tuple[int, int] | None = None,
     ):
         self._model = model
         self._scene = scene
         self._contact_elem = contact_elem
-        self._abd = abd
         self._mapping = mapping
         self._kappa = kappa
         self._default_mass_density = default_mass_density
-        # When set, only bodies in [start, end) are processed.
-        self._body_range = body_range
 
-    def build_ground_planes(self) -> np.ndarray | None:
-        """Create UIPC halfplanes for Newton ground plane shapes (body == -1).
+        # Cache host-side numpy views (computed lazily, shared across methods)
+        self._shape_body_np: np.ndarray | None = None
+        self._shape_type_np: np.ndarray | None = None
+        self._shape_transform_np: np.ndarray | None = None
 
-        Returns:
-            Pre-allocated body transform array of shape ``(body_count, 4, 4)``,
-            or ``None`` if there are no bodies.
-        """
+        # Per-body world-frame 4x4 transforms, populated by build_affine_bodies
+        self.body_transforms: np.ndarray | None = None
+
+    def _ensure_shape_cache(self) -> bool:
+        """Populate cached numpy views of shape arrays. Returns False if unavailable."""
+        if self._shape_body_np is not None:
+            return True
         model = self._model
         if (
             model.shape_count == 0
@@ -67,49 +71,93 @@ class RigidBodyBuilder:
             or model.shape_type is None
             or model.shape_transform is None
         ):
-            return None
+            return False
+        self._shape_body_np = model.shape_body.numpy()
+        self._shape_type_np = model.shape_type.numpy()
+        self._shape_transform_np = model.shape_transform.numpy()
+        return True
 
-        shape_body_np = model.shape_body.numpy()
-        shape_type_np = model.shape_type.numpy()
-        shape_transform_np = model.shape_transform.numpy()
+    def build_ground_planes(self) -> None:
+        """Create UIPC halfplanes for Newton ground plane shapes (body == -1)."""
+        model = self._model
+        if not self._ensure_shape_cache():
+            return
+
+        assert self._shape_body_np is not None
+        assert self._shape_type_np is not None
+        assert self._shape_transform_np is not None
 
         for s in range(model.shape_count):
-            if shape_body_np[s] == -1 and GeoType(shape_type_np[s]) == GeoType.PLANE:
-                tf = shape_transform_np[s]
-                mat4 = newton_transform_to_mat4(tf[:3], tf[3:])
+            if self._shape_body_np[s] == -1 and GeoType(self._shape_type_np[s]) == GeoType.PLANE:
+                tf_np = self._shape_transform_np[s]
+                mat4 = newton_transform_to_mat4(wp.transform(tf_np[:3], tf_np[3:]))
                 normal = mat4[:3, 2].copy()
-                center = tf[:3].copy()
+                center = tf_np[:3].astype(np.float64)
 
-                g = halfplane(center.astype(np.float64), normal.astype(np.float64))
+                g = halfplane(center, normal)
                 ground_obj = self._scene.objects().create(f"ground_plane_{s}")
                 ground_obj.geometries().create(g)
 
-        if model.body_count > 0:
-            return np.zeros((model.body_count, 4, 4), dtype=np.float64)
-        return None
+    def build_body_shape_mapping(
+        self,
+        body_range: tuple[int, int] | None = None,
+    ) -> None:
+        """Populate ``mapping.body_shapes``: body_idx -> list of shape indices.
 
-    def build_body_shape_mapping(self) -> None:
-        """Populate ``mapping.body_shapes``: body_idx -> list of shape indices."""
+        Args:
+            body_range: ``(start, end)`` slice of bodies to process, or
+                ``None`` for all bodies.
+        """
         model = self._model
-        if model.shape_count == 0 or model.shape_body is None:
+        if not self._ensure_shape_cache():
             return
 
-        shape_body_np = model.shape_body.numpy()
-        bstart, bend = self._body_range if self._body_range else (0, model.body_count)
+        assert self._shape_body_np is not None
+        bstart, bend = body_range if body_range else (0, model.body_count)
         for s in range(model.shape_count):
-            b = shape_body_np[s]
+            b = self._shape_body_np[s]
             if bstart <= b < bend:
                 self._mapping.body_shapes[b].append(s)
 
-    def build_affine_bodies(self, body_transforms: np.ndarray | None) -> None:
-        """Convert Newton rigid bodies to UIPC AffineBody geometries.
+    @staticmethod
+    def _mesh_volume(verts: np.ndarray, faces: np.ndarray) -> float:
+        """Compute the signed volume of a closed triangle mesh.
+
+        Uses the divergence theorem: V = sum_i (v0 · (v1 \\times v2)) / 6.
 
         Args:
-            body_transforms: Pre-allocated array from :meth:`build_ground_planes`,
-                populated with each body's world-frame 4x4 transform.
+            verts: Vertex positions, shape ``(N, 3)``.
+            faces: Triangle indices, shape ``(M, 3)``.
+
+        Returns:
+            Absolute volume of the mesh.
+        """
+        v0 = verts[faces[:, 0]]
+        v1 = verts[faces[:, 1]]
+        v2 = verts[faces[:, 2]]
+        return float(abs(np.sum(v0 * np.cross(v1, v2)) / 6.0))
+
+    def build_affine_bodies(
+        self,
+        body_range: tuple[int, int] | None = None,
+        subscene_elem: Any | None = None,
+    ) -> None:
+        """Convert Newton rigid bodies to UIPC AffineBody geometries.
+
+        For each body, the effective mass density is computed from the model's
+        ``body_mass`` and the mesh volume. If the mass or volume is unavailable,
+        ``default_mass_density`` is used as a fallback.
+
+        Results are stored in :attr:`body_transforms` (shape ``(body_count, 4, 4)``).
+
+        Args:
+            body_range: ``(start, end)`` slice of bodies to process, or
+                ``None`` for all bodies.
+            subscene_elem: UIPC subscene element to apply to geometries, or
+                ``None`` to skip.
         """
         model = self._model
-        if model.body_count == 0 or body_transforms is None:
+        if model.body_count == 0:
             return
 
         import newton
@@ -122,10 +170,17 @@ class RigidBodyBuilder:
         if state.body_q is None or model.body_flags is None:
             return
 
-        body_q_np = state.body_q.numpy()
-        body_flags_np = model.body_flags.numpy()
+        # Lazily allocate body_transforms (shared across multi-world calls)
+        if self.body_transforms is None:
+            self.body_transforms = np.zeros((model.body_count, 4, 4), dtype=np.float64)
 
-        bstart, bend = self._body_range if self._body_range else (0, model.body_count)
+        # Single numpy conversion per array; pre-build wp.transform list for body_q
+        body_q_np = state.body_q.numpy()
+        body_q_transforms = [wp.transform(row[:3], row[3:]) for row in body_q_np]
+        body_flags_np = model.body_flags.numpy()
+        body_mass_np = model.body_mass.numpy() if model.body_mass is not None else None
+
+        bstart, bend = body_range if body_range else (0, model.body_count)
         for b in range(bstart, bend):
             mesh_data = build_body_mesh(model, b)
             if mesh_data is None:
@@ -135,13 +190,21 @@ class RigidBodyBuilder:
             verts, faces = mesh_data
             sc = uipc_trimesh(verts, faces)
 
-            tf = body_q_np[b]
-            body_mat4 = newton_transform_to_mat4(tf[:3], tf[3:])
-            body_transforms[b] = body_mat4
+            body_mat4 = newton_transform_to_mat4(body_q_transforms[b])
+            self.body_transforms[b] = body_mat4
             view(sc.transforms())[:] = body_mat4
 
+            # Compute per-body mass density from model mass and mesh volume
+            mass_density = self._default_mass_density
+            if body_mass_np is not None:
+                vol = self._mesh_volume(verts, faces)
+                if vol > 1e-12:
+                    mass_density = float(body_mass_np[b]) / vol
+
             self._contact_elem.apply_to(sc)
-            self._abd.apply_to(sc=sc, kappa=self._kappa, mass_density=self._default_mass_density)
+            if subscene_elem is not None:
+                subscene_elem.apply_to(sc)
+            AffineBodyConstitution().apply_to(sc=sc, kappa=self._kappa, mass_density=mass_density)
             label_surface(sc)
 
             is_kinematic = (body_flags_np[b] & int(BodyFlags.KINEMATIC)) != 0

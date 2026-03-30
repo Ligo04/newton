@@ -67,20 +67,16 @@ class ArticulationBuilder:
         scene: Any,
         mapping: UIpcMappingInfo,
         dt: float,
-        abd: AffineBodyConstitution | None = None,
         contact_elem: Any | None = None,
         kappa: float = 100 * MPa,
-        joint_range: tuple[int, int] | None = None,
     ) -> None:
         self._model = model
         self._scene = scene
         self._mapping = mapping
         self._dt = dt
-        self._abd = abd or AffineBodyConstitution()
+        self._abd = AffineBodyConstitution()
         self._contact_elem = contact_elem
         self._kappa = kappa
-        # When set, only joints in [start, end) are processed.
-        self._joint_range = joint_range
 
         # Per-articulation runtime objects (populated by build_joints)
         self.articulations: dict[int, Articulation] = {}
@@ -88,11 +84,19 @@ class ArticulationBuilder:
         # Cache of anchor body geo slots for world-anchored joints
         self._anchor_slots: dict[str, Any] = {}
 
+        # Transient subscene element set per build_joints call
+        self._subscene_elem: Any | None = None
+
     # ------------------------------------------------------------------
     # Build
     # ------------------------------------------------------------------
 
-    def build_joints(self, body_transforms: np.ndarray | None) -> None:
+    def build_joints(
+        self,
+        body_transforms: np.ndarray | None,
+        joint_range: tuple[int, int] | None = None,
+        subscene_elem: Any | None = None,
+    ) -> None:
         """Convert Newton joints to UIPC joint constitutions.
 
         Creates one :class:`Articulation` per Newton articulation, builds
@@ -101,7 +105,13 @@ class ArticulationBuilder:
         Args:
             body_transforms: Body world-frame transforms from the rigid-body
                 builder, shape ``(body_count, 4, 4)``.
+            joint_range: ``(start, end)`` slice of joints to process, or
+                ``None`` for all joints.
+            subscene_elem: UIPC subscene element for anchor bodies, or ``None``.
         """
+        # Store subscene for use by _get_or_create_anchor
+        self._subscene_elem = subscene_elem
+
         model = self._model
         if model.joint_count == 0:
             return
@@ -120,7 +130,7 @@ class ArticulationBuilder:
             return
 
         # Determine joint iteration range
-        jstart, jend = self._joint_range if self._joint_range else (0, model.joint_count)
+        jstart, jend = joint_range if joint_range else (0, model.joint_count)
 
         # Collect articulation indices referenced by joints in range
         joint_articulation = (
@@ -132,17 +142,20 @@ class ArticulationBuilder:
         for j in range(jstart, jend):
             art_indices_in_range.add(int(joint_articulation[j]))
 
-        # Create Articulation objects for referenced articulations
+        # Create Articulation objects for referenced articulations (skip existing)
         for a in art_indices_in_range:
+            if a in self.articulations:
+                continue
             label = (
                 model.articulation_label[a]
-                if (model.articulation_label and a < len(model.articulation_label))
+                if (model.articulation_label and 0 <= a < len(model.articulation_label))
                 else f"articulation_{a}"
             )
             self.articulations[a] = Articulation(name=label, dt=self._dt)
 
         # Process each joint in range
         state = model.state()
+        joint_X_p_np = model.joint_X_p.numpy()
         for j in range(jstart, jend):
             joint_type = JointType(model.joint_type.numpy()[j])
             parent_body = int(model.joint_parent.numpy()[j])
@@ -155,8 +168,8 @@ class ArticulationBuilder:
             parent_slot = self._mapping.body_geo_slots.get(parent_body)
 
             # Joint world-frame transform
-            jp_tf = model.joint_X_p.numpy()[j]
-            jp_mat = newton_transform_to_mat4(jp_tf[:3], jp_tf[3:])
+            jp = joint_X_p_np[j]
+            jp_mat = newton_transform_to_mat4(wp.transform(jp[:3], jp[3:]))
             if parent_body >= 0 and body_transforms is not None:
                 joint_world_mat = body_transforms[parent_body] @ jp_mat
             else:
@@ -313,6 +326,8 @@ class ArticulationBuilder:
             if self._contact_elem is not None:
                 tabular.insert(self._anchor_contact_elem, self._contact_elem, 0.0, 0.0, False)
         self._anchor_contact_elem.apply_to(sc)
+        if self._subscene_elem is not None:
+            self._subscene_elem.apply_to(sc)
         self._abd.apply_to(sc=sc, kappa=self._kappa, mass_density=1000.0)
 
         # Mark as fixed so it doesn't move
@@ -390,7 +405,6 @@ class ArticulationBuilder:
         qd_start = int(joint_qd_start.numpy()[j])
         axis_world = joint_world_mat[:3, :3] @ joint_axis.numpy()[qd_start]
         axis_world = axis_world / (np.linalg.norm(axis_world) + 1e-12)
-
         q_start = int(joint_q_start.numpy()[j])
 
         vs = np.array([pivot, pivot + axis_world], dtype=np.float64)
@@ -410,7 +424,7 @@ class ArticulationBuilder:
         # Apply joint limits via UIPC constitution
         lower, upper = self._extract_limits(
             j,
-            joint_q_start,
+            joint_qd_start,
             joint_limit_lower,
             joint_limit_upper,
         )
@@ -482,7 +496,7 @@ class ArticulationBuilder:
         # Apply joint limits via UIPC constitution
         lower, upper = self._extract_limits(
             j,
-            joint_q_start,
+            joint_qd_start,
             joint_limit_lower,
             joint_limit_upper,
         )
@@ -500,8 +514,7 @@ class ArticulationBuilder:
             child_pos = body_transforms[child_body][:3, 3]
             init_dist = float(np.dot(child_pos - pivot, axis_world))
         else:
-            init_dist = float(joint_q.numpy()[q_start]) if joint_q is not None else 0.0
-        print("init_dist", init_dist)
+            init_dist = 0.0
         view(jm.edges().find("init_distance"))[0] = init_dist  # ty:ignore[no-matching-overload]  # pyright: ignore[reportArgumentType]
 
         jobj = self._scene.objects().create(f"joint_{j}_prismatic")
@@ -600,7 +613,7 @@ class ArticulationBuilder:
     @staticmethod
     def _extract_limits(
         j: int,
-        joint_q_start: wp.array,
+        joint_qd_start: wp.array,
         joint_limit_lower: wp.array | None,
         joint_limit_upper: wp.array | None,
     ) -> tuple[float | None, float | None]:
@@ -608,17 +621,17 @@ class ArticulationBuilder:
 
         Args:
             j: Newton joint index.
-            joint_q_start: Joint position-coordinate start indices.
-            joint_limit_lower: Lower limit array, or ``None``.
-            joint_limit_upper: Upper limit array, or ``None``.
+            joint_qd_start: Joint DOF start indices (limits are per-DOF).
+            joint_limit_lower: Lower limit array, shape ``[joint_dof_count]``, or ``None``.
+            joint_limit_upper: Upper limit array, shape ``[joint_dof_count]``, or ``None``.
 
         Returns:
             ``(lower, upper)`` floats, either or both may be ``None``
             if no limit is defined.
         """
-        q_start = int(joint_q_start.numpy()[j])
-        lower = float(joint_limit_lower.numpy()[q_start]) if joint_limit_lower is not None else None
-        upper = float(joint_limit_upper.numpy()[q_start]) if joint_limit_upper is not None else None
+        qd_start = int(joint_qd_start.numpy()[j])
+        lower = float(joint_limit_lower.numpy()[qd_start]) if joint_limit_lower is not None else None
+        upper = float(joint_limit_upper.numpy()[qd_start]) if joint_limit_upper is not None else None
         return lower, upper
 
     # ------------------------------------------------------------------

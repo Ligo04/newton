@@ -70,28 +70,28 @@ class DeformableBodyBuilder:
         contact_elem: Any,
         mapping: UIpcMappingInfo,
         default_mass_density: float = 1000.0,
-        particle_range: tuple[int, int] | None = None,
     ):
         self._model = model
         self._scene = scene
         self._contact_elem = contact_elem
         self._mapping = mapping
         self._default_mass_density = default_mass_density
-        # When set, only particles in [start, end) are considered.
-        self._particle_range = particle_range
 
     @property
     def has_deformable(self) -> bool:
         """Whether the Newton model contains deformable (tetrahedra) elements."""
         return self._model.tet_count > 0
 
-    def build(self) -> None:
+    def build(
+        self,
+        particle_range: tuple[int, int] | None = None,
+        subscene_elem: Any | None = None,
+    ) -> None:
         """Convert Newton deformable particles and tetrahedra to UIPC deformable objects.
 
-        Extracts tetrahedral connectivity and the referenced particles from the
-        Newton model, remaps indices, creates a UIPC ``tetmesh``, and applies
-        ``StableNeoHookean`` constitution with surface labeling and triangle
-        orientation correction.
+        Args:
+            particle_range: ``(start, end)`` slice of particles, or ``None`` for all.
+            subscene_elem: UIPC subscene element, or ``None``.
         """
         model = self._model
         if model.tet_count == 0 or model.tet_indices is None or model.particle_q is None:
@@ -105,8 +105,8 @@ class DeformableBodyBuilder:
         tet_particle_set_raw = set(tet_indices_np.flatten())
 
         # Filter by particle range if specified
-        if self._particle_range is not None:
-            pstart, pend = self._particle_range
+        if particle_range is not None:
+            pstart, pend = particle_range
             tet_particle_set_raw = {p for p in tet_particle_set_raw if pstart <= p < pend}
 
         tet_particle_set = sorted(tet_particle_set_raw)
@@ -131,8 +131,10 @@ class DeformableBodyBuilder:
         # Create UIPC tetmesh
         sc = uipc_tetmesh(deformable_verts, local_tets)
 
-        # Apply contact and surface labels
+        # Apply contact, subscene, and surface labels
         self._contact_elem.apply_to(sc)
+        if subscene_elem is not None:
+            subscene_elem.apply_to(sc)
         label_surface(sc)
         label_triangle_orient(sc)
         sc = flip_inward_triangles(sc)

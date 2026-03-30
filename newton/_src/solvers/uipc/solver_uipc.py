@@ -5,17 +5,16 @@
 
 from __future__ import annotations
 
-import copy
 import warnings
 from collections.abc import Callable
 from typing import Any
 
 import numpy as np
+import uipc
 import uipc.builtin as uipc_builtin
 import warp as wp
 from uipc import Logger as ULogger
 from uipc import Matrix4x4, view
-from uipc.constitution import AffineBodyConstitution
 from uipc.core import AffineBodyStateAccessorFeature
 from uipc.core import Scene as UScene
 from uipc.unit import GPa, MPa
@@ -27,7 +26,6 @@ from .articulation_builder import ArticulationBuilder
 from .cloth import ClothBuilder
 from .converter import (
     UIpcMappingInfo,
-    WorldContext,
     _read_from_backend_kernel,
     _spatial_to_vel_mat44_kernel,
     _transform_to_mat44_kernel,
@@ -82,8 +80,10 @@ class SolverUIPC(SolverBase):
     :meth:`initialize` automatically, preserving full backward compatibility.
 
     For multi-world models produced by :meth:`~newton.ModelBuilder.replicate`,
-    set ``separate_worlds=True`` (auto-detected by default) to create
-    independent UIPC scenes per Newton world.
+    the solver uses UIPC's ``subscene_tabular`` to configure contact isolation
+    between Newton worlds within a single UIPC scene. By default, bodies in
+    different Newton worlds do not contact each other. Use
+    :meth:`configure_subscene_tabular` to customize cross-world contact.
 
     .. note::
 
@@ -122,7 +122,6 @@ class SolverUIPC(SolverBase):
         default_mass_density: float = 1000.0,
         logger_level=ULogger.Error,
         auto_init: bool = True,
-        separate_worlds: bool | None = None,
     ):
         """Create a UIPC solver instance from a Newton model.
 
@@ -144,9 +143,6 @@ class SolverUIPC(SolverBase):
                 of the constructor. Set to ``False`` to configure the scene and
                 contact tabular before initialization via :meth:`configure_scene`
                 and :meth:`configure_contact_tabular`.
-            separate_worlds: If ``True``, each Newton world is mapped to a
-                separate UIPC Engine/World/Scene. If ``None`` (default),
-                auto-detects: ``True`` when ``model.world_count > 1``.
         """
         super().__init__(model=model)
         self.import_uipc()
@@ -173,16 +169,15 @@ class SolverUIPC(SolverBase):
             scene_config["gravity"] = [[float(gravity_np[0])], [float(gravity_np[1])], [float(gravity_np[2])]]
         self._scene_config = scene_config
 
-        # Resolve separate_worlds
-        if separate_worlds is None:
-            separate_worlds = model.world_count > 1
-        self._separate_worlds = separate_worlds
-
-        # User-registered contact tabular callback (set via configure_contact_tabular)
+        # User-registered callbacks (set via configure_* methods)
         self._contact_tabular_fn: Callable | None = None
+        self._subscene_tabular_fn: Callable | None = None
 
-        # Per-world contexts (populated during initialize)
-        self._world_contexts: list[WorldContext] = []
+        # Builders (populated during initialize)
+        self._rigid_body_builder: RigidBodyBuilder | None = None
+        self._articulation_builder: ArticulationBuilder | None = None
+        self._cloth_builder: ClothBuilder | None = None
+        self._deformable_builder: DeformableBodyBuilder | None = None
 
         if auto_init:
             self.initialize()
@@ -267,6 +262,47 @@ class SolverUIPC(SolverBase):
             )
         self._contact_tabular_fn = fn
 
+    def configure_subscene_tabular(self, fn: Callable) -> None:
+        """Register a callback to customize subscene contact configuration.
+
+        For multi-world models, the solver creates one UIPC subscene per Newton
+        world. By default, bodies in different worlds do **not** contact each
+        other (replicating the old ``separate_worlds`` behavior). This callback
+        lets you override the default subscene contact table.
+
+        Must be called **before** :meth:`initialize` (i.e. with ``auto_init=False``).
+
+        Args:
+            fn: A callable with signature
+                ``fn(tabular, world_subscenes, default_element) -> None``.
+                ``tabular`` is the UIPC ``SubsceneTabular``; ``world_subscenes``
+                is a list of ``SubsceneElement`` (one per Newton world);
+                ``default_element`` is the default subscene element (used by
+                ground planes and global objects).
+
+        Raises:
+            RuntimeError: If the solver has already been initialized.
+
+        Example
+        -------
+
+        .. code-block:: python
+
+            def setup_subscenes(tabular, world_subscenes, default_elem):
+                # Enable contact between world 0 and world 1
+                tabular.insert(world_subscenes[0], world_subscenes[1], True)
+
+
+            solver = SolverUIPC(model, auto_init=False)
+            solver.configure_subscene_tabular(setup_subscenes)
+            solver.initialize()
+        """
+        if self._initialized:
+            raise RuntimeError(
+                "Cannot configure subscene tabular after initialization. Pass auto_init=False to defer initialization."
+            )
+        self._subscene_tabular_fn = fn
+
     # ------------------------------------------------------------------
     # Initialization
     # ------------------------------------------------------------------
@@ -274,17 +310,15 @@ class SolverUIPC(SolverBase):
     def initialize(self) -> None:
         """Build UIPC scene objects from the Newton model and initialize the world.
 
-        Creates the UIPC Engine, World, and Scene, configures the contact
-        tabular, builds rigid body / articulation / cloth / deformable
-        geometries, and calls ``world.init(scene)``.
-
-        When ``separate_worlds=True`` and the model has multiple worlds,
-        an independent UIPC Engine/World/Scene is created for each Newton
-        world.
+        Creates a single UIPC Engine, World, and Scene. For multi-world models,
+        configures ``subscene_tabular`` to isolate contact between Newton worlds.
+        Builds rigid body / articulation / cloth / deformable geometries and
+        calls ``world.init(scene)``.
 
         This method is called automatically when ``auto_init=True`` (the
         default). When ``auto_init=False``, call this explicitly after
-        :meth:`configure_scene` and :meth:`configure_contact_tabular`.
+        :meth:`configure_scene`, :meth:`configure_contact_tabular`, and
+        :meth:`configure_subscene_tabular`.
 
         Raises:
             RuntimeError: If already initialized.
@@ -294,235 +328,117 @@ class SolverUIPC(SolverBase):
 
         model = self.model
 
-        if self._separate_worlds and model.world_count > 1:
-            self._validate_model_for_separate_worlds(model)
-            for w in range(model.world_count):
-                ctx = self._initialize_world(w)
-                self._world_contexts.append(ctx)
-        else:
-            ctx = self._initialize_world(None)
-            self._world_contexts.append(ctx)
-
-        # Backward-compat aliases for single-world access
-        ctx0 = self._world_contexts[0]
-        self.engine = ctx0.engine
-        self.world = ctx0.world
-        self.scene = ctx0.scene
-        self.mapping = ctx0.mapping
-
-        # Legacy builder references (single-world or first world)
-        self._rigid_body_builder = ctx0.rigid_body_builder
-        self._articulation_builder = ctx0.articulation_builder
-        self._cloth_builder = ctx0.cloth_builder
-        self._deformable_builder = ctx0.deformable_builder
-
-        self._initialized = True
-
-    def _initialize_world(self, world_idx: int | None) -> WorldContext:
-        """Build a single UIPC world context.
-
-        Args:
-            world_idx: Newton world index, or ``None`` for single-world mode
-                (all entities are included).
-
-        Returns:
-            Fully initialized :class:`WorldContext`.
-        """
-        import uipc
-
-        model = self.model
-
-        # Compute entity ranges
-        if world_idx is not None:
-            body_ws = model.body_world_start.numpy()
-            joint_ws = model.joint_world_start.numpy()
-            particle_ws = model.particle_world_start.numpy() if model.particle_world_start is not None else None
-            body_range = (int(body_ws[world_idx]), int(body_ws[world_idx + 1]))
-            joint_range = (int(joint_ws[world_idx]), int(joint_ws[world_idx + 1]))
-            particle_range = (
-                (int(particle_ws[world_idx]), int(particle_ws[world_idx + 1])) if particle_ws is not None else None
-            )
-        else:
-            body_range = None
-            joint_range = None
-            particle_range = None
-
-        body_offset = body_range[0] if body_range else 0
-        body_count = (body_range[1] - body_range[0]) if body_range else model.body_count
-        joint_offset = joint_range[0] if joint_range else 0
-        joint_count = (joint_range[1] - joint_range[0]) if joint_range else model.joint_count
-
-        # Create independent UIPC Engine / World / Scene
-        ws_suffix = f"_w{world_idx}" if world_idx is not None else ""
-        engine = uipc.Engine(backend_name=self._backend, workspace=self._workspace + ws_suffix)
-        world = uipc.World(engine)
-        scene = uipc.Scene(copy.deepcopy(self._scene_config))
+        # Create a single UIPC Engine / World / Scene
+        self.engine = uipc.Engine(backend_name=self._backend, workspace=self._workspace)
+        self.world = uipc.World(self.engine)
+        self.scene = uipc.Scene(self._scene_config)
 
         # Contact tabular
         if self._contact_tabular_fn is not None:
-            result = self._contact_tabular_fn(scene.contact_tabular())
+            result = self._contact_tabular_fn(self.scene.contact_tabular())
             if result is not None:
                 contact_elem = result
             else:
-                contact_elem = scene.contact_tabular().create("default")
-                scene.contact_tabular().insert(contact_elem, contact_elem, 0.5, 1.0 * GPa, False)
+                contact_elem = self.scene.contact_tabular().create("default")
+                self.scene.contact_tabular().insert(contact_elem, contact_elem, 0.5, 1.0 * GPa, False)
         else:
-            contact_elem = scene.contact_tabular().create("default")
-            scene.contact_tabular().insert(contact_elem, contact_elem, 0.5, 1.0 * GPa, False)
+            contact_elem = self.scene.contact_tabular().create("default")
+            self.scene.contact_tabular().insert(contact_elem, contact_elem, 0.5, 1.0 * GPa, False)
 
-        abd = AffineBodyConstitution()
-        mapping = UIpcMappingInfo()
+        # Subscene tabular for multi-world contact isolation
+        subscene_elements: list[Any] = []
+        if model.world_count > 1:
+            tabular = self.scene.subscene_tabular()
+            default_subscene_elem = tabular.default_element()
 
-        # 1. Rigid bodies (AffineBody)
-        rigid_body_builder = RigidBodyBuilder(
-            model,
-            scene,
-            contact_elem,
-            abd,
-            mapping,
-            self._kappa,
-            self._default_mass_density,
-            body_range=body_range,
+            for world_index in range(model.world_count):
+                se = tabular.create(f"world_{world_index}")
+                subscene_elements.append(se)
+
+            # Default: no contact between different worlds,
+            # enable contact between each world and default (ground)
+            for i in range(model.world_count):
+                for j in range(i + 1, model.world_count):
+                    tabular.insert(subscene_elements[i], subscene_elements[j], False)
+                tabular.insert(default_subscene_elem, subscene_elements[i], True)
+
+            # Let user override subscene configuration
+            if self._subscene_tabular_fn is not None:
+                self._subscene_tabular_fn(tabular, subscene_elements, default_subscene_elem)
+
+        self.mapping = UIpcMappingInfo()
+        scene = self.scene
+
+        # Create one builder per type (reused across worlds)
+        rb = RigidBodyBuilder(model, scene, contact_elem, self.mapping, self._kappa, self._default_mass_density)
+        ab = ArticulationBuilder(model, scene, self.mapping, self._dt, contact_elem=contact_elem, kappa=self._kappa)
+        cb = ClothBuilder(model, scene, contact_elem, self.mapping)
+        db = DeformableBodyBuilder(
+            model, scene, contact_elem, self.mapping, default_mass_density=self._default_mass_density
         )
-        body_transforms = rigid_body_builder.build_ground_planes()
-        rigid_body_builder.build_body_shape_mapping()
-        rigid_body_builder.build_affine_bodies(body_transforms)
 
-        # 2. Articulations (joints)
-        articulation_builder = ArticulationBuilder(
-            model,
-            scene,
-            mapping,
-            self._dt,
-            abd=abd,
-            contact_elem=contact_elem,
-            kappa=self._kappa,
-            joint_range=joint_range,
-        )
-        articulation_builder.build_joints(body_transforms)
+        rb.build_ground_planes()
 
-        # 3. Cloth (NeoHookeanShell)
-        cloth_builder = ClothBuilder(
-            model,
-            scene,
-            contact_elem,
-            mapping,
-            particle_range=particle_range,
-        )
-        if cloth_builder.has_cloth:
-            cloth_builder.build()
+        if model.world_count > 1:
+            assert model.body_world_start is not None
+            assert model.joint_world_start is not None
+            # Host-side indexing needed to compute per-world ranges (init only)
+            body_ws = model.body_world_start.numpy() if model.body_world_start is not None else None
+            joint_ws = model.joint_world_start.numpy() if model.joint_world_start is not None else None
+            particle_ws = model.particle_world_start.numpy() if model.particle_world_start is not None else None
 
-        # 4. Deformable bodies (StableNeoHookean)
-        deformable_builder = DeformableBodyBuilder(
-            model,
-            scene,
-            contact_elem,
-            mapping,
-            default_mass_density=self._default_mass_density,
-            particle_range=particle_range,
-        )
-        if deformable_builder.has_deformable:
-            deformable_builder.build()
+            for world_index in range(model.world_count):
+                body_range = (int(body_ws[world_index]), int(body_ws[world_index + 1])) if body_ws is not None else None
+                joint_range = (
+                    (int(joint_ws[world_index]), int(joint_ws[world_index + 1])) if joint_ws is not None else None
+                )
+                particle_range = (
+                    (int(particle_ws[world_index]), int(particle_ws[world_index + 1]))
+                    if particle_ws is not None
+                    else None
+                )
+                se = subscene_elements[world_index] if subscene_elements is not None else None
+
+                rb.build_body_shape_mapping(body_range)
+                rb.build_affine_bodies(body_range, se)
+                ab.build_joints(rb.body_transforms, joint_range, se)
+                if cb.has_cloth:
+                    cb.build(particle_range, se)
+                if db.has_deformable:
+                    db.build(particle_range, se)
+        else:
+            rb.build_body_shape_mapping()
+            rb.build_affine_bodies()
+            ab.build_joints(rb.body_transforms)
+            if cb.has_cloth:
+                cb.build()
+            if db.has_deformable:
+                db.build()
+
+        self._rigid_body_builder = rb
+        self._articulation_builder = ab
+        self._cloth_builder = cb
+        self._deformable_builder = db
 
         # Initialize UIPC world and set up state accessors
-        world.init(scene)
-        populate_backend_offsets(mapping, model.device)
+        self.world.init(scene)
+        populate_backend_offsets(self.mapping, model.device)
 
-        abd_accessor: AffineBodyStateAccessorFeature = world.features().find(AffineBodyStateAccessorFeature)  # ty:ignore[invalid-assignment]
-        abd_state_geo = abd_accessor.create_geometry()  # type: ignore
-        abd_state_geo.instances().create(uipc_builtin.transform, Matrix4x4.Zero())
-        abd_state_geo.instances().create(uipc_builtin.velocity, Matrix4x4.Zero())
+        self._abd_accessor: AffineBodyStateAccessorFeature = self.world.features().find(AffineBodyStateAccessorFeature)  # ty:ignore[invalid-assignment]
+        self._abd_state_geo = self._abd_accessor.create_geometry()
+        self._abd_state_geo.instances().create(uipc_builtin.transform, Matrix4x4.Zero())
+        self._abd_state_geo.instances().create(uipc_builtin.velocity, Matrix4x4.Zero())
 
         # Pre-allocate GPU buffers for batch transform sync
-        n = mapping.num_mapped_bodies
+        n = self.mapping.num_mapped_bodies
         if n > 0:
-            transforms_wp = wp.zeros(n, dtype=wp.mat44d, device=model.device)
-            velocities_wp = wp.zeros(n, dtype=wp.mat44d, device=model.device)
+            self._transforms_wp = wp.zeros(n, dtype=wp.mat44d, device=model.device)
+            self._velocities_wp = wp.zeros(n, dtype=wp.mat44d, device=model.device)
         else:
-            transforms_wp = None
-            velocities_wp = None
+            self._transforms_wp = None
+            self._velocities_wp = None
 
-        return WorldContext(
-            engine=engine,
-            world=world,
-            scene=scene,
-            mapping=mapping,
-            abd=abd,
-            abd_accessor=abd_accessor,
-            abd_state_geo=abd_state_geo,
-            transforms_wp=transforms_wp,
-            velocities_wp=velocities_wp,
-            rigid_body_builder=rigid_body_builder,
-            articulation_builder=articulation_builder,
-            cloth_builder=cloth_builder,
-            deformable_builder=deformable_builder,
-            contact_elem=contact_elem,
-            body_offset=body_offset,
-            body_count=body_count,
-            joint_offset=joint_offset,
-            joint_count=joint_count,
-        )
-
-    def _validate_model_for_separate_worlds(self, model: Model) -> None:
-        """Validate that the Newton model is compatible with separate_worlds mode.
-
-        Requires:
-        1. At least one world (world_count >= 1).
-        2. No bodies or joints in the global world (-1).
-        3. Homogeneous entity counts across worlds.
-
-        Args:
-            model: The Newton model to validate.
-
-        Raises:
-            ValueError: If the model is not compatible.
-        """
-        world_count = model.world_count
-
-        if world_count == 0:
-            raise ValueError(
-                "SolverUIPC with separate_worlds=True requires at least one world (world_count >= 1). "
-                "Found world_count=0 (all entities in global world -1)."
-            )
-
-        body_world = model.body_world.numpy()
-        joint_world = model.joint_world.numpy()
-
-        # No bodies in global world
-        global_bodies = np.where(body_world == -1)[0]
-        if len(global_bodies) > 0:
-            raise ValueError(
-                f"Global world (-1) cannot contain bodies in separate_worlds mode. "
-                f"Found {len(global_bodies)} body(ies) with world == -1."
-            )
-
-        # No joints in global world
-        global_joints = np.where(joint_world == -1)[0]
-        if len(global_joints) > 0:
-            raise ValueError(
-                f"Global world (-1) cannot contain joints in separate_worlds mode. "
-                f"Found {len(global_joints)} joint(s) with world == -1."
-            )
-
-        # Skip homogeneity checks for single-world models
-        if world_count <= 1:
-            return
-
-        # Check entity count homogeneity
-        for entity_name, world_arr in [
-            ("bodies", body_world),
-            ("joints", joint_world),
-        ]:
-            if len(world_arr) == 0:
-                continue
-            counts = np.bincount(world_arr.astype(np.int64), minlength=world_count)
-            if not np.all(counts == counts[0]):
-                mismatched = np.where(counts != counts[0])[0]
-                w = mismatched[0]
-                raise ValueError(
-                    f"SolverUIPC requires homogeneous worlds. "
-                    f"World 0 has {counts[0]} {entity_name}, but world {w} has {counts[w]}."
-                )
+        self._initialized = True
 
     # ------------------------------------------------------------------
     # Solver interface
@@ -563,24 +479,22 @@ class SolverUIPC(SolverBase):
         if control is None:
             control = self.model.control(clone_variables=False)
 
-        for ctx in self._world_contexts:
-            # Phase 1: Cache joint control for animator callbacks
-            ctx.articulation_builder.cache_joint_control(control)
+        # Phase 1: Cache joint control
+        self._articulation_builder.cache_joint_control(control)
 
-            # Phase 2: Advance UIPC (animator callbacks fire here)
-            ctx.world.advance()
-            ctx.world.retrieve()
+        # Phase 2: Advance UIPC (animator callbacks fire here)
+        self.world.advance()
+        self.world.retrieve()
 
-            # Phase 3: Read back results
-            self._sync_body_state_from_uipc_ctx(ctx, state_out)
-            ctx.articulation_builder.write_joint_readback(state_out)
+        # Phase 3: Read back results
+        self._sync_body_state_from_uipc(state_out)
+        self._articulation_builder.write_joint_readback(state_out)
 
         if state_out.body_f is not None:
             state_out.body_f.zero_()
 
         self._step_count += 1
-        for ctx in self._world_contexts:
-            ctx.articulation_builder.increment_step()
+        self._articulation_builder.increment_step()
 
     @override
     def notify_model_changed(self, flags: int) -> None:
@@ -604,85 +518,64 @@ class SolverUIPC(SolverBase):
     # GPU batch sync methods
     # ------------------------------------------------------------------
 
-    def _sync_body_state_to_uipc_ctx(self, ctx: WorldContext, state_in: State) -> None:
-        """Write Newton body transforms and velocities into a UIPC world context."""
+    def _sync_body_state_to_uipc(self, state_in: State) -> None:
+        """Write Newton body transforms and velocities into UIPC."""
         model = self.model
-        n = ctx.mapping.num_mapped_bodies
+        n = self.mapping.num_mapped_bodies
 
         if n > 0 and state_in.body_q is not None:
             wp.launch(
                 _transform_to_mat44_kernel,
                 dim=n,
-                inputs=[state_in.body_q, ctx.mapping.body_indices_wp, ctx.transforms_wp],
+                inputs=[state_in.body_q, self.mapping.body_indices_wp, self._transforms_wp],
                 device=model.device,
             )
             if state_in.body_qd is not None:
                 wp.launch(
                     _spatial_to_vel_mat44_kernel,
                     dim=n,
-                    inputs=[state_in.body_qd, ctx.mapping.body_indices_wp, ctx.velocities_wp],
+                    inputs=[state_in.body_qd, self.mapping.body_indices_wp, self._velocities_wp],
                     device=model.device,
                 )
 
-            ctx.abd_accessor.copy_to(ctx.abd_state_geo)
-            transform_view = view(ctx.abd_state_geo.transforms())
-            velocity_view = view(ctx.abd_state_geo.instances().find(uipc_builtin.velocity))
+            self._abd_accessor.copy_to(self._abd_state_geo)
+            transform_view = view(self._abd_state_geo.transforms())
+            velocity_view = view(self._abd_state_geo.instances().find(uipc_builtin.velocity))  # ty:ignore[no-matching-overload]  # pyright: ignore[reportArgumentType]
 
-            assert ctx.transforms_wp is not None
-            assert ctx.velocities_wp is not None
-            assert ctx.mapping.backend_offsets_wp is not None
-            transform_np = ctx.transforms_wp.numpy()
-            velocity_np = ctx.velocities_wp.numpy()
-            offsets_np = ctx.mapping.backend_offsets_wp.numpy()
+            # UIPC view is numpy-based; vectorised scatter via advanced indexing
+            assert self._transforms_wp is not None
+            assert self._velocities_wp is not None
+            assert self.mapping.backend_offsets_wp is not None
+            offsets = self.mapping.backend_offsets_wp.numpy()
+            transform_view[offsets] = self._transforms_wp.numpy()
+            velocity_view[offsets] = self._velocities_wp.numpy()
 
-            for i in range(n):
-                idx = offsets_np[i]
-                transform_view[idx] = transform_np[i]
-                velocity_view[idx] = velocity_np[i]
+            self._abd_accessor.copy_from(self._abd_state_geo)
 
-            ctx.abd_accessor.copy_from(ctx.abd_state_geo)
-
-    def _sync_body_state_from_uipc_ctx(self, ctx: WorldContext, state_out: State) -> None:
+    def _sync_body_state_from_uipc(self, state_out: State) -> None:
         """Read UIPC body state back into Newton state arrays using GPU kernels."""
         model = self.model
-        n = ctx.mapping.num_mapped_bodies
-
+        n = self.mapping.num_mapped_bodies
         if n > 0 and state_out.body_q is not None:
-            ctx.abd_accessor.copy_to(ctx.abd_state_geo)
-            transform_view = view(ctx.abd_state_geo.transforms())
-            velocity_view = view(ctx.abd_state_geo.instances().find(uipc_builtin.velocity))
+            self._abd_accessor.copy_to(self._abd_state_geo)
+            transform_view = view(self._abd_state_geo.transforms())
+            velocity_view = view(self._abd_state_geo.instances().find(uipc_builtin.velocity))  # ty:ignore[no-matching-overload]  # pyright: ignore[reportArgumentType]
 
-            assert ctx.mapping.backend_offsets_wp is not None
-            offsets_np = ctx.mapping.backend_offsets_wp.numpy()
-            transform_np = np.empty((n, 4, 4), dtype=np.float64)
-            velocity_np = np.empty((n, 4, 4), dtype=np.float64)
-            for i in range(n):
-                idx = offsets_np[i]
-                transform_np[i] = transform_view[idx]
-                velocity_np[i] = velocity_view[idx]
-
-            transforms_wp = wp.from_numpy(transform_np, dtype=wp.mat44d, device=model.device)
-            velocities_wp = wp.from_numpy(velocity_np, dtype=wp.mat44d, device=model.device)
+            # Pass full UIPC view to kernel; offsets index into it directly
+            assert self.mapping.backend_offsets_wp is not None
+            transforms_wp = wp.from_numpy(np.ascontiguousarray(transform_view), dtype=wp.mat44d, device=model.device)
+            velocities_wp = wp.from_numpy(np.ascontiguousarray(velocity_view), dtype=wp.mat44d, device=model.device)
 
             wp.launch(
                 _read_from_backend_kernel,
                 dim=n,
                 inputs=[
-                    ctx.mapping.backend_offsets_wp,
+                    self.mapping.backend_offsets_wp,
                     transforms_wp,
                     velocities_wp,
-                    ctx.mapping.body_indices_wp,
+                    self.mapping.body_indices_wp,
                     state_out.body_q,
                     state_out.body_qd,
                 ],
                 device=model.device,
             )
-
-    # Backward-compatible aliases
-    def _sync_body_state_to_uipc(self, state_in: State) -> None:
-        """Write Newton body transforms and velocities into UIPC (first world)."""
-        self._sync_body_state_to_uipc_ctx(self._world_contexts[0], state_in)
-
-    def _sync_body_state_from_uipc(self, state_out: State) -> None:
-        """Read UIPC body state back into Newton state arrays (first world)."""
-        self._sync_body_state_from_uipc_ctx(self._world_contexts[0], state_out)

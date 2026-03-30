@@ -150,9 +150,6 @@ class Articulation:
         self.joint_geo_slots: dict[int, Any] = {}
         self.joint_mesh: dict[int, Any] = {}
 
-        # -- Build-time temporaries (consumed by setup_state) -----------
-        self._init_values: dict[int, float] = {}
-
         # -- Warp arrays on CPU (allocated by setup_state) --------------
         self.joint_position: wp.array | None = None  # (J,) float64
         self.joint_velocity: wp.array | None = None  # (J,) float64
@@ -203,7 +200,6 @@ class Articulation:
         self._joint_to_local[newton_idx] = local
         self._joint_q_start[newton_idx] = q_start
         self._joint_qd_start[newton_idx] = qd_start
-        self._init_values[newton_idx] = init_value
         return local
 
     # ------------------------------------------------------------------
@@ -237,10 +233,10 @@ class Articulation:
         self.joint_velocity = wp.zeros(J, dtype=wp.float64, device="cpu")
 
         # Initialise positions from build-time values
-        pos_np = self.joint_position.numpy()
-        for newton_idx in self.active_joint_indices:
-            local = self._joint_to_local[newton_idx]
-            pos_np[local] = self._init_values.get(newton_idx, 0.0)
+        # pos_np = self.joint_position.numpy()
+        # for newton_idx in self.active_joint_indices:
+        #     local = self._joint_to_local[newton_idx]
+        #     pos_np[local] = self._init_values.get(newton_idx, 0.0)
 
         # -- Control cache arrays (wp.array on CPU) ------------------------
         self.target_position = wp.zeros(J, dtype=wp.float64, device="cpu")

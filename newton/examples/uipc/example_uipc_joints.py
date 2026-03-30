@@ -223,6 +223,7 @@ class Example:
 
         self.state_1 = self.model.state()
         self.control = self.model.control()
+        print(self.control.joint_target_pos)
         self.contacts = self.model.contacts()
 
         self.viewer.set_model(self.model)

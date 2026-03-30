@@ -48,7 +48,6 @@ class ClothBuilder:
         default_thickness: float = 0.001,
         default_poisson_ratio: float = 0.3,
         default_bending_stiffness: float = 0.01,
-        particle_range: tuple[int, int] | None = None,
     ):
         self._model = model
         self._scene = scene
@@ -57,20 +56,26 @@ class ClothBuilder:
         self._default_thickness = default_thickness
         self._default_poisson_ratio = default_poisson_ratio
         self._default_bending_stiffness = default_bending_stiffness
-        # When set, only particles in [start, end) are considered.
-        self._particle_range = particle_range
 
     @property
     def has_cloth(self) -> bool:
         """Whether the Newton model contains cloth (triangle) elements."""
         return self._model.tri_count > 0
 
-    def build(self) -> None:
+    def build(
+        self,
+        particle_range: tuple[int, int] | None = None,
+        subscene_elem: Any | None = None,
+    ) -> None:
         """Convert Newton cloth particles and triangles to UIPC cloth objects.
 
         Groups all triangles that are NOT part of tetrahedra into cloth meshes.
         Extracts the referenced particles, remaps indices, creates a UIPC
         ``trimesh``, and applies ``NeoHookeanShell`` + ``DiscreteShellBending``.
+
+        Args:
+            particle_range: ``(start, end)`` slice of particles, or ``None`` for all.
+            subscene_elem: UIPC subscene element, or ``None``.
         """
         model = self._model
         if model.tri_count == 0 or model.tri_indices is None or model.particle_q is None:
@@ -84,8 +89,8 @@ class ClothBuilder:
         tri_particle_set = set(tri_indices_np.flatten())
 
         # Filter by particle range if specified
-        if self._particle_range is not None:
-            pstart, pend = self._particle_range
+        if particle_range is not None:
+            pstart, pend = particle_range
             tri_particle_set = {p for p in tri_particle_set if pstart <= p < pend}
 
         tet_particle_set: set[int] = set()
@@ -121,8 +126,10 @@ class ClothBuilder:
         # Create UIPC trimesh
         sc = uipc_trimesh(cloth_verts, cloth_faces)
 
-        # Apply contact
+        # Apply contact and subscene
         self._contact_elem.apply_to(sc)
+        if subscene_elem is not None:
+            subscene_elem.apply_to(sc)
         label_surface(sc)
 
         # Determine material parameters from Newton model
