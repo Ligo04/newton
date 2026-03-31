@@ -164,6 +164,13 @@ class SolverUIPC(SolverBase):
             scene_config: dict[str, Any] = UScene.default_config()
             scene_config["dt"] = dt
         scene_config["contact"]["enable"] = False
+        scene_config["d_hat"] = 0.001
+        scene_config["newton"]["velocity_tol"] = 0.01
+        scene_config["line_search"]["report_energy"] = True
+        # scene_config["extras"]["debug"]["dump_linear_pcg"] = True
+        # scene_config["extras"]["debug"]["dump_linear_system"] = True
+        # scene_config["extras"]["debug"]["dump_mas_matrices"] = True
+        # scene_config["extras"]["debug"]["dump_surface"] = True
         if model.gravity is not None:
             gravity_np = model.gravity.numpy().flatten()
             scene_config["gravity"] = [[float(gravity_np[0])], [float(gravity_np[1])], [float(gravity_np[2])]]
@@ -332,6 +339,7 @@ class SolverUIPC(SolverBase):
         self.engine = uipc.Engine(backend_name=self._backend, workspace=self._workspace)
         self.world = uipc.World(self.engine)
         self.scene = uipc.Scene(self._scene_config)
+        print(f"_scene_config: {self._scene_config}")
 
         # Contact tabular
         if self._contact_tabular_fn is not None:
@@ -400,16 +408,18 @@ class SolverUIPC(SolverBase):
                 se = subscene_elements[world_index] if subscene_elements is not None else None
 
                 rb.build_body_shape_mapping(body_range)
-                rb.build_affine_bodies(body_range, se)
-                ab.build_joints(rb.body_transforms, joint_range, se)
+                ab.compute_fk(joint_range)
+                rb.build_affine_bodies(body_range, se, ab._body_transforms)
+                ab.build_joints(joint_range, se)
                 if cb.has_cloth:
                     cb.build(particle_range, se)
                 if db.has_deformable:
                     db.build(particle_range, se)
         else:
             rb.build_body_shape_mapping()
-            rb.build_affine_bodies()
-            ab.build_joints(rb.body_transforms)
+            ab.compute_fk()
+            rb.build_affine_bodies(body_transforms=ab._body_transforms)
+            ab.build_joints()
             if cb.has_cloth:
                 cb.build()
             if db.has_deformable:

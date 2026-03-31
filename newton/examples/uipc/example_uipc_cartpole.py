@@ -44,7 +44,7 @@ class Example:
 
         if self.world_count > 1:
             builder = newton.ModelBuilder(newton.Axis.Y)
-            builder.replicate(cartpole, self.world_count, spacing=(0.1, 0.0, 0.2))
+            builder.replicate(cartpole, self.world_count, spacing=(1.0, 0.0, 2.0))
         else:
             builder = cartpole
 
@@ -57,12 +57,15 @@ class Example:
         self.control = self.model.control()
         self.contacts = self.model.contacts()
 
+        # Evaluate forward kinematics
+        newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
         self.viewer.set_model(self.model)
         self.viewer.set_camera(
             pos=wp.vec3(9.5, 3.5, 5),
             pitch=-10.0,
             yaw=-160.0,
         )
+        self.viewer.set_world_offsets((0.0, 0.0, 0.0))
         self.viewer._paused = True
 
     def simulate(self):

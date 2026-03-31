@@ -376,7 +376,6 @@ def build_body_mesh(model: Model, body_idx: int) -> tuple[np.ndarray, np.ndarray
         faces = None
         # Whether scale is already baked into the generated mesh
         scale_baked = False
-
         if geo_type in (GeoType.MESH, GeoType.CONVEX_MESH):
             geo_src = model.shape_source[s]
             if isinstance(geo_src, Mesh):

@@ -223,9 +223,8 @@ class Example:
 
         self.state_1 = self.model.state()
         self.control = self.model.control()
-        print(self.control.joint_target_pos)
         self.contacts = self.model.contacts()
-
+        newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
         self.viewer.set_model(self.model)
         self.viewer.set_camera(
             pos=wp.vec3(-2.0, 2.0, 8.0),

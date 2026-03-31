@@ -41,6 +41,58 @@ from .articulation import Articulation
 from .converter import UIpcMappingInfo, newton_transform_to_mat4
 
 
+def _mat4_to_transform(mat: np.ndarray) -> wp.transform:  # pyright: ignore[reportArgumentType]
+    """Convert a 4x4 homogeneous matrix to a ``wp.transform``.
+
+    Extracts position from the last column and quaternion from the
+    rotation sub-matrix using Shepperd's method.
+
+    Args:
+        mat: 4x4 homogeneous transformation matrix (float64).
+
+    Returns:
+        A ``wp.transform(pos, quat)`` value.
+    """
+    pos = mat[:3, 3]
+    R = mat[:3, :3]
+    trace = R[0, 0] + R[1, 1] + R[2, 2]
+
+    if trace > 0.0:
+        s = 2.0 * np.sqrt(trace + 1.0)
+        w = 0.25 * s
+        x = (R[2, 1] - R[1, 2]) / s
+        y = (R[0, 2] - R[2, 0]) / s
+        z = (R[1, 0] - R[0, 1]) / s
+    elif R[0, 0] > R[1, 1] and R[0, 0] > R[2, 2]:
+        s = 2.0 * np.sqrt(1.0 + R[0, 0] - R[1, 1] - R[2, 2])
+        w = (R[2, 1] - R[1, 2]) / s
+        x = 0.25 * s
+        y = (R[0, 1] + R[1, 0]) / s
+        z = (R[0, 2] + R[2, 0]) / s
+    elif R[1, 1] > R[2, 2]:
+        s = 2.0 * np.sqrt(1.0 + R[1, 1] - R[0, 0] - R[2, 2])
+        w = (R[0, 2] - R[2, 0]) / s
+        x = (R[0, 1] + R[1, 0]) / s
+        y = 0.25 * s
+        z = (R[1, 2] + R[2, 1]) / s
+    else:
+        s = 2.0 * np.sqrt(1.0 + R[2, 2] - R[0, 0] - R[1, 1])
+        w = (R[1, 0] - R[0, 1]) / s
+        x = (R[0, 2] + R[2, 0]) / s
+        y = (R[1, 2] + R[2, 1]) / s
+        z = 0.25 * s
+
+    norm = np.sqrt(x * x + y * y + z * z + w * w)
+    if norm > 0.0:
+        inv_norm = 1.0 / norm
+        x, y, z, w = x * inv_norm, y * inv_norm, z * inv_norm, w * inv_norm
+
+    return wp.transform(
+        wp.vec3(float(pos[0]), float(pos[1]), float(pos[2])),
+        wp.quat(float(x), float(y), float(z), float(w)),
+    )
+
+
 class ArticulationBuilder:
     """Build UIPC joint constitutions from Newton articulation joints.
 
@@ -81,6 +133,9 @@ class ArticulationBuilder:
         # Per-articulation runtime objects (populated by build_joints)
         self.articulations: dict[int, Articulation] = {}
 
+        # Per-body world-frame 4x4 transforms (populated by build_joints via FK)
+        self._body_transforms: np.ndarray | None = None
+
         # Cache of anchor body geo slots for world-anchored joints
         self._anchor_slots: dict[str, Any] = {}
 
@@ -91,9 +146,225 @@ class ArticulationBuilder:
     # Build
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _compute_joint_transform(
+        joint_type: JointType,
+        joint_q_np: np.ndarray,
+        joint_axis_np: np.ndarray,
+        q_start: int,
+        qd_start: int,
+    ) -> wp.transform:  # pyright: ignore[reportArgumentType]
+        """Compute the local joint transform from joint coordinates.
+
+        Mirrors the per-joint FK logic in
+        :func:`~newton._src.sim.articulation.eval_single_articulation_fk`.
+
+        Args:
+            joint_type: The type of joint.
+            joint_q_np: Joint position coordinates (numpy).
+            joint_axis_np: Joint axes (numpy, indexed by qd_start).
+            q_start: Start index in ``joint_q`` for this joint.
+            qd_start: Start index in ``joint_qd`` for this joint.
+
+        Returns:
+            A ``wp.transform`` representing the local joint displacement.
+        """
+        if joint_type == JointType.REVOLUTE:
+            axis = joint_axis_np[qd_start]
+            angle = float(joint_q_np[q_start])
+            q = wp.quat_from_axis_angle(wp.vec3(*axis), angle)
+            return wp.transform(wp.vec3(0.0, 0.0, 0.0), q)
+
+        elif joint_type == JointType.PRISMATIC:
+            axis = joint_axis_np[qd_start].astype(np.float64)
+            dist = float(joint_q_np[q_start])
+            return wp.transform(wp.vec3(*(axis * dist)), wp.quat_identity())
+
+        elif joint_type == JointType.FREE or joint_type == JointType.DISTANCE:
+            pos = wp.vec3(
+                float(joint_q_np[q_start + 0]),
+                float(joint_q_np[q_start + 1]),
+                float(joint_q_np[q_start + 2]),
+            )
+            rot = wp.quat(
+                float(joint_q_np[q_start + 3]),
+                float(joint_q_np[q_start + 4]),
+                float(joint_q_np[q_start + 5]),
+                float(joint_q_np[q_start + 6]),
+            )
+            return wp.transform(pos, rot)
+
+        elif joint_type == JointType.BALL:
+            rot = wp.quat(
+                float(joint_q_np[q_start + 0]),
+                float(joint_q_np[q_start + 1]),
+                float(joint_q_np[q_start + 2]),
+                float(joint_q_np[q_start + 3]),
+            )
+            return wp.transform(wp.vec3(0.0, 0.0, 0.0), rot)
+
+        # FIXED and unsupported types: identity
+        return wp.transform_identity()
+
+    def _apply_fk_for_joint(
+        self,
+        j: int,
+        joint_type: JointType,
+        parent_body: int,
+        child_body: int,
+        joint_X_p_np: np.ndarray,
+        joint_X_c_np: np.ndarray | None,
+        joint_q_np: np.ndarray | None,
+        joint_axis_np: np.ndarray | None,
+        q_start: int,
+        qd_start: int,
+    ) -> None:
+        """Compute child body world transform via FK and store it.
+
+        Uses the parent body transform (already in ``self._body_transforms``),
+        the joint frame transforms (``joint_X_p``, ``joint_X_c``), and the
+        joint coordinate (``joint_q``) to compute the child body's world-frame
+        4x4 matrix.  The result is stored in ``self._body_transforms``.
+
+        Args:
+            j: Newton joint index.
+            joint_type: Type of the joint.
+            parent_body: Parent body index (``-1`` for world).
+            child_body: Child body index.
+            joint_X_p_np: Parent-frame joint transforms, shape ``(J, 7)``.
+            joint_X_c_np: Child-frame joint transforms, shape ``(J, 7)``, or ``None``.
+            joint_q_np: Joint position coordinates (numpy), or ``None``.
+            joint_axis_np: Joint axes (numpy), or ``None``.
+            q_start: Start index in ``joint_q`` for this joint.
+            qd_start: Start index in ``joint_qd`` for this joint.
+        """
+        # Parent anchor in world: X_wpj = X_wp * X_pj
+        jp = joint_X_p_np[j]
+        X_pj = wp.transform(jp[:3], jp[3:])
+        if parent_body >= 0 and self._body_transforms is not None:
+            X_wp = self._body_transforms[parent_body]
+            X_pj_mat = newton_transform_to_mat4(X_pj)
+            X_wpj_mat = X_wp @ X_pj_mat
+        else:
+            X_wpj_mat = newton_transform_to_mat4(X_pj)
+
+        # Local joint displacement from joint_q
+        if joint_q_np is not None and joint_axis_np is not None:
+            X_j = self._compute_joint_transform(
+                joint_type,
+                joint_q_np,
+                joint_axis_np,
+                q_start,
+                qd_start,
+            )
+        else:
+            X_j = wp.transform_identity()
+        X_j_mat = newton_transform_to_mat4(X_j)
+
+        # Child anchor in world: X_wcj = X_wpj * X_j
+        X_wcj_mat = X_wpj_mat @ X_j_mat
+
+        # Child body in world: X_wc = X_wcj * inv(X_cj)
+        if joint_X_c_np is not None:
+            jc = joint_X_c_np[j]
+            X_cj = wp.transform(jc[:3], jc[3:])
+            X_cj_inv_mat = newton_transform_to_mat4(wp.transform_inverse(X_cj))
+            X_wc_mat = X_wcj_mat @ X_cj_inv_mat
+        else:
+            X_wc_mat = X_wcj_mat
+
+        # Store
+        assert self._body_transforms is not None
+        self._body_transforms[child_body] = X_wc_mat
+
+    def compute_fk(
+        self,
+        joint_range: tuple[int, int] | None = None,
+    ) -> np.ndarray | None:
+        """Compute body world transforms from joint coordinates (FK).
+
+        Iterates joints in topological order and computes each child body's
+        world-frame 4x4 transform from ``model.joint_q``.  Results are
+        stored in ``self._body_transforms`` and synced back to
+        ``model.body_q``.
+
+        Must be called **before** :meth:`RigidBodyBuilder.build_affine_bodies`
+        so that the pre-computed transforms can be used when creating
+        UIPC geometries (transforms must be set before geometry creation).
+
+        Args:
+            joint_range: ``(start, end)`` slice of joints to process, or
+                ``None`` for all joints.
+
+        Returns:
+            Body transforms array of shape ``(body_count, 4, 4)`` (float64),
+            or ``None`` if no joints exist.
+        """
+        model = self._model
+        if model.joint_count == 0 or model.body_count == 0:
+            return None
+
+        required = (
+            model.joint_type, model.joint_parent, model.joint_child,
+            model.joint_X_p, model.joint_axis,
+            model.joint_q_start, model.joint_qd_start,
+        )
+        if any(a is None for a in required):
+            return None
+
+        # Lazily allocate (shared across multi-world calls)
+        if self._body_transforms is None:
+            self._body_transforms = np.zeros(
+                (model.body_count, 4, 4), dtype=np.float64,
+            )
+
+        jstart, jend = joint_range if joint_range else (0, model.joint_count)
+
+        # Pre-fetch numpy arrays
+        joint_X_p_np = model.joint_X_p.numpy()
+        joint_X_c_np = model.joint_X_c.numpy() if model.joint_X_c is not None else None
+        joint_q_np = model.joint_q.numpy() if model.joint_q is not None else None
+        joint_axis_np = model.joint_axis.numpy() if model.joint_axis is not None else None
+        joint_type_np = model.joint_type.numpy()
+        joint_parent_np = model.joint_parent.numpy()
+        joint_child_np = model.joint_child.numpy()
+        joint_q_start_np = model.joint_q_start.numpy()
+        joint_qd_start_np = model.joint_qd_start.numpy()
+
+        # Staging array for syncing FK results back to model.body_q
+        body_q_staging = model.body_q.numpy().copy() if model.body_q is not None else None
+
+        for j in range(jstart, jend):
+            joint_type = JointType(joint_type_np[j])
+            parent_body = int(joint_parent_np[j])
+            child_body = int(joint_child_np[j])
+
+            q_start = int(joint_q_start_np[j])
+            qd_start = int(joint_qd_start_np[j])
+            self._apply_fk_for_joint(
+                j, joint_type, parent_body, child_body,
+                joint_X_p_np, joint_X_c_np,
+                joint_q_np, joint_axis_np,
+                q_start, qd_start,
+            )
+
+            # Stage body_q sync
+            if body_q_staging is not None:
+                tf = _mat4_to_transform(self._body_transforms[child_body])
+                body_q_staging[child_body, :3] = [tf.p[0], tf.p[1], tf.p[2]]
+                body_q_staging[child_body, 3:] = [tf.q[0], tf.q[1], tf.q[2], tf.q[3]]
+
+        # Flush to model.body_q
+        if body_q_staging is not None and model.body_q is not None:
+            wp.copy(
+                model.body_q,
+                wp.from_numpy(body_q_staging, dtype=model.body_q.dtype, device="cpu"),
+            )
+
+        return self._body_transforms
+
     def build_joints(
         self,
-        body_transforms: np.ndarray | None,
         joint_range: tuple[int, int] | None = None,
         subscene_elem: Any | None = None,
     ) -> None:
@@ -102,9 +373,10 @@ class ArticulationBuilder:
         Creates one :class:`Articulation` per Newton articulation, builds
         the UIPC geometry for each joint, and registers Animator callbacks.
 
+        Must be called **after** :meth:`compute_fk` so that
+        ``self._body_transforms`` is populated.
+
         Args:
-            body_transforms: Body world-frame transforms from the rigid-body
-                builder, shape ``(body_count, 4, 4)``.
             joint_range: ``(start, end)`` slice of joints to process, or
                 ``None`` for all joints.
             subscene_elem: UIPC subscene element for anchor bodies, or ``None``.
@@ -153,13 +425,18 @@ class ArticulationBuilder:
             )
             self.articulations[a] = Articulation(name=label, dt=self._dt)
 
-        # Process each joint in range
+        # Pre-fetch numpy arrays
         state = model.state()
         joint_X_p_np = model.joint_X_p.numpy()
+        joint_type_np = model.joint_type.numpy()
+        joint_parent_np = model.joint_parent.numpy()
+        joint_child_np = model.joint_child.numpy()
+
+        # Process each joint in range
         for j in range(jstart, jend):
-            joint_type = JointType(model.joint_type.numpy()[j])
-            parent_body = int(model.joint_parent.numpy()[j])
-            child_body = int(model.joint_child.numpy()[j])
+            joint_type = JointType(joint_type_np[j])
+            parent_body = int(joint_parent_np[j])
+            child_body = int(joint_child_np[j])
 
             if child_body not in self._mapping.body_geo_slots:
                 continue
@@ -167,11 +444,11 @@ class ArticulationBuilder:
             child_slot = self._mapping.body_geo_slots[child_body]
             parent_slot = self._mapping.body_geo_slots.get(parent_body)
 
-            # Joint world-frame transform
+            # Joint world-frame transform (from the FK-computed body transforms)
             jp = joint_X_p_np[j]
             jp_mat = newton_transform_to_mat4(wp.transform(jp[:3], jp[3:]))
-            if parent_body >= 0 and body_transforms is not None:
-                joint_world_mat = body_transforms[parent_body] @ jp_mat
+            if parent_body >= 0 and self._body_transforms is not None:
+                joint_world_mat = self._body_transforms[parent_body] @ jp_mat
             else:
                 joint_world_mat = jp_mat
             pivot = joint_world_mat[:3, 3].copy()
@@ -218,7 +495,7 @@ class ArticulationBuilder:
                     state.joint_q,
                     model.joint_limit_lower,
                     model.joint_limit_upper,
-                    body_transforms,
+                    self._body_transforms,
                 )
 
             elif joint_type == JointType.FIXED:
@@ -229,7 +506,7 @@ class ArticulationBuilder:
                     parent_slot,
                     child_body,
                     child_slot,
-                    body_transforms,
+                    self._body_transforms,
                 )
 
             elif joint_type == JointType.FREE:
@@ -337,48 +614,6 @@ class ArticulationBuilder:
         geo_slot, _ = obj.geometries().create(sc)
         self._anchor_slots[name] = geo_slot
         return geo_slot
-
-    @staticmethod
-    def _rotate_around_pivot(
-        tf: np.ndarray,
-        pivot: np.ndarray,
-        axis: np.ndarray,
-        angle: float,
-    ) -> np.ndarray:
-        """Rotate a 4x4 transform around *pivot* by *angle* about *axis*.
-
-        Uses Rodrigues' rotation formula.  The rotation is applied in
-        world space: translate to the pivot, rotate, translate back.
-
-        Args:
-            tf: 4x4 homogeneous transform (modified copy returned).
-            pivot: World-space pivot point, shape (3,).
-            axis: Unit rotation axis in world frame, shape (3,).
-            angle: Rotation angle [rad].
-
-        Returns:
-            Rotated 4x4 transform.
-        """
-        c, s = np.cos(angle), np.sin(angle)
-        K = np.array(
-            [
-                [0.0, -axis[2], axis[1]],
-                [axis[2], 0.0, -axis[0]],
-                [-axis[1], axis[0], 0.0],
-            ],
-            dtype=np.float64,
-        )
-        R = np.eye(3, dtype=np.float64) + s * K + (1.0 - c) * (K @ K)
-
-        R4 = np.eye(4, dtype=np.float64)
-        R4[:3, :3] = R
-
-        T_pos = np.eye(4, dtype=np.float64)
-        T_pos[:3, 3] = pivot
-        T_neg = np.eye(4, dtype=np.float64)
-        T_neg[:3, 3] = -pivot
-
-        return T_pos @ R4 @ T_neg @ tf
 
     def _build_revolute_joint(
         self,
