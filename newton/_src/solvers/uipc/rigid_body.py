@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import warnings
 from typing import Any
 
 import numpy as np
@@ -56,9 +55,6 @@ class RigidBodyBuilder:
         self._shape_body_np: np.ndarray | None = None
         self._shape_type_np: np.ndarray | None = None
         self._shape_transform_np: np.ndarray | None = None
-
-        # Per-body world-frame 4x4 transforms, populated by build_affine_bodies
-        self.body_transforms: np.ndarray | None = None
 
     def _ensure_shape_cache(self) -> bool:
         """Populate cached numpy views of shape arrays. Returns False if unavailable."""
@@ -141,6 +137,7 @@ class RigidBodyBuilder:
         self,
         body_range: tuple[int, int] | None = None,
         subscene_elem: Any | None = None,
+        body_transforms: np.ndarray | None = None,
     ) -> None:
         """Convert Newton rigid bodies to UIPC AffineBody geometries.
 
@@ -148,35 +145,23 @@ class RigidBodyBuilder:
         ``body_mass`` and the mesh volume. If the mass or volume is unavailable,
         ``default_mass_density`` is used as a fallback.
 
-        Results are stored in :attr:`body_transforms` (shape ``(body_count, 4, 4)``).
-
         Args:
             body_range: ``(start, end)`` slice of bodies to process, or
                 ``None`` for all bodies.
             subscene_elem: UIPC subscene element to apply to geometries, or
                 ``None`` to skip.
+            body_transforms: Pre-computed body world-frame transforms from
+                :meth:`ArticulationBuilder.compute_fk`, shape
+                ``(body_count, 4, 4)``.  If ``None``, identity transforms
+                are used.
         """
         model = self._model
         if model.body_count == 0:
             return
 
-        import newton
-
-        state = model.state()
-        # Evaluate FK so articulated bodies have correct world-frame poses
-        if model.joint_count > 0 and model.joint_q is not None:
-            newton.eval_fk(model, model.joint_q, model.joint_qd, state)
-
-        if state.body_q is None or model.body_flags is None:
+        if model.body_flags is None:
             return
 
-        # Lazily allocate body_transforms (shared across multi-world calls)
-        if self.body_transforms is None:
-            self.body_transforms = np.zeros((model.body_count, 4, 4), dtype=np.float64)
-
-        # Single numpy conversion per array; pre-build wp.transform list for body_q
-        body_q_np = state.body_q.numpy()
-        body_q_transforms = [wp.transform(row[:3], row[3:]) for row in body_q_np]
         body_flags_np = model.body_flags.numpy()
         body_mass_np = model.body_mass.numpy() if model.body_mass is not None else None
 
@@ -184,15 +169,15 @@ class RigidBodyBuilder:
         for b in range(bstart, bend):
             mesh_data = build_body_mesh(model, b)
             if mesh_data is None:
-                warnings.warn(f"Body {b}: no mesh shapes found, skipping", stacklevel=2)
                 continue
 
             verts, faces = mesh_data
             sc = uipc_trimesh(verts, faces)
 
-            body_mat4 = newton_transform_to_mat4(body_q_transforms[b])
-            self.body_transforms[b] = body_mat4
-            view(sc.transforms())[:] = body_mat4
+            if body_transforms is not None:
+                view(sc.transforms())[:] = body_transforms[b]
+            else:
+                view(sc.transforms())[:] = np.eye(4, dtype=np.float64)
 
             # Compute per-body mass density from model mass and mesh volume
             mass_density = self._default_mass_density
