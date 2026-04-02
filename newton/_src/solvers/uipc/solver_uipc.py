@@ -21,6 +21,7 @@ from uipc.unit import GPa, MPa
 
 from ...core.types import override
 from ...sim import Contacts, Control, Model, State
+from ...sim.enums import JointType
 from ..solver import SolverBase
 from .articulation_builder import ArticulationBuilder
 from .cloth import ClothBuilder
@@ -58,12 +59,11 @@ class SolverUIPC(SolverBase):
         solver.configure_scene({"newton_tol": 1e-3, "line_search": {"max_iter": 8}})
 
 
-        # Customize contact tabular (receives the scene's ContactTabular object)
-        def setup_contacts(tabular):
-            elem_a = tabular.create("rubber")
-            elem_b = tabular.create("steel")
-            tabular.insert(elem_a, elem_b, 0.8, 1e9, False)
-            return elem_a  # returned as default contact element
+        # Customize contact tabular (called once per world with ground/env/robot/free elements)
+        def setup_contacts(tabular, world_index, ground_elem, env_elem, robo_elem, actor_elem):
+            gripper_elem = tabular.create(f"gripper_{world_index}")
+            tabular.insert(gripper_elem, env_elem, 0.8, 1e9, False)
+            tabular.insert(gripper_elem, ground_elem, 0.8, 1e9, False)
 
 
         solver.configure_contact_tabular(setup_contacts)
@@ -163,10 +163,12 @@ class SolverUIPC(SolverBase):
         if scene_config is None:
             scene_config: dict[str, Any] = UScene.default_config()
             scene_config["dt"] = dt
-        scene_config["contact"]["enable"] = False
         scene_config["d_hat"] = 0.001
-        scene_config["newton"]["velocity_tol"] = 0.01
-        scene_config["line_search"]["report_energy"] = True
+        # scene_config["contact"]["enable"] = False
+        scene_config["sanity_check"]["gpu_enable"] = True
+        # scene_config["newton"]["velocity_tol"] = 0.1
+        # scene_config["line_search"]["report_energy"] = True
+        # scene_config["linear_system"]["solver"] = "linear_pcg"
         # scene_config["extras"]["debug"]["dump_linear_pcg"] = True
         # scene_config["extras"]["debug"]["dump_linear_system"] = True
         # scene_config["extras"]["debug"]["dump_mas_matrices"] = True
@@ -230,18 +232,31 @@ class SolverUIPC(SolverBase):
     def configure_contact_tabular(self, fn: Callable) -> None:
         """Register a callback to configure the UIPC contact tabular before initialization.
 
-        The callback receives the UIPC ``ContactTabular`` object and should
-        create contact elements, insert contact pairs, and return the **default**
-        contact element that will be used by the rigid body, cloth, and deformable
-        builders. If the callback returns ``None``, a default element with
-        ``friction=0.5`` and ``stiffness=1 GPa`` is created automatically.
+        The solver creates a shared **ground_elem** and, for each Newton world,
+        three additional contact elements:
+
+        - **ground_elem** - applied to ground planes, shared across all worlds.
+        - **env_elem** - applied to non-articulated rigid bodies, kinematic
+          bodies, cloth, and deformable objects.
+        - **robo_elem** - applied to articulated robot links (non-free joints).
+        - **actor_elem** - applied to bodies attached via free joints.
+
+        Default contact pairs (friction ``0.5``, stiffness ``1 GPa``) are
+        inserted for all combinations except ``robo-robo``.  The callback is
+        invoked once per world so that users can create additional elements,
+        insert custom contact pairs, or modify the defaults.
 
         Must be called **before** :meth:`initialize` (i.e. with ``auto_init=False``).
 
         Args:
-            fn: A callable with signature ``fn(tabular) -> contact_element | None``.
-                ``tabular`` is the UIPC ``ContactTabular`` object obtained from
-                ``scene.contact_tabular()``.
+            fn: A callable with signature
+                ``fn(tabular, world_index, ground_elem, env_elem, robo_elem, actor_elem) -> None``.
+                ``tabular`` is the UIPC ``ContactTabular`` obtained from
+                ``scene.contact_tabular()``.  ``world_index`` is the Newton
+                world index (``0`` for single-world models).  ``ground_elem``
+                is the shared ground element.  ``env_elem``, ``robo_elem``,
+                and ``actor_elem`` are the pre-created contact elements for
+                that world.
 
         Raises:
             RuntimeError: If the solver has already been initialized.
@@ -251,12 +266,10 @@ class SolverUIPC(SolverBase):
 
         .. code-block:: python
 
-            def setup_contacts(tabular):
-                rubber = tabular.create("rubber")
-                steel = tabular.create("steel")
-                tabular.insert(rubber, steel, 0.8, 1e9, False)
-                tabular.insert(rubber, rubber, 0.6, 1e8, False)
-                return rubber  # default element for body/cloth/deformable builders
+            def setup_contacts(tabular, world_index, ground_elem, env_elem, robo_elem, actor_elem):
+                gripper_elem = tabular.create(f"gripper_{world_index}")
+                tabular.insert(gripper_elem, env_elem, 0.8, 1e9, False)
+                tabular.insert(gripper_elem, ground_elem, 0.8, 1e9, False)
 
 
             solver = SolverUIPC(model, auto_init=False)
@@ -339,19 +352,44 @@ class SolverUIPC(SolverBase):
         self.engine = uipc.Engine(backend_name=self._backend, workspace=self._workspace)
         self.world = uipc.World(self.engine)
         self.scene = uipc.Scene(self._scene_config)
-        print(f"_scene_config: {self._scene_config}")
 
-        # Contact tabular
-        if self._contact_tabular_fn is not None:
-            result = self._contact_tabular_fn(self.scene.contact_tabular())
-            if result is not None:
-                contact_elem = result
-            else:
-                contact_elem = self.scene.contact_tabular().create("default")
-                self.scene.contact_tabular().insert(contact_elem, contact_elem, 0.5, 1.0 * GPa, False)
-        else:
-            contact_elem = self.scene.contact_tabular().create("default")
-            self.scene.contact_tabular().insert(contact_elem, contact_elem, 0.5, 1.0 * GPa, False)
+        # Contact tabular — shared ground + per-world env / robot element pairs
+        contact_tabular = self.scene.contact_tabular()
+
+        # Ground element is shared across all worlds
+        ground_elem = contact_tabular.create("ground")
+        contact_tabular.insert(ground_elem, ground_elem, 0.5, 1.0 * GPa, False)
+
+        env_elems: list[Any] = []
+        robo_elems: list[Any] = []
+        actor_elems: list[Any] = []
+        body_element_overrides: dict[int, Any] = {}
+
+        for world_index in range(model.world_count):
+            suffix = f"_{world_index}" if model.world_count > 1 else ""
+            env_elem = contact_tabular.create(f"env{suffix}")
+            robo_elem = contact_tabular.create(f"robot{suffix}")
+            actor_elem = contact_tabular.create(f"actor{suffix}")
+            contact_tabular.insert(env_elem, env_elem, 0.5, 1.0 * GPa, False)
+            contact_tabular.insert(env_elem, robo_elem, 0.5, 1.0 * GPa, True)
+            contact_tabular.insert(env_elem, actor_elem, 0.5, 1.0 * GPa, True)
+            contact_tabular.insert(ground_elem, env_elem, 0.5, 1.0 * GPa, False)
+            contact_tabular.insert(ground_elem, robo_elem, 0.5, 1.0 * GPa, True)
+            contact_tabular.insert(ground_elem, actor_elem, 0.5, 1.0 * GPa, True)
+            contact_tabular.insert(robo_elem, robo_elem, 0.5, 1.0 * GPa, False)
+            contact_tabular.insert(robo_elem, actor_elem, 0.5, 1.0 * GPa, True)
+            contact_tabular.insert(actor_elem, actor_elem, 0.5, 1.0 * GPa, True)
+
+            if self._contact_tabular_fn is not None:
+                overrides = self._contact_tabular_fn(
+                    contact_tabular, world_index, ground_elem, env_elem, robo_elem, actor_elem
+                )
+                if overrides is not None:
+                    body_element_overrides.update(overrides)
+
+            env_elems.append(env_elem)
+            robo_elems.append(robo_elem)
+            actor_elems.append(actor_elem)
 
         # Subscene tabular for multi-world contact isolation
         subscene_elements: list[Any] = []
@@ -378,52 +416,78 @@ class SolverUIPC(SolverBase):
         scene = self.scene
 
         # Create one builder per type (reused across worlds)
-        rb = RigidBodyBuilder(model, scene, contact_elem, self.mapping, self._kappa, self._default_mass_density)
-        ab = ArticulationBuilder(model, scene, self.mapping, self._dt, contact_elem=contact_elem, kappa=self._kappa)
-        cb = ClothBuilder(model, scene, contact_elem, self.mapping)
-        db = DeformableBodyBuilder(
-            model, scene, contact_elem, self.mapping, default_mass_density=self._default_mass_density
-        )
+        rb = RigidBodyBuilder(model, scene, self.mapping, self._kappa, self._default_mass_density)
+        ab = ArticulationBuilder(model, scene, self.mapping, self._dt, kappa=self._kappa)
+        cb = ClothBuilder(model, scene, self.mapping)
+        db = DeformableBodyBuilder(model, scene, self.mapping, default_mass_density=self._default_mass_density)
 
-        rb.build_ground_planes()
+        rb.build_ground_planes(ground_elem)
 
+        # Build set of body indices that belong to articulations (robot links)
+        # and a separate set for bodies attached only via free joints.
+        articulation_bodies: set[int] = set()
+        free_joint_bodies: set[int] = set()
+        if model.joint_child is not None:
+            joint_child_np = model.joint_child.numpy()
+            joint_type_np = model.joint_type.numpy() if model.joint_type is not None else None
+            for j in range(model.joint_count):
+                child = int(joint_child_np[j])
+                if child >= 0:
+                    is_free = joint_type_np is not None and int(joint_type_np[j]) == int(JointType.FREE)
+                    if is_free:
+                        free_joint_bodies.add(child)
+                    else:
+                        articulation_bodies.add(child)
+            # Also include parent bodies that are part of articulations
+            if model.joint_parent is not None:
+                joint_parent_np = model.joint_parent.numpy()
+                for j in range(model.joint_count):
+                    parent = int(joint_parent_np[j])
+                    if parent >= 0:
+                        articulation_bodies.add(parent)
+
+        # Host-side indexing for per-world ranges (multi-world only)
         if model.world_count > 1:
-            assert model.body_world_start is not None
-            assert model.joint_world_start is not None
-            # Host-side indexing needed to compute per-world ranges (init only)
-            body_ws = model.body_world_start.numpy() if model.body_world_start is not None else None
-            joint_ws = model.joint_world_start.numpy() if model.joint_world_start is not None else None
+            body_ws = model.body_world_start.numpy()
+            joint_ws = model.joint_world_start.numpy()
             particle_ws = model.particle_world_start.numpy() if model.particle_world_start is not None else None
+        else:
+            body_ws = None
+            joint_ws = None
+            particle_ws = None
 
-            for world_index in range(model.world_count):
-                body_range = (int(body_ws[world_index]), int(body_ws[world_index + 1])) if body_ws is not None else None
-                joint_range = (
-                    (int(joint_ws[world_index]), int(joint_ws[world_index + 1])) if joint_ws is not None else None
-                )
+        for world_index in range(model.world_count):
+            if body_ws is not None:
+                body_range = (int(body_ws[world_index]), int(body_ws[world_index + 1]))
+                joint_range = (int(joint_ws[world_index]), int(joint_ws[world_index + 1]))
                 particle_range = (
                     (int(particle_ws[world_index]), int(particle_ws[world_index + 1]))
                     if particle_ws is not None
                     else None
                 )
-                se = subscene_elements[world_index] if subscene_elements is not None else None
-
-                rb.build_body_shape_mapping(body_range)
-                ab.compute_fk(joint_range)
-                rb.build_affine_bodies(body_range, se, ab._body_transforms)
-                ab.build_joints(joint_range, se)
-                if cb.has_cloth:
-                    cb.build(particle_range, se)
-                if db.has_deformable:
-                    db.build(particle_range, se)
-        else:
-            rb.build_body_shape_mapping()
-            ab.compute_fk()
-            rb.build_affine_bodies(body_transforms=ab._body_transforms)
-            ab.build_joints()
+            else:
+                body_range = (0, model.body_count)
+                joint_range = (0, model.joint_count)
+                particle_range = (0, model.particle_count)
+            se = subscene_elements[world_index] if subscene_elements else None
+            rb.build_body_shape_mapping(body_range)
+            ab.compute_fk(joint_range)
+            rb.build_affine_bodies(
+                env_elems[world_index],
+                robo_elems[world_index],
+                actor_elems[world_index],
+                articulation_bodies,
+                free_joint_bodies,
+                body_range,
+                se,
+                ab._body_transforms,
+                body_element_overrides,
+            )
+            ab.build_joints(robo_elems[world_index], joint_range, se)
             if cb.has_cloth:
-                cb.build()
+                cb.build(env_elems[world_index], particle_range, se)
             if db.has_deformable:
-                db.build()
+                db.build(env_elems[world_index], particle_range, se)
 
         self._rigid_body_builder = rb
         self._articulation_builder = ab
@@ -432,6 +496,10 @@ class SolverUIPC(SolverBase):
 
         # Initialize UIPC world and set up state accessors
         self.world.init(scene)
+        if not self.world.is_valid():
+            raise RuntimeError(
+                "UIPC world initialization failed (world is not valid). Check the UIPC log above for details."
+            )
         populate_backend_offsets(self.mapping, model.device)
 
         self._abd_accessor: AffineBodyStateAccessorFeature = self.world.features().find(AffineBodyStateAccessorFeature)  # ty:ignore[invalid-assignment]

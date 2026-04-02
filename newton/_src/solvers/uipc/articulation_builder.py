@@ -119,7 +119,6 @@ class ArticulationBuilder:
         scene: Any,
         mapping: UIpcMappingInfo,
         dt: float,
-        contact_elem: Any | None = None,
         kappa: float = 100 * MPa,
     ) -> None:
         self._model = model
@@ -127,7 +126,6 @@ class ArticulationBuilder:
         self._mapping = mapping
         self._dt = dt
         self._abd = AffineBodyConstitution()
-        self._contact_elem = contact_elem
         self._kappa = kappa
 
         # Per-articulation runtime objects (populated by build_joints)
@@ -305,18 +303,30 @@ class ArticulationBuilder:
             return None
 
         required = (
-            model.joint_type, model.joint_parent, model.joint_child,
-            model.joint_X_p, model.joint_axis,
-            model.joint_q_start, model.joint_qd_start,
+            model.joint_type,
+            model.joint_parent,
+            model.joint_child,
+            model.joint_X_p,
+            model.joint_axis,
+            model.joint_q_start,
+            model.joint_qd_start,
         )
         if any(a is None for a in required):
             return None
 
-        # Lazily allocate (shared across multi-world calls)
+        # Lazily allocate (shared across multi-world calls).
+        # Seed from model.body_q so that bodies without joints (e.g.
+        # kinematic bodies) already have a valid world-frame transform.
         if self._body_transforms is None:
             self._body_transforms = np.zeros(
-                (model.body_count, 4, 4), dtype=np.float64,
+                (model.body_count, 4, 4),
+                dtype=np.float64,
             )
+            if model.body_q is not None:
+                body_q_np = model.body_q.numpy()
+                for b in range(model.body_count):
+                    tf = wp.transform(body_q_np[b, :3], body_q_np[b, 3:])
+                    self._body_transforms[b] = newton_transform_to_mat4(tf)
 
         jstart, jend = joint_range if joint_range else (0, model.joint_count)
 
@@ -342,10 +352,16 @@ class ArticulationBuilder:
             q_start = int(joint_q_start_np[j])
             qd_start = int(joint_qd_start_np[j])
             self._apply_fk_for_joint(
-                j, joint_type, parent_body, child_body,
-                joint_X_p_np, joint_X_c_np,
-                joint_q_np, joint_axis_np,
-                q_start, qd_start,
+                j,
+                joint_type,
+                parent_body,
+                child_body,
+                joint_X_p_np,
+                joint_X_c_np,
+                joint_q_np,
+                joint_axis_np,
+                q_start,
+                qd_start,
             )
 
             # Stage body_q sync
@@ -365,7 +381,8 @@ class ArticulationBuilder:
 
     def build_joints(
         self,
-        joint_range: tuple[int, int] | None = None,
+        contact_elem: Any,
+        joint_range: tuple[int, int],
         subscene_elem: Any | None = None,
     ) -> None:
         """Convert Newton joints to UIPC joint constitutions.
@@ -377,11 +394,13 @@ class ArticulationBuilder:
         ``self._body_transforms`` is populated.
 
         Args:
+            contact_elem: Contact element for robot link geometries.
             joint_range: ``(start, end)`` slice of joints to process, or
                 ``None`` for all joints.
             subscene_elem: UIPC subscene element for anchor bodies, or ``None``.
         """
-        # Store subscene for use by _get_or_create_anchor
+        # Store for use by _get_or_create_anchor
+        self._contact_elem = contact_elem
         self._subscene_elem = subscene_elem
 
         model = self._model
@@ -401,9 +420,7 @@ class ArticulationBuilder:
         if any(a is None for a in required):
             return
 
-        # Determine joint iteration range
-        jstart, jend = joint_range if joint_range else (0, model.joint_count)
-
+        jstart, jend = joint_range[0], joint_range[1]
         # Collect articulation indices referenced by joints in range
         joint_articulation = (
             model.joint_articulation.numpy()

@@ -2,13 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 ###########################################################################
-# Example UIPC Allegro Hand
+# Example UIPC Allegro Hand (No Cube)
 #
 # Shows how to set up a simulation of an Allegro hand articulation
-# from a USD file using the SolverUIPC backend.  A sinusoidal trajectory
-# is applied to the finger joint targets each step.
+# from a USD file using the SolverUIPC backend, without loading the
+# cube object.  A sinusoidal trajectory is applied to the finger
+# joint targets each step.
 #
-# Command: python -m newton.examples uipc_allegro_hand --world-count 1
+# Command: python -m newton.examples uipc_allegro_hand_no_cube --world-count 1
 #
 ###########################################################################
 
@@ -44,12 +45,11 @@ class Example:
             asset_file,
             xform=wp.transform(wp.vec3(0, 0, 0.5)),
             enable_self_collisions=False,
-            ignore_paths=[".*Dummy", ".*CollisionPlane"],
+            ignore_paths=[".*Dummy", ".*CollisionPlane", ".*object", ".*goal"],
             hide_collision_shapes=True,
         )
 
-        # Number of finger DOFs (exclude the 6-DOF free joint of the cube)
-        self.finger_dof_count = allegro_hand.joint_dof_count - 6
+        self.finger_dof_count = allegro_hand.joint_dof_count
 
         # Set joint targets and drive gains for the hand joints
         for i in range(self.finger_dof_count):
@@ -64,12 +64,6 @@ class Example:
             if allegro_hand.joint_type[i] == newton.JointType.REVOLUTE:
                 allegro_hand.joint_armature[i] = 1e-2
 
-        # Update root pose of the cube (free joint)
-        q = np.array(allegro_hand.joint_q)
-        q[-7:-4] += np.array([0.0, 0.0, 0.05])
-        q[-4:] = wp.quat_rpy(0.3, 0.5, 0.1)
-        allegro_hand.joint_q = q.tolist()
-
         if self.world_count > 1:
             builder = newton.ModelBuilder(newton.Axis.Z)
             builder.replicate(allegro_hand, self.world_count, spacing=(1.0, 2.0, 0.0))
@@ -83,25 +77,11 @@ class Example:
         self.model = builder.finalize()
         self.state_0 = self.model.state()
 
-        GPa = 1e9
-        cube_body_idx = self.model.body_count - 1  # cube is the last body
-
-        def _contact_tabular_fn(contact_tabular, world_index, ground_elem, env_elem, robo_elem, actor_elem):
-            cube_elem = contact_tabular.create("cube")
-            contact_tabular.insert(cube_elem, robo_elem, 0.5, 1.0 * GPa, True)
-            contact_tabular.insert(cube_elem, ground_elem, 0.5, 1.0 * GPa, True)
-            contact_tabular.insert(cube_elem, env_elem, 0.5, 1.0 * GPa, True)
-            contact_tabular.insert(cube_elem, cube_elem, 0.5, 1.0 * GPa, False)
-            return {cube_body_idx: cube_elem}
-
         self.solver = newton.solvers.SolverUIPC(
             self.model,
             dt=self.sim_dt,
             logger_level=uipc.Logger.Info,
-            auto_init=False,
         )
-        self.solver.configure_contact_tabular(_contact_tabular_fn)
-        self.solver.initialize()
 
         self.state_1 = self.model.state()
         self.control = self.model.control()
@@ -111,6 +91,11 @@ class Example:
         self.joint_limit_lower = self.model.joint_limit_lower.numpy()
         self.joint_limit_upper = self.model.joint_limit_upper.numpy()
         self.joint_qd_start = self.model.joint_qd_start.numpy()
+
+        # Compute joints per world for the hand-only articulation
+        self.joints_per_world = self.model.joint_count // self.world_count
+        self.bodies_per_world = self.model.body_count // self.world_count
+
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
         self.viewer.set_model(self.model)
         self.viewer.set_camera(
@@ -127,13 +112,13 @@ class Example:
         target_pos = self.control.joint_target_pos.numpy()
         t = self.sim_time
 
+        dof_per_world = self.finger_dof_count
+
         for w in range(self.world_count):
-            # Each world has 22 joints; the root joint DOF start
-            root_joint_id = w * 22
+            root_joint_id = w * self.joints_per_world
             root_dof_start = self.joint_qd_start[root_joint_id]
 
-            # Animate the 20 finger DOFs (skip the fixed root and cube free joint)
-            for i in range(20):
+            for i in range(dof_per_world):
                 di = root_dof_start + i
                 val = np.sin(t + i * 0.6) * 0.1 + 0.3
                 target_pos[di] = np.clip(
@@ -167,30 +152,17 @@ class Example:
         self.viewer.end_frame()
 
     def test_final(self):
-        num_bodies_per_world = self.model.body_count // self.world_count
-        cube_body_offset = num_bodies_per_world - 1
-
         for i in range(self.world_count):
-            world_offset = i * num_bodies_per_world
+            world_offset = i * self.bodies_per_world
 
             # Hand bodies should remain in a reasonable volume
-            hand_body_indices = np.arange(num_bodies_per_world - 1, dtype=np.int32) + world_offset
+            hand_body_indices = np.arange(self.bodies_per_world, dtype=np.int32) + world_offset
             newton.examples.test_body_state(
                 self.model,
                 self.state_0,
                 f"hand bodies from world {i} are within bounds",
                 lambda q, qd: float(q[2]) > -0.5 and float(q[2]) < 2.0,
                 indices=hand_body_indices,
-            )
-
-            # Cube should be above the ground
-            cube_body_idx = world_offset + cube_body_offset
-            newton.examples.test_body_state(
-                self.model,
-                self.state_0,
-                f"cube from world {i} is above ground",
-                lambda q, _qd: float(q[2]) >= 0.0,
-                indices=np.array([cube_body_idx], dtype=np.int32),
             )
 
     @staticmethod

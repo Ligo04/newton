@@ -43,7 +43,6 @@ class ClothBuilder:
         self,
         model: Model,
         scene: Any,
-        contact_elem: Any,
         mapping: UIpcMappingInfo,
         default_thickness: float = 0.001,
         default_poisson_ratio: float = 0.3,
@@ -51,7 +50,6 @@ class ClothBuilder:
     ):
         self._model = model
         self._scene = scene
-        self._contact_elem = contact_elem
         self._mapping = mapping
         self._default_thickness = default_thickness
         self._default_poisson_ratio = default_poisson_ratio
@@ -64,6 +62,7 @@ class ClothBuilder:
 
     def build(
         self,
+        contact_elem: Any,
         particle_range: tuple[int, int] | None = None,
         subscene_elem: Any | None = None,
     ) -> None:
@@ -74,6 +73,7 @@ class ClothBuilder:
         ``trimesh``, and applies ``NeoHookeanShell`` + ``DiscreteShellBending``.
 
         Args:
+            contact_elem: Contact element to apply to cloth geometries.
             particle_range: ``(start, end)`` slice of particles, or ``None`` for all.
             subscene_elem: UIPC subscene element, or ``None``.
         """
@@ -127,7 +127,7 @@ class ClothBuilder:
         sc = uipc_trimesh(cloth_verts, cloth_faces)
 
         # Apply contact and subscene
-        self._contact_elem.apply_to(sc)
+        contact_elem.apply_to(sc)
         if subscene_elem is not None:
             subscene_elem.apply_to(sc)
         label_surface(sc)

@@ -29,7 +29,7 @@ class Example:
         self.world_count = args.world_count
         self.viewer = viewer
 
-        cartpole = newton.ModelBuilder(up_axis=newton.Axis.Y)
+        cartpole = newton.ModelBuilder(up_axis=newton.Axis.Z)
         cartpole.default_shape_cfg.density = 100.0
         cartpole.default_joint_cfg.armature = 0.1
         cartpole.default_body_armature = 0.1
@@ -43,15 +43,15 @@ class Example:
         cartpole.joint_q[-3:] = [0.0, 0.3, 0.0]
 
         if self.world_count > 1:
-            builder = newton.ModelBuilder(newton.Axis.Y)
-            builder.replicate(cartpole, self.world_count, spacing=(1.0, 0.0, 2.0))
+            builder = newton.ModelBuilder(newton.Axis.Z)
+            builder.replicate(cartpole, self.world_count, spacing=(1.0, 2.0, 0.0))
         else:
             builder = cartpole
 
         self.model = builder.finalize()
         self.state_0 = self.model.state()
 
-        self.solver = newton.solvers.SolverUIPC(self.model, dt=self.sim_dt, logger_level=uipc.Logger.Critical)
+        self.solver = newton.solvers.SolverUIPC(self.model, dt=self.sim_dt, logger_level=uipc.Logger.Info)
 
         self.state_1 = self.model.state()
         self.control = self.model.control()
@@ -61,7 +61,7 @@ class Example:
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
         self.viewer.set_model(self.model)
         self.viewer.set_camera(
-            pos=wp.vec3(9.5, 3.5, 5),
+            pos=wp.vec3(9.5, 5, 3.5),
             pitch=-10.0,
             yaw=-160.0,
         )
@@ -100,7 +100,7 @@ class Example:
             self.model,
             self.state_0,
             "cart is near ground level",
-            lambda q, qd: abs(float(q[1])) < 1.0,
+            lambda q, qd: abs(float(q[2])) < 1.0,
             indices=[i * num_bodies_per_world for i in range(self.world_count)],
         )
 
@@ -118,14 +118,14 @@ class Example:
             self.model,
             self.state_0,
             "pole1 above ground",
-            lambda q, qd: float(q[1]) > -0.5,
+            lambda q, qd: float(q[2]) > -0.5,
             indices=[i * num_bodies_per_world + 1 for i in range(self.world_count)],
         )
         newton.examples.test_body_state(
             self.model,
             self.state_0,
             "pole2 above ground",
-            lambda q, qd: float(q[1]) > -0.5,
+            lambda q, qd: float(q[2]) > -0.5,
             indices=[i * num_bodies_per_world + 2 for i in range(self.world_count)],
         )
 

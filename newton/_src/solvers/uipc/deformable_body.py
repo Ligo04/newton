@@ -67,13 +67,11 @@ class DeformableBodyBuilder:
         self,
         model: Model,
         scene: Any,
-        contact_elem: Any,
         mapping: UIpcMappingInfo,
         default_mass_density: float = 1000.0,
     ):
         self._model = model
         self._scene = scene
-        self._contact_elem = contact_elem
         self._mapping = mapping
         self._default_mass_density = default_mass_density
 
@@ -84,12 +82,14 @@ class DeformableBodyBuilder:
 
     def build(
         self,
+        contact_elem: Any,
         particle_range: tuple[int, int] | None = None,
         subscene_elem: Any | None = None,
     ) -> None:
         """Convert Newton deformable particles and tetrahedra to UIPC deformable objects.
 
         Args:
+            contact_elem: Contact element to apply to deformable geometries.
             particle_range: ``(start, end)`` slice of particles, or ``None`` for all.
             subscene_elem: UIPC subscene element, or ``None``.
         """
@@ -132,7 +132,7 @@ class DeformableBodyBuilder:
         sc = uipc_tetmesh(deformable_verts, local_tets)
 
         # Apply contact, subscene, and surface labels
-        self._contact_elem.apply_to(sc)
+        contact_elem.apply_to(sc)
         if subscene_elem is not None:
             subscene_elem.apply_to(sc)
         label_surface(sc)
