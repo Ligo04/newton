@@ -163,11 +163,11 @@ class SolverUIPC(SolverBase):
         if scene_config is None:
             scene_config: dict[str, Any] = UScene.default_config()
             scene_config["dt"] = dt
-        scene_config["d_hat"] = 0.001
-        # scene_config["contact"]["enable"] = False
+        scene_config["d_hat"] = 0.01
+        scene_config["contact"]["enable"] = False
         scene_config["sanity_check"]["gpu_enable"] = True
         # scene_config["newton"]["velocity_tol"] = 0.1
-        # scene_config["line_search"]["report_energy"] = True
+        scene_config["line_search"]["report_energy"] = True
         # scene_config["linear_system"]["solver"] = "linear_pcg"
         # scene_config["extras"]["debug"]["dump_linear_pcg"] = True
         # scene_config["extras"]["debug"]["dump_linear_system"] = True
@@ -423,21 +423,27 @@ class SolverUIPC(SolverBase):
 
         rb.build_ground_planes(ground_elem)
 
-        # Build set of body indices that belong to articulations (robot links)
-        # and a separate set for bodies attached only via free joints.
+        # Build set of body indices that belong to articulations (robot links),
+        # a separate set for bodies attached via free joints, and a set of
+        # bodies that must not be instanced (children of ball joints).
         articulation_bodies: set[int] = set()
         free_joint_bodies: set[int] = set()
+        ball_joint_bodies: set[int] = set()
         if model.joint_child is not None:
             joint_child_np = model.joint_child.numpy()
             joint_type_np = model.joint_type.numpy() if model.joint_type is not None else None
             for j in range(model.joint_count):
                 child = int(joint_child_np[j])
-                if child >= 0:
-                    is_free = joint_type_np is not None and int(joint_type_np[j]) == int(JointType.FREE)
-                    if is_free:
-                        free_joint_bodies.add(child)
-                    else:
-                        articulation_bodies.add(child)
+                if child < 0:
+                    continue
+                jtype = int(joint_type_np[j]) if joint_type_np is not None else -1
+                if jtype == int(JointType.FREE):
+                    free_joint_bodies.add(child)
+                elif jtype == int(JointType.BALL):
+                    articulation_bodies.add(child)
+                    ball_joint_bodies.add(child)
+                else:
+                    articulation_bodies.add(child)
             # Also include parent bodies that are part of articulations
             if model.joint_parent is not None:
                 joint_parent_np = model.joint_parent.numpy()
@@ -482,6 +488,7 @@ class SolverUIPC(SolverBase):
                 se,
                 ab._body_transforms,
                 body_element_overrides,
+                no_instance_bodies=ball_joint_bodies,
             )
             ab.build_joints(robo_elems[world_index], joint_range, se)
             if cb.has_cloth:

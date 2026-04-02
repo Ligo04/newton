@@ -449,7 +449,13 @@ class ArticulationBuilder:
         joint_parent_np = model.joint_parent.numpy()
         joint_child_np = model.joint_child.numpy()
 
-        # Process each joint in range
+        # -- Classify joints by type and collect per-joint data ----------------
+        revolute_joints: list[dict] = []
+        prismatic_joints: list[dict] = []
+        fixed_joints: list[dict] = []
+        free_joints: list[dict] = []
+        ball_joints: list[dict] = []
+
         for j in range(jstart, jend):
             joint_type = JointType(joint_type_np[j])
             parent_body = int(joint_parent_np[j])
@@ -459,7 +465,9 @@ class ArticulationBuilder:
                 continue
 
             child_slot = self._mapping.body_geo_slots[child_body]
+            child_instance_id = self._mapping.body_instance_ids.get(child_body, 0)
             parent_slot = self._mapping.body_geo_slots.get(parent_body)
+            parent_instance_id = self._mapping.body_instance_ids.get(parent_body, 0)
 
             # Joint world-frame transform (from the FK-computed body transforms)
             jp = joint_X_p_np[j]
@@ -479,78 +487,58 @@ class ArticulationBuilder:
                 )
             art = self.articulations[art_idx]
 
-            # Dispatch by joint type
+            jdata = {
+                "j": j,
+                "art": art,
+                "pivot": pivot,
+                "joint_world_mat": joint_world_mat,
+                "parent_body": parent_body,
+                "parent_slot": parent_slot,
+                "parent_instance_id": parent_instance_id,
+                "child_body": child_body,
+                "child_slot": child_slot,
+                "child_instance_id": child_instance_id,
+            }
+
             if joint_type == JointType.REVOLUTE:
-                self._build_revolute_joint(
-                    art,
-                    j,
-                    pivot,
-                    joint_world_mat,
-                    parent_slot,
-                    child_slot,
-                    model.joint_axis,
-                    model.joint_qd_start,
-                    model.joint_q_start,
-                    state.joint_q,
-                    model.joint_limit_lower,
-                    model.joint_limit_upper,
-                )
-
+                revolute_joints.append(jdata)
             elif joint_type == JointType.PRISMATIC:
-                self._build_prismatic_joint(
-                    art,
-                    j,
-                    pivot,
-                    joint_world_mat,
-                    parent_body,
-                    parent_slot,
-                    child_body,
-                    child_slot,
-                    model.joint_axis,
-                    model.joint_qd_start,
-                    model.joint_q_start,
-                    state.joint_q,
-                    model.joint_limit_lower,
-                    model.joint_limit_upper,
-                    self._body_transforms,
-                )
-
+                prismatic_joints.append(jdata)
             elif joint_type == JointType.FIXED:
-                self._build_fixed_joint(
-                    j,
-                    pivot,
-                    parent_body,
-                    parent_slot,
-                    child_body,
-                    child_slot,
-                    self._body_transforms,
-                )
-
+                fixed_joints.append(jdata)
             elif joint_type == JointType.FREE:
-                stc = SoftTransformConstraint()
-                stc.apply_to(
-                    child_slot.geometry(),
-                    np.array([1000.0, 1000.0]),
-                )
-
+                free_joints.append(jdata)
             elif joint_type == JointType.BALL:
-                joint_X_c = model.joint_X_c.numpy() if model.joint_X_c is not None else None
-                child_xform_tf = joint_X_c[j] if joint_X_c is not None else None
-                self._build_ball_joint(
-                    j,
-                    pivot,
-                    parent_body,
-                    parent_slot,
-                    child_body,
-                    child_slot,
-                    child_xform_tf,
-                )
-
+                ball_joints.append(jdata)
             elif joint_type in (JointType.DISTANCE, JointType.D6):
                 warnings.warn(
                     f"Joint {j}: JointType {joint_type.name} is not yet supported by SolverUIPC, skipping",
                     stacklevel=2,
                 )
+
+        # -- Batch build each joint type -------------------------------------
+        if revolute_joints:
+            self._build_revolute_joints_batch(
+                revolute_joints,
+                state,
+                model,
+            )
+        if prismatic_joints:
+            self._build_prismatic_joints_batch(
+                prismatic_joints,
+                state,
+                model,
+            )
+        if fixed_joints:
+            self._build_fixed_joints_batch(fixed_joints)
+        for jdata in free_joints:
+            stc = SoftTransformConstraint()
+            stc.apply_to(
+                jdata["child_slot"].geometry(),
+                np.array([1000.0, 1000.0]),
+            )
+        if ball_joints:
+            self._build_ball_joints_batch(ball_joints, model)
 
         # Finalise all articulations that have active joints
         for art in self.articulations.values():
@@ -632,235 +620,390 @@ class ArticulationBuilder:
         self._anchor_slots[name] = geo_slot
         return geo_slot
 
-    def _build_revolute_joint(
+    def _build_revolute_joints_batch(
         self,
-        art: Articulation,
-        j: int,
-        pivot: np.ndarray,
-        joint_world_mat: np.ndarray,
-        parent_slot: Any,
-        child_slot: Any,
-        joint_axis: wp.array,
-        joint_qd_start: wp.array,
-        joint_q_start: wp.array,
-        joint_q: wp.array | None,
-        joint_limit_lower: wp.array | None,
-        joint_limit_upper: wp.array | None,
+        joints: list[dict],
+        state: Any,
+        model: Any,
     ) -> None:
-        """Create a UIPC revolute joint and register it with *art*."""
-        if parent_slot is None:
-            parent_slot = self._get_or_create_anchor(
-                f"anchor_joint_{j}",
-                pivot,
+        """Create all revolute joints in a single batched linemesh."""
+        n = len(joints)
+
+        all_verts: list[np.ndarray] = []
+        all_edges: list[list[int]] = []
+        parent_slots: list[Any] = []
+        parent_ids: list[int] = []
+        child_slots: list[Any] = []
+        child_ids: list[int] = []
+        strengths: list[float] = []
+        drive_strengths: list[float] = []
+        ext_forces: list[float] = []
+        lowers: list[float] = []
+        uppers: list[float] = []
+        limit_strengths: list[float] = []
+        has_any_limit = False
+
+        joint_axis_np = model.joint_axis.numpy()
+        joint_qd_start_np = model.joint_qd_start.numpy()
+        joint_q_start_np = model.joint_q_start.numpy()
+        joint_q_np = state.joint_q.numpy() if state.joint_q is not None else None
+
+        # Dispatch list for animator callback: (art, newton_joint_idx, edge_idx)
+        anim_dispatch: list[tuple[Articulation, int, int]] = []
+        for edge_idx, jdata in enumerate(joints):
+            j = jdata["j"]
+            art = jdata["art"]
+            pivot = jdata["pivot"]
+            joint_world_mat = jdata["joint_world_mat"]
+            p_slot = jdata["parent_slot"]
+            p_id = jdata["parent_instance_id"]
+            c_slot = jdata["child_slot"]
+            c_id = jdata["child_instance_id"]
+
+            if p_slot is None:
+                p_slot = self._get_or_create_anchor(f"anchor_joint_{j}", pivot)
+                p_id = 0
+
+            qd_start = int(joint_qd_start_np[j])
+            axis_world = joint_world_mat[:3, :3] @ joint_axis_np[qd_start]
+            axis_world = axis_world / (np.linalg.norm(axis_world) + 1e-12)
+            q_start = int(joint_q_start_np[j])
+
+            all_verts.append(pivot)
+            all_verts.append(pivot + axis_world)
+            all_edges.append([2 * edge_idx, 2 * edge_idx + 1])
+
+            parent_slots.append(p_slot)
+            parent_ids.append(p_id)
+            child_slots.append(c_slot)
+            child_ids.append(c_id)
+            strengths.append(1000.0)
+            drive_strengths.append(1000.0)
+            ext_forces.append(0.0)
+
+            # Limits
+            lower, upper = self._extract_limits(
+                j,
+                model.joint_qd_start,
+                model.joint_limit_lower,
+                model.joint_limit_upper,
             )
+            if lower is not None and upper is not None:
+                lowers.append(lower)
+                uppers.append(upper)
+                limit_strengths.append(1.0)
+                has_any_limit = True
+            else:
+                lowers.append(-1e18)
+                uppers.append(1e18)
+                limit_strengths.append(1.0)
 
-        qd_start = int(joint_qd_start.numpy()[j])
-        axis_world = joint_world_mat[:3, :3] @ joint_axis.numpy()[qd_start]
-        axis_world = axis_world / (np.linalg.norm(axis_world) + 1e-12)
-        q_start = int(joint_q_start.numpy()[j])
+            # Register joint with its articulation
+            init_angle = float(joint_q_np[q_start]) if joint_q_np is not None else 0.0
+            art.register_joint(j, q_start, qd_start, init_angle)
+            anim_dispatch.append((art, j, edge_idx))
 
-        vs = np.array([pivot, pivot + axis_world], dtype=np.float64)
-        jm = linemesh(vs, np.array([[0, 1]], dtype=np.int32))
+        # Build batched linemesh
+        jm = linemesh(
+            np.array(all_verts, dtype=np.float64),
+            np.array(all_edges, dtype=np.int32),
+        )
 
         AffineBodyRevoluteJoint().apply_to(
             jm,
-            [parent_slot],
-            [0],
-            [child_slot],
-            [0],
-            [1000.0],
+            parent_slots,
+            np.array(parent_ids, dtype=np.int32),
+            child_slots,
+            np.array(child_ids, dtype=np.int32),
+            np.array(strengths, dtype=np.float64),
         )
-        AffineBodyDrivingRevoluteJoint().apply_to(jm, [1000.0])
-        AffineBodyRevoluteJointExternalForce().apply_to(jm, [0.0])
-
-        # Apply joint limits via UIPC constitution
-        lower, upper = self._extract_limits(
-            j,
-            joint_qd_start,
-            joint_limit_lower,
-            joint_limit_upper,
+        AffineBodyDrivingRevoluteJoint().apply_to(
+            jm,
+            np.array(drive_strengths, dtype=np.float64),
         )
-        if lower is not None and upper is not None:
-            AffineBodyRevoluteJointLimit().apply_to(jm, lower, upper)
-
-        jobj = self._scene.objects().create(f"joint_{j}_revolute")
-        jslot, _ = jobj.geometries().create(jm)
-
-        # Register with the Articulation runtime
-        init_angle = float(joint_q.numpy()[q_start]) if joint_q is not None else 0.0
-        art.register_joint(j, q_start, qd_start, init_angle)
-        art.joint_geo_slots[j] = jslot
-        art.joint_mesh[j] = jm
-
-        self._mapping.joint_geo_slots[j] = jslot
-        self._mapping.joint_mesh[j] = jm
-
-        self._scene.animator().insert(
-            jobj,
-            lambda info, a=art, ni=j: a.revolute_joint_anim(info, ni),
+        AffineBodyRevoluteJointExternalForce().apply_to(
+            jm,
+            np.array(ext_forces, dtype=np.float64),
         )
-
-    def _build_prismatic_joint(
-        self,
-        art: Articulation,
-        j: int,
-        pivot: np.ndarray,
-        joint_world_mat: np.ndarray,
-        parent_body: int,
-        parent_slot: Any,
-        child_body: int,
-        child_slot: Any,
-        joint_axis: wp.array,
-        joint_qd_start: wp.array,
-        joint_q_start: wp.array,
-        joint_q: wp.array | None,
-        joint_limit_lower: wp.array | None,
-        joint_limit_upper: wp.array | None,
-        body_transforms: np.ndarray | None,
-    ) -> None:
-        """Create a UIPC prismatic joint and register it with *art*."""
-        if parent_slot is None:
-            parent_slot = self._get_or_create_anchor(
-                f"anchor_joint_{j}",
-                pivot,
+        if has_any_limit:
+            AffineBodyRevoluteJointLimit().apply_to(
+                jm,
+                np.array(lowers, dtype=np.float64),
+                np.array(uppers, dtype=np.float64),
+                np.array(limit_strengths, dtype=np.float64),
             )
 
-        qd_start = int(joint_qd_start.numpy()[j])
-        axis_world = joint_world_mat[:3, :3] @ joint_axis.numpy()[qd_start]
-        axis_world = axis_world / (np.linalg.norm(axis_world) + 1e-12)
+        jobj = self._scene.objects().create("joints_revolute")
+        jslot, _ = jobj.geometries().create(jm)
 
-        q_start = int(joint_q_start.numpy()[j])
+        # Record mappings for each joint
+        for art, j, edge_idx in anim_dispatch:
+            art.joint_geo_slots[j] = jslot
+            art.joint_mesh[j] = jm
+            self._mapping.joint_geo_slots[j] = jslot
+            self._mapping.joint_mesh[j] = jm
 
-        vs = np.array([pivot, pivot + axis_world], dtype=np.float64)
-        jm = linemesh(vs, np.array([[0, 1]], dtype=np.int32))
+        # Single animator callback dispatching to all revolute joints
+        dispatch_copy = list(anim_dispatch)
+
+        def _revolute_batch_anim(info: Any, dispatch: list = dispatch_copy) -> None:
+            try:
+                geo = info.geo_slots()[0].geometry()
+            except (TypeError, IndexError):
+                return
+            for art, newton_j, edge_idx in dispatch:
+                art.revolute_joint_anim(geo, newton_j, edge_idx)
+
+        self._scene.animator().insert(jobj, _revolute_batch_anim)
+
+    def _build_prismatic_joints_batch(
+        self,
+        joints: list[dict],
+        state: Any,
+        model: Any,
+    ) -> None:
+        """Create all prismatic joints in a single batched linemesh."""
+        body_transforms = self._body_transforms
+
+        all_verts: list[np.ndarray] = []
+        all_edges: list[list[int]] = []
+        parent_slots: list[Any] = []
+        parent_ids: list[int] = []
+        child_slots: list[Any] = []
+        child_ids: list[int] = []
+        strengths: list[float] = []
+        drive_strengths: list[float] = []
+        ext_forces: list[float] = []
+        init_distances: list[float] = []
+        lowers: list[float] = []
+        uppers: list[float] = []
+        limit_strengths: list[float] = []
+        has_any_limit = False
+
+        joint_axis_np = model.joint_axis.numpy()
+        joint_qd_start_np = model.joint_qd_start.numpy()
+        joint_q_start_np = model.joint_q_start.numpy()
+
+        anim_dispatch: list[tuple[Articulation, int, int]] = []
+        for edge_idx, jdata in enumerate(joints):
+            j = jdata["j"]
+            art = jdata["art"]
+            pivot = jdata["pivot"]
+            joint_world_mat = jdata["joint_world_mat"]
+            parent_body = jdata["parent_body"]
+            child_body = jdata["child_body"]
+            p_slot = jdata["parent_slot"]
+            p_id = jdata["parent_instance_id"]
+            c_slot = jdata["child_slot"]
+            c_id = jdata["child_instance_id"]
+
+            if p_slot is None:
+                p_slot = self._get_or_create_anchor(f"anchor_joint_{j}", pivot)
+                p_id = 0
+
+            qd_start = int(joint_qd_start_np[j])
+            axis_world = joint_world_mat[:3, :3] @ joint_axis_np[qd_start]
+            axis_world = axis_world / (np.linalg.norm(axis_world) + 1e-12)
+            q_start = int(joint_q_start_np[j])
+
+            all_verts.append(pivot)
+            all_verts.append(pivot + axis_world)
+            all_edges.append([2 * edge_idx, 2 * edge_idx + 1])
+
+            parent_slots.append(p_slot)
+            parent_ids.append(p_id)
+            child_slots.append(c_slot)
+            child_ids.append(c_id)
+            strengths.append(100.0)
+            drive_strengths.append(100.0)
+            ext_forces.append(0.0)
+
+            # Compute init_distance
+            if body_transforms is not None and parent_body >= 0:
+                parent_pos = body_transforms[parent_body][:3, 3]
+                child_pos = body_transforms[child_body][:3, 3]
+                init_dist = float(np.dot(child_pos - parent_pos, axis_world))
+            elif body_transforms is not None:
+                child_pos = body_transforms[child_body][:3, 3]
+                init_dist = float(np.dot(child_pos - pivot, axis_world))
+            else:
+                init_dist = 0.0
+            init_distances.append(init_dist)
+
+            # Limits
+            lower, upper = self._extract_limits(
+                j,
+                model.joint_qd_start,
+                model.joint_limit_lower,
+                model.joint_limit_upper,
+            )
+            if lower is not None and upper is not None:
+                lowers.append(lower)
+                uppers.append(upper)
+                limit_strengths.append(1.0)
+                has_any_limit = True
+            else:
+                lowers.append(-1e18)
+                uppers.append(1e18)
+                limit_strengths.append(1.0)
+
+            art.register_joint(j, q_start, qd_start, init_dist)
+            anim_dispatch.append((art, j, edge_idx))
+
+        # Build batched linemesh
+        jm = linemesh(
+            np.array(all_verts, dtype=np.float64),
+            np.array(all_edges, dtype=np.int32),
+        )
 
         AffineBodyPrismaticJoint().apply_to(
             jm,
-            [parent_slot],
-            [0],
-            [child_slot],
-            [0],
-            [100.0],
+            parent_slots,
+            np.array(parent_ids, dtype=np.int32),
+            child_slots,
+            np.array(child_ids, dtype=np.int32),
+            np.array(strengths, dtype=np.float64),
         )
-        AffineBodyDrivingPrismaticJoint().apply_to(jm, [100.0])
-        AffineBodyPrismaticJointExternalForce().apply_to(jm, [0.0])
-
-        # Apply joint limits via UIPC constitution
-        lower, upper = self._extract_limits(
-            j,
-            joint_qd_start,
-            joint_limit_lower,
-            joint_limit_upper,
+        AffineBodyDrivingPrismaticJoint().apply_to(
+            jm,
+            np.array(drive_strengths, dtype=np.float64),
         )
-        if lower is not None and upper is not None:
-            AffineBodyPrismaticJointLimit().apply_to(jm, lower, upper)
+        AffineBodyPrismaticJointExternalForce().apply_to(
+            jm,
+            np.array(ext_forces, dtype=np.float64),
+        )
+        if has_any_limit:
+            AffineBodyPrismaticJointLimit().apply_to(
+                jm,
+                np.array(lowers, dtype=np.float64),
+                np.array(uppers, dtype=np.float64),
+                np.array(limit_strengths, dtype=np.float64),
+            )
 
-        # Compute init_distance from parent/child body world positions
-        # projected onto the joint axis direction.
-        if body_transforms is not None and parent_body >= 0:
-            parent_pos = body_transforms[parent_body][:3, 3]
-            child_pos = body_transforms[child_body][:3, 3]
-            init_dist = float(np.dot(child_pos - parent_pos, axis_world))
-        elif body_transforms is not None:
-            # Parent is world (fixed anchor at pivot)
-            child_pos = body_transforms[child_body][:3, 3]
-            init_dist = float(np.dot(child_pos - pivot, axis_world))
-        else:
-            init_dist = 0.0
-        view(jm.edges().find("init_distance"))[0] = init_dist  # ty:ignore[no-matching-overload]  # pyright: ignore[reportArgumentType]
+        # Set per-edge init_distance
+        dist_view = view(jm.edges().find("init_distance"))
+        for i, d in enumerate(init_distances):
+            dist_view[i] = d  # ty:ignore[no-matching-overload]  # pyright: ignore[reportArgumentType]
 
-        jobj = self._scene.objects().create(f"joint_{j}_prismatic")
+        jobj = self._scene.objects().create("joints_prismatic")
         jslot, _ = jobj.geometries().create(jm)
-        art.register_joint(j, q_start, qd_start, init_dist)
-        art.joint_geo_slots[j] = jslot
-        art.joint_mesh[j] = jm
 
-        self._mapping.joint_geo_slots[j] = jslot
-        self._mapping.joint_mesh[j] = jm
+        for art, j, edge_idx in anim_dispatch:
+            art.joint_geo_slots[j] = jslot
+            art.joint_mesh[j] = jm
+            self._mapping.joint_geo_slots[j] = jslot
+            self._mapping.joint_mesh[j] = jm
 
-        self._scene.animator().insert(
-            jobj,
-            lambda info, a=art, ni=j: a.prismatic_joint_anim(info, ni),
-        )
+        dispatch_copy = list(anim_dispatch)
 
-    def _build_fixed_joint(
+        def _prismatic_batch_anim(info: Any, dispatch: list = dispatch_copy) -> None:
+            try:
+                geo = info.geo_slots()[0].geometry()
+            except (TypeError, IndexError):
+                return
+            for art, newton_j, edge_idx in dispatch:
+                art.prismatic_joint_anim(geo, newton_j, edge_idx)
+
+        self._scene.animator().insert(jobj, _prismatic_batch_anim)
+
+    def _build_fixed_joints_batch(
         self,
-        j: int,
-        pivot: np.ndarray,
-        parent_body: int,
-        parent_slot: Any,
-        child_body: int,
-        child_slot: Any,
-        body_transforms: np.ndarray | None,
+        joints: list[dict],
     ) -> None:
-        """Create a UIPC fixed joint, or mark child as fixed if no parent."""
-        if parent_slot is None:
-            view(child_slot.geometry().instances().find(uipc_builtin.is_fixed))[:] = 1
+        """Create all fixed joints in a single batched pointcloud."""
+        # Separate world-anchored (no parent) from inter-body fixed joints
+        child_slots: list[Any] = []
+        child_ids: list[int] = []
+        parent_slots: list[Any] = []
+        parent_ids: list[int] = []
+        strengths: list[float] = []
+        joint_indices: list[int] = []
+
+        for jdata in joints:
+            j = jdata["j"]
+            p_slot = jdata["parent_slot"]
+            p_id = jdata["parent_instance_id"]
+            c_slot = jdata["child_slot"]
+            c_id = jdata["child_instance_id"]
+
+            if p_slot is None:
+                # No parent → mark child instance as fixed directly
+                view(c_slot.geometry().instances().find(uipc_builtin.is_fixed))[c_id] = 1
+                continue
+
+            child_slots.append(c_slot)
+            child_ids.append(c_id)
+            parent_slots.append(p_slot)
+            parent_ids.append(p_id)
+            strengths.append(100.0)
+            joint_indices.append(j)
+
+        if not child_slots:
             return
 
         jm = pointcloud(np.array([], dtype=np.float64).reshape(0, 3))
         AffineBodyFixedJoint().apply_to(
             jm,
-            [child_slot],
-            [0],
-            [parent_slot],
-            [0],
-            [100.0],
+            child_slots,
+            np.array(child_ids, dtype=np.int32),
+            parent_slots,
+            np.array(parent_ids, dtype=np.int32),
+            np.array(strengths, dtype=np.float64),
         )
 
-        jobj = self._scene.objects().create(f"joint_{j}_fixed")
+        jobj = self._scene.objects().create("joints_fixed")
         jslot, _ = jobj.geometries().create(jm)
-        self._mapping.joint_geo_slots[j] = jslot
-        self._mapping.joint_mesh[j] = jm
+        for j in joint_indices:
+            self._mapping.joint_geo_slots[j] = jslot
+            self._mapping.joint_mesh[j] = jm
 
-    def _build_ball_joint(
+    def _build_ball_joints_batch(
         self,
-        j: int,
-        pivot: np.ndarray,
-        parent_body: int,
-        parent_slot: Any,
-        child_body: int,
-        child_slot: Any,
-        child_xform: np.ndarray | None,
+        joints: list[dict],
+        model: Any,
     ) -> None:
-        """Create a UIPC spherical (ball) joint.
+        """Create all spherical (ball) joints in a single batched pointcloud."""
+        parent_slots: list[Any] = []
+        child_slots: list[Any] = []
+        r_locals: list[np.ndarray] = []
+        joint_indices: list[int] = []
 
-        The spherical joint constrains the anchor point to coincide on
-        both bodies while allowing free relative rotation.  No driving
-        or animation is needed — similar to a fixed joint but with
-        rotational freedom.
+        joint_X_c_np = model.joint_X_c.numpy() if model.joint_X_c is not None else None
 
-        Args:
-            child_xform: The child-frame joint transform
-                (``wp.transform``: first 3 elements are translation).
-                When provided, its translation is used as the anchor
-                position in the child body's local frame.
-        """
-        if parent_slot is None:
-            parent_slot = self._get_or_create_anchor(
-                f"anchor_joint_{j}",
-                pivot,
-            )
+        for jdata in joints:
+            j = jdata["j"]
+            p_slot = jdata["parent_slot"]
+            pivot = jdata["pivot"]
+            c_slot = jdata["child_slot"]
 
-        # Use child_xform translation as the anchor in child local frame
-        if child_xform is not None:
-            r_local = np.array(child_xform[:3], dtype=np.float64)
-        else:
-            r_local = np.zeros(3, dtype=np.float64)
+            if p_slot is None:
+                p_slot = self._get_or_create_anchor(f"anchor_joint_{j}", pivot)
+
+            child_xform = joint_X_c_np[j] if joint_X_c_np is not None else None
+            if child_xform is not None:
+                r_local = np.array(child_xform[:3], dtype=np.float64)
+            else:
+                r_local = np.zeros(3, dtype=np.float64)
+
+            parent_slots.append(p_slot)
+            child_slots.append(c_slot)
+            r_locals.append(r_local)
+            joint_indices.append(j)
 
         jm = pointcloud(np.array([], dtype=np.float64).reshape(0, 3))
         AffineBodySphericalJoint().apply_to(
             jm,
-            [parent_slot],
-            [child_slot],
-            np.array([r_local], dtype=np.float64),
+            parent_slots,
+            child_slots,
+            np.array(r_locals, dtype=np.float64),
             100.0,
         )
 
-        jobj = self._scene.objects().create(f"joint_{j}_ball")
+        jobj = self._scene.objects().create("joints_ball")
         jslot, _ = jobj.geometries().create(jm)
-        self._mapping.joint_geo_slots[j] = jslot
-        self._mapping.joint_mesh[j] = jm
+        for j in joint_indices:
+            self._mapping.joint_geo_slots[j] = jslot
+            self._mapping.joint_mesh[j] = jm
 
     @staticmethod
     def _extract_limits(

@@ -15,7 +15,6 @@ from typing import Any
 import numpy as np
 import warp as wp
 from uipc import view
-from uipc.core import Animation as UIPCAnimation
 
 from ...sim import JointTargetMode, JointType
 
@@ -263,14 +262,20 @@ class Articulation:
 
     def revolute_joint_anim(
         self,
-        info: UIPCAnimation.UpdateInfo,
+        geo: Any,
         newton_joint_idx: int,
+        edge_idx: int = 0,
     ) -> None:
         """UIPC Animator callback for a revolute joint.
 
         Reads the current angle from the UIPC geometry, updates local
         readback state, then writes constraint flags and target angle
         back into the geometry based on the cached control mode.
+
+        Args:
+            geo: UIPC geometry object (from ``info.geo_slots()[0].geometry()``).
+            newton_joint_idx: Newton joint index.
+            edge_idx: Edge index within the batched linemesh.
         """
         if not self._ensure_state():
             return
@@ -281,15 +286,10 @@ class Articulation:
         assert self.target_force is not None
         assert self.target_position is not None
 
-        try:
-            geo = info.geo_slots()[0].geometry()
-        except (TypeError, IndexError):
-            return
-
         local = self._joint_to_local[newton_joint_idx]
         pos_np = self.joint_position.numpy()
         vel_np = self.joint_velocity.numpy()
-        curr_angle = view(geo.edges().find("angle"))[0]
+        curr_angle = view(geo.edges().find("angle"))[edge_idx]
 
         # Update readback (numpy view writes through to wp.array on CPU)
         if self._step_count > 0:
@@ -301,26 +301,32 @@ class Articulation:
         is_force_constrained = bool(self.is_force_constrained.numpy()[local])
         force_only = is_force_constrained and not driving
 
-        view(geo.edges().find("driving/is_constrained"))[:] = int(driving)
-        view(geo.edges().find("external_torque/is_constrained"))[:] = int(force_only)
+        view(geo.edges().find("driving/is_constrained"))[edge_idx] = int(driving)
+        view(geo.edges().find("external_torque/is_constrained"))[edge_idx] = int(force_only)
 
         # Force/torque control
         if force_only:
-            view(geo.edges().find("external_force"))[:] = self.target_force.numpy()[local]
+            view(geo.edges().find("external_force"))[edge_idx] = self.target_force.numpy()[local]
 
         # Position/velocity driving
         if driving:
-            view(geo.edges().find("aim_angle"))[:] = self.target_position.numpy()[local]
+            view(geo.edges().find("aim_angle"))[edge_idx] = self.target_position.numpy()[local]
 
     def prismatic_joint_anim(
         self,
-        info: UIPCAnimation.UpdateInfo,
+        geo: Any,
         newton_joint_idx: int,
+        edge_idx: int = 0,
     ) -> None:
         """UIPC Animator callback for a prismatic joint.
 
         Same structure as :meth:`revolute_joint_anim` but operates on
         distance / aim_distance attributes.
+
+        Args:
+            geo: UIPC geometry object (from ``info.geo_slots()[0].geometry()``).
+            newton_joint_idx: Newton joint index.
+            edge_idx: Edge index within the batched linemesh.
         """
         if not self._ensure_state():
             return
@@ -331,16 +337,11 @@ class Articulation:
         assert self.target_force is not None
         assert self.target_position is not None
 
-        try:
-            geo = info.geo_slots()[0].geometry()
-        except (TypeError, IndexError):
-            return
-
         local = self._joint_to_local[newton_joint_idx]
         pos_np = self.joint_position.numpy()
         vel_np = self.joint_velocity.numpy()
-        curr_dist = view(geo.edges().find("distance"))[0]
-        # print("curr_dist", curr_dist)
+        curr_dist = view(geo.edges().find("distance"))[edge_idx]
+
         # Update readback (numpy view writes through to wp.array on CPU)
         if self._step_count > 0:
             vel_np[local] = (curr_dist - pos_np[local]) / self._dt
@@ -351,14 +352,14 @@ class Articulation:
         is_force_constrained = bool(self.is_force_constrained.numpy()[local])
         force_only = is_force_constrained and not driving
 
-        view(geo.edges().find("driving/is_constrained"))[:] = int(driving)
-        view(geo.edges().find("external_force/is_constrained"))[:] = int(force_only)
+        view(geo.edges().find("driving/is_constrained"))[edge_idx] = int(driving)
+        view(geo.edges().find("external_force/is_constrained"))[edge_idx] = int(force_only)
 
         if force_only:
-            view(geo.edges().find("external_force"))[:] = self.target_force.numpy()[local]
+            view(geo.edges().find("external_force"))[edge_idx] = self.target_force.numpy()[local]
 
         if driving:
-            view(geo.edges().find("aim_distance"))[:] = self.target_position.numpy()[local]
+            view(geo.edges().find("aim_distance"))[edge_idx] = self.target_position.numpy()[local]
 
     # ------------------------------------------------------------------
     # Per-step control caching & state readback

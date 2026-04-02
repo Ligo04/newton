@@ -248,8 +248,10 @@ def newton_transform_to_mat4(tf: wp.transform) -> np.ndarray:  # pyright: ignore
 class UIpcMappingInfo:
     """Stores the mapping between Newton model indices and UIPC objects."""
 
-    # body_idx -> UIPC geometry slot
+    # body_idx -> UIPC geometry slot (shared when instanced)
     body_geo_slots: dict[int, Any] = field(default_factory=dict)
+    # body_idx -> instance index within its geometry (0 for non-instanced bodies)
+    body_instance_ids: dict[int, int] = field(default_factory=dict)
     # joint_idx -> UIPC joint geometry slot
     joint_geo_slots: dict[int, Any] = field(default_factory=dict)
     # joint_idx -> UIPC joint linemesh (for reading angle/position)
@@ -463,7 +465,9 @@ def populate_backend_offsets(mapping: UIpcMappingInfo, device: wp.Device) -> Non
             )
             offsets_np[i] = 0
             continue
-        offsets_np[i] = offset_attr.view()[0]
+        base_offset = offset_attr.view()[0]
+        instance_id = mapping.body_instance_ids.get(body_idx, 0)
+        offsets_np[i] = base_offset + instance_id
 
     mapping.body_indices_wp = wp.from_numpy(indices_np, dtype=wp.int32, device=device)
     mapping.backend_offsets_wp = wp.from_numpy(offsets_np, dtype=wp.uint32, device=device)
