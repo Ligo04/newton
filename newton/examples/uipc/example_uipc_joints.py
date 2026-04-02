@@ -30,17 +30,17 @@ class Example:
 
         self.viewer = viewer
 
-        builder = newton.ModelBuilder(up_axis=newton.Axis.Y)
+        builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
 
         # Common geometry settings
         cuboid_hx = 0.1
-        cuboid_hy = 0.75
-        cuboid_hz = 0.1
-        upper_hy = 0.25 * cuboid_hy
+        cuboid_hy = 0.1
+        cuboid_hz = 0.75
+        upper_hz = 0.25 * cuboid_hz
 
         # Layout positions (X-columns), above ground
         cols = [-3.0, 0.0, 3.0]
-        drop_y = 2.0
+        drop_z = 2.0
 
         # ---------------------------------------------------------
         # REVOLUTE (hinge) joint
@@ -49,25 +49,25 @@ class Example:
 
         a_rev = builder.add_link(
             xform=wp.transform(
-                p=wp.vec3(x, drop_y + upper_hy, 0.0),
+                p=wp.vec3(x, 0.0, drop_z + upper_hz),
                 q=wp.quat_identity(),
             ),
         )
         b_rev = builder.add_link(
             xform=wp.transform(
-                p=wp.vec3(x, drop_y - cuboid_hy, 0.0),
-                q=wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), 0.0),
+                p=wp.vec3(x, 0.0, drop_z - cuboid_hz),
+                q=wp.quat_from_axis_angle(wp.vec3(0.0, 1.0, 0.0), 0.0),
             ),
             label="b_rev",
         )
-        builder.add_shape_box(a_rev, hx=cuboid_hx, hy=upper_hy, hz=cuboid_hz)
+        builder.add_shape_box(a_rev, hx=cuboid_hx, hy=cuboid_hy, hz=upper_hz)
         builder.add_shape_box(b_rev, hx=cuboid_hx, hy=cuboid_hy, hz=cuboid_hz)
 
         j_fixed_rev = builder.add_joint_fixed(
             parent=-1,
             child=a_rev,
             parent_xform=wp.transform(
-                p=wp.vec3(x, drop_y + upper_hy, 0.0),
+                p=wp.vec3(x, 0.0, drop_z + upper_hz),
                 q=wp.quat_identity(),
             ),
             child_xform=wp.transform(
@@ -79,13 +79,13 @@ class Example:
         j_revolute = builder.add_joint_revolute(
             parent=a_rev,
             child=b_rev,
-            axis=wp.vec3(0.0, 0.0, 1.0),
+            axis=wp.vec3(0.0, 1.0, 0.0),
             parent_xform=wp.transform(
-                p=wp.vec3(0.0, -upper_hy, 0.0),
+                p=wp.vec3(0.0, 0.0, -upper_hz),
                 q=wp.quat_identity(),
             ),
             child_xform=wp.transform(
-                p=wp.vec3(0.0, +cuboid_hy, 0.0),
+                p=wp.vec3(0.0, 0.0, +cuboid_hz),
                 q=wp.quat_identity(),
             ),
             label="revolute_a_b",
@@ -103,25 +103,25 @@ class Example:
 
         a_pri = builder.add_link(
             xform=wp.transform(
-                p=wp.vec3(x, drop_y + upper_hy, 0.0),
+                p=wp.vec3(x, 0.0, drop_z + upper_hz),
                 q=wp.quat_identity(),
             ),
         )
         b_pri = builder.add_link(
             xform=wp.transform(
-                p=wp.vec3(x, drop_y - cuboid_hy, 0.0),
+                p=wp.vec3(x, 0.0, drop_z - cuboid_hz),
                 q=wp.quat_identity(),
             ),
             label="b_pri",
         )
-        builder.add_shape_box(a_pri, hx=cuboid_hx, hy=upper_hy, hz=cuboid_hz)
+        builder.add_shape_box(a_pri, hx=cuboid_hx, hy=cuboid_hy, hz=upper_hz)
         builder.add_shape_box(b_pri, hx=cuboid_hx, hy=cuboid_hy, hz=cuboid_hz)
 
         j_fixed_pri = builder.add_joint_fixed(
             parent=-1,
             child=a_pri,
             parent_xform=wp.transform(
-                p=wp.vec3(x, drop_y + upper_hy, 0.0),
+                p=wp.vec3(x, 0.0, drop_z + upper_hz),
                 q=wp.quat_identity(),
             ),
             child_xform=wp.transform(
@@ -133,13 +133,13 @@ class Example:
         j_prismatic = builder.add_joint_prismatic(
             parent=a_pri,
             child=b_pri,
-            axis=wp.vec3(0.0, 1.0, 0.0),  # slide along Y
+            axis=wp.vec3(0.0, 0.0, 1.0),  # slide along Z
             parent_xform=wp.transform(
-                p=wp.vec3(0.0, -upper_hy, 0.0),
+                p=wp.vec3(0.0, 0.0, -upper_hz),
                 q=wp.quat_identity(),
             ),
             child_xform=wp.transform(
-                p=wp.vec3(0.0, +cuboid_hz, 0.0),
+                p=wp.vec3(0.0, 0.0, +cuboid_hy),
                 q=wp.quat_identity(),
             ),
             limit_lower=-0.3,
@@ -156,20 +156,20 @@ class Example:
         # ---------------------------------------------------------
         x = cols[2]
         radius = 0.3
-        y_offset = -1.0  # shift down so the ball hangs lower
+        z_offset = -1.0  # shift down so the ball hangs lower
 
         # Kinematic (massless) sphere as the parent anchor
         a_ball = builder.add_link(
             xform=wp.transform(
-                p=wp.vec3(x, drop_y + radius + cuboid_hy + y_offset, 0.0),
+                p=wp.vec3(x, 0.0, drop_z + radius + cuboid_hz + z_offset),
                 q=wp.quat_identity(),
             ),
             is_kinematic=True,
         )
         b_ball = builder.add_link(
             xform=wp.transform(
-                p=wp.vec3(x, drop_y + radius + y_offset, 0.0),
-                q=wp.quat_from_axis_angle(wp.vec3(1.0, 1.0, 0.0), 0.0),
+                p=wp.vec3(x, 0.0, drop_z + radius + z_offset),
+                q=wp.quat_from_axis_angle(wp.vec3(1.0, 0.0, 1.0), 0.0),
             ),
             label="b_ball",
         )
@@ -184,7 +184,7 @@ class Example:
             parent=-1,
             child=a_ball,
             parent_xform=wp.transform(
-                p=wp.vec3(x, drop_y + radius + cuboid_hy + y_offset, 0.0),
+                p=wp.vec3(x, 0.0, drop_z + radius + cuboid_hz + z_offset),
                 q=wp.quat_identity(),
             ),
             child_xform=wp.transform(
@@ -201,7 +201,7 @@ class Example:
                 q=wp.quat_identity(),
             ),
             child_xform=wp.transform(
-                p=wp.vec3(0.0, +cuboid_hy, 0.0),
+                p=wp.vec3(0.0, 0.0, +cuboid_hz),
                 q=wp.quat_identity(),
             ),
             label="ball_a_b",
@@ -227,9 +227,9 @@ class Example:
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
         self.viewer.set_model(self.model)
         self.viewer.set_camera(
-            pos=wp.vec3(-2.0, 2.0, 8.0),
+            pos=wp.vec3(-2.0, -8.0, 2.0),
             pitch=0,
-            yaw=-90.0,
+            yaw=90.0,
         )
         self.viewer._paused = True
 
@@ -265,7 +265,7 @@ class Example:
             self.model,
             self.state_0,
             "revolute child above ground",
-            lambda q, qd: float(q[1]) > 0.0,
+            lambda q, qd: float(q[2]) > 0.0,
             [1],  # b_rev
         )
 
@@ -274,7 +274,7 @@ class Example:
             self.model,
             self.state_0,
             "prismatic child above ground",
-            lambda q, qd: float(q[1]) > 0.0,
+            lambda q, qd: float(q[2]) > 0.0,
             [3],  # b_pri
         )
 
@@ -283,7 +283,7 @@ class Example:
             self.model,
             self.state_0,
             "ball child above ground",
-            lambda q, qd: float(q[1]) > 0.0,
+            lambda q, qd: float(q[2]) > 0.0,
             [5],  # b_ball
         )
 

@@ -26,12 +26,12 @@ class Example:
 
         self.viewer = viewer
 
-        builder = newton.ModelBuilder(up_axis=newton.Axis.Y)
+        builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
         builder.add_ground_plane()
 
-        # A single cube placed at height Y=3
+        # A single cube placed at height Z=5
         body = builder.add_body(
-            xform=wp.transform(p=wp.vec3(0.0, 5.0, 0.0), q=wp.quat_identity()),
+            xform=wp.transform(p=wp.vec3(0.0, 0.0, 5.0), q=wp.quat_identity()),
         )
         builder.add_shape_box(body, hx=0.2, hy=0.2, hz=0.2)
 
@@ -49,7 +49,7 @@ class Example:
 
         self.viewer.set_model(self.model)
         self.viewer.set_camera(
-            pos=wp.vec3(2.0, 5.0, 10.0),
+            pos=wp.vec3(2.0, 10.0, 5.0),
             pitch=0.0,
             yaw=-180.0,
         )
@@ -68,12 +68,12 @@ class Example:
         self.sim_time += self.frame_dt
 
     def test_final(self):
-        # After falling, the cube should be near the ground (Y < 1) and not exploded
+        # After falling, the cube should be near the ground (Z < 3) and not exploded
         newton.examples.test_body_state(
             self.model,
             self.state_0,
             "cube fell toward ground",
-            lambda q, qd: float(q[1]) < 3.0 and float(q[1]) > -0.5,
+            lambda q, qd: float(q[2]) < 3.0 and float(q[2]) > -0.5,
             [0],
         )
 

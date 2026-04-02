@@ -39,14 +39,12 @@ class RigidBodyBuilder:
         self,
         model: Model,
         scene: Any,
-        contact_elem: Any,
         mapping: UIpcMappingInfo,
         kappa: float,
         default_mass_density: float,
     ):
         self._model = model
         self._scene = scene
-        self._contact_elem = contact_elem
         self._mapping = mapping
         self._kappa = kappa
         self._default_mass_density = default_mass_density
@@ -73,8 +71,12 @@ class RigidBodyBuilder:
         self._shape_transform_np = model.shape_transform.numpy()
         return True
 
-    def build_ground_planes(self) -> None:
-        """Create UIPC halfplanes for Newton ground plane shapes (body == -1)."""
+    def build_ground_planes(self, contact_elem: Any) -> None:
+        """Create UIPC halfplanes for Newton ground plane shapes (body == -1).
+
+        Args:
+            contact_elem: Contact element to apply to ground geometries.
+        """
         model = self._model
         if not self._ensure_shape_cache():
             return
@@ -91,6 +93,7 @@ class RigidBodyBuilder:
                 center = tf_np[:3].astype(np.float64)
 
                 g = halfplane(center, normal)
+                contact_elem.apply_to(g)
                 ground_obj = self._scene.objects().create(f"ground_plane_{s}")
                 ground_obj.geometries().create(g)
 
@@ -135,9 +138,15 @@ class RigidBodyBuilder:
 
     def build_affine_bodies(
         self,
-        body_range: tuple[int, int] | None = None,
-        subscene_elem: Any | None = None,
+        env_elem: Any,
+        robo_elem: Any,
+        actor_elem: Any,
+        articulation_bodies: set[int],
+        free_joint_bodies: set[int],
+        body_range: tuple[int, int],
+        subscene_elem: Any,
         body_transforms: np.ndarray | None = None,
+        body_element_overrides: dict[int, Any] | None = None,
     ) -> None:
         """Convert Newton rigid bodies to UIPC AffineBody geometries.
 
@@ -145,7 +154,19 @@ class RigidBodyBuilder:
         ``body_mass`` and the mesh volume. If the mass or volume is unavailable,
         ``default_mass_density`` is used as a fallback.
 
+        Contact element assignment priority:
+        1. Per-body overrides in ``body_element_overrides``.
+        2. ``robo_elem`` for bodies in ``articulation_bodies`` (non-free joints).
+        3. ``actor_elem`` for bodies in ``free_joint_bodies``.
+        4. ``env_elem`` for all other bodies (non-articulated / kinematic).
+
         Args:
+            env_elem: Contact element for non-articulated (environment) bodies.
+            robo_elem: Contact element for articulated (robot) bodies.
+            actor_elem: Contact element for free-joint bodies.
+            articulation_bodies: Set of body indices that belong to non-free
+                joint articulations.
+            free_joint_bodies: Set of body indices attached via free joints.
             body_range: ``(start, end)`` slice of bodies to process, or
                 ``None`` for all bodies.
             subscene_elem: UIPC subscene element to apply to geometries, or
@@ -154,6 +175,9 @@ class RigidBodyBuilder:
                 :meth:`ArticulationBuilder.compute_fk`, shape
                 ``(body_count, 4, 4)``.  If ``None``, identity transforms
                 are used.
+            body_element_overrides: Mapping from body index to a custom contact
+                element.  Overrides the default assignment for the specified
+                bodies.
         """
         model = self._model
         if model.body_count == 0:
@@ -165,8 +189,7 @@ class RigidBodyBuilder:
         body_flags_np = model.body_flags.numpy()
         body_mass_np = model.body_mass.numpy() if model.body_mass is not None else None
 
-        bstart, bend = body_range if body_range else (0, model.body_count)
-        for b in range(bstart, bend):
+        for b in range(body_range[0], body_range[1]):
             mesh_data = build_body_mesh(model, b)
             if mesh_data is None:
                 continue
@@ -186,7 +209,16 @@ class RigidBodyBuilder:
                 if vol > 1e-12:
                     mass_density = float(body_mass_np[b]) / vol
 
-            self._contact_elem.apply_to(sc)
+            # Per-body override > articulation check > free joint > default env
+            if body_element_overrides is not None and b in body_element_overrides:
+                elem = body_element_overrides[b]
+            elif b in articulation_bodies:
+                elem = robo_elem
+            elif b in free_joint_bodies:
+                elem = actor_elem
+            else:
+                elem = env_elem
+            elem.apply_to(sc)
             if subscene_elem is not None:
                 subscene_elem.apply_to(sc)
             AffineBodyConstitution().apply_to(sc=sc, kappa=self._kappa, mass_density=mass_density)

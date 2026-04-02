@@ -318,7 +318,7 @@ def _weld_vertices(
         ``(welded_verts, remapped_faces)`` with unique vertices only.
     """
     # Round to tolerance grid so coincident vertices hash identically
-    quantized = np.round(verts / tol).astype(np.int64)
+    quantized = np.ascontiguousarray(np.round(verts / tol).astype(np.int64))
     # Use structured view for unique-row detection
     view = quantized.view(np.dtype([("", np.int64)] * 3))
     _, unique_idx, inverse = np.unique(view, return_index=True, return_inverse=True)
