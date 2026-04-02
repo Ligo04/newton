@@ -1396,13 +1396,11 @@ class ModelBuilder:
         Example:
             .. code-block:: python
 
-                builder.add_custom_values(
-                    **{
-                        "mujoco:pair_geom1": 0,
-                        "mujoco:pair_geom2": 1,
-                        "mujoco:pair_world": builder.current_world,
-                    }
-                )
+                builder.add_custom_values(**{
+                    "mujoco:pair_geom1": 0,
+                    "mujoco:pair_geom2": 1,
+                    "mujoco:pair_world": builder.current_world,
+                })
                 # Returns: {'mujoco:pair_geom1': 0, 'mujoco:pair_geom2': 0, 'mujoco:pair_world': 0}
         """
         indices: dict[str, int] = {}
@@ -2689,9 +2687,11 @@ class ModelBuilder:
             self.world_gravity.append(gravity)
         else:
             up_vector = self.up_vector
-            self.world_gravity.append(
-                (up_vector[0] * self.gravity, up_vector[1] * self.gravity, up_vector[2] * self.gravity)
-            )
+            self.world_gravity.append((
+                up_vector[0] * self.gravity,
+                up_vector[1] * self.gravity,
+                up_vector[2] * self.gravity,
+            ))
 
     def end_world(self):
         """End the current world context and return to global scope.
@@ -2946,9 +2946,9 @@ class ModelBuilder:
         self.shape_collision_group.extend(builder.shape_collision_group)
 
         # Copy collision filter pairs with offset
-        self.shape_collision_filter_pairs.extend(
-            [(i + start_shape_idx, j + start_shape_idx) for i, j in builder.shape_collision_filter_pairs]
-        )
+        self.shape_collision_filter_pairs.extend([
+            (i + start_shape_idx, j + start_shape_idx) for i, j in builder.shape_collision_filter_pairs
+        ])
 
         # Handle world assignments
         # For particles
@@ -2972,9 +2972,9 @@ class ModelBuilder:
             s = [self.current_world] * builder.joint_count
             self.joint_world.extend(s)
             # Offset articulation indices for joints (-1 stays -1)
-            self.joint_articulation.extend(
-                [a + start_articulation_idx if a >= 0 else -1 for a in builder.joint_articulation]
-            )
+            self.joint_articulation.extend([
+                a + start_articulation_idx if a >= 0 else -1 for a in builder.joint_articulation
+            ])
 
         # For articulations
         if builder.articulation_count > 0:
@@ -2988,21 +2988,21 @@ class ModelBuilder:
 
             # Remap body and joint indices in equality constraints
             self.equality_constraint_type.extend(builder.equality_constraint_type)
-            self.equality_constraint_body1.extend(
-                [b + start_body_idx if b != -1 else -1 for b in builder.equality_constraint_body1]
-            )
-            self.equality_constraint_body2.extend(
-                [b + start_body_idx if b != -1 else -1 for b in builder.equality_constraint_body2]
-            )
+            self.equality_constraint_body1.extend([
+                b + start_body_idx if b != -1 else -1 for b in builder.equality_constraint_body1
+            ])
+            self.equality_constraint_body2.extend([
+                b + start_body_idx if b != -1 else -1 for b in builder.equality_constraint_body2
+            ])
             self.equality_constraint_anchor.extend(builder.equality_constraint_anchor)
             self.equality_constraint_torquescale.extend(builder.equality_constraint_torquescale)
             self.equality_constraint_relpose.extend(builder.equality_constraint_relpose)
-            self.equality_constraint_joint1.extend(
-                [j + start_joint_idx if j != -1 else -1 for j in builder.equality_constraint_joint1]
-            )
-            self.equality_constraint_joint2.extend(
-                [j + start_joint_idx if j != -1 else -1 for j in builder.equality_constraint_joint2]
-            )
+            self.equality_constraint_joint1.extend([
+                j + start_joint_idx if j != -1 else -1 for j in builder.equality_constraint_joint1
+            ])
+            self.equality_constraint_joint2.extend([
+                j + start_joint_idx if j != -1 else -1 for j in builder.equality_constraint_joint2
+            ])
             self.equality_constraint_polycoef.extend(builder.equality_constraint_polycoef)
             if label_prefix:
                 self.equality_constraint_label.extend(
@@ -3018,12 +3018,12 @@ class ModelBuilder:
             self.constraint_mimic_world.extend(constraint_worlds)
 
             # Remap joint indices in mimic constraints
-            self.constraint_mimic_joint0.extend(
-                [j + start_joint_idx if j != -1 else -1 for j in builder.constraint_mimic_joint0]
-            )
-            self.constraint_mimic_joint1.extend(
-                [j + start_joint_idx if j != -1 else -1 for j in builder.constraint_mimic_joint1]
-            )
+            self.constraint_mimic_joint0.extend([
+                j + start_joint_idx if j != -1 else -1 for j in builder.constraint_mimic_joint0
+            ])
+            self.constraint_mimic_joint1.extend([
+                j + start_joint_idx if j != -1 else -1 for j in builder.constraint_mimic_joint1
+            ])
             self.constraint_mimic_coef0.extend(builder.constraint_mimic_coef0)
             self.constraint_mimic_coef1.extend(builder.constraint_mimic_coef1)
             self.constraint_mimic_enabled.extend(builder.constraint_mimic_enabled)
@@ -4695,21 +4695,19 @@ class ModelBuilder:
             }
             num_lin_axes, num_ang_axes = self.joint_dof_dim[i]
             for j in range(qd_start, qd_start + num_lin_axes + num_ang_axes):
-                data["axes"].append(
-                    {
-                        "axis": self.joint_axis[j],
-                        "actuator_mode": self.joint_target_mode[j],
-                        "target_ke": self.joint_target_ke[j],
-                        "target_kd": self.joint_target_kd[j],
-                        "limit_ke": self.joint_limit_ke[j],
-                        "limit_kd": self.joint_limit_kd[j],
-                        "limit_lower": self.joint_limit_lower[j],
-                        "limit_upper": self.joint_limit_upper[j],
-                        "target_pos": self.joint_target_pos[j],
-                        "target_vel": self.joint_target_vel[j],
-                        "effort_limit": self.joint_effort_limit[j],
-                    }
-                )
+                data["axes"].append({
+                    "axis": self.joint_axis[j],
+                    "actuator_mode": self.joint_target_mode[j],
+                    "target_ke": self.joint_target_ke[j],
+                    "target_kd": self.joint_target_kd[j],
+                    "limit_ke": self.joint_limit_ke[j],
+                    "limit_kd": self.joint_limit_kd[j],
+                    "limit_lower": self.joint_limit_lower[j],
+                    "limit_upper": self.joint_limit_upper[j],
+                    "target_pos": self.joint_target_pos[j],
+                    "target_vel": self.joint_target_vel[j],
+                    "effort_limit": self.joint_effort_limit[j],
+                })
 
             joint_data[(parent, child)] = data
 
