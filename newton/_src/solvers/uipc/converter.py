@@ -138,19 +138,26 @@ def _read_from_backend_kernel(
     out_body_q: wp.array(dtype=wp.transform),
     out_body_qd: wp.array(dtype=wp.spatial_vector),
 ):
-    """Gather UIPC backend transforms/velocities back into Newton state arrays."""
+    """Gather UIPC backend transforms/velocities back into Newton state arrays.
+
+    The source matrices are stored in **column-major** order (Eigen convention)
+    but wrapped as Warp ``mat44d`` which uses row-major indexing.  Therefore
+    every element access swaps row and column: ``m[i, j]`` in Warp reads the
+    Eigen element at ``(j, i)``.
+    """
     tid = wp.tid()
     backend_idx = backend_offsets[tid]
     body_idx = body_indices[tid]
 
     m = src_transforms[backend_idx]
 
-    # Extract position
-    px = wp.float32(m[0, 3])
-    py = wp.float32(m[1, 3])
-    pz = wp.float32(m[2, 3])
+    # Extract position (Eigen column 3 → Warp row 3)
+    px = wp.float32(m[3, 0])
+    py = wp.float32(m[3, 1])
+    pz = wp.float32(m[3, 2])
 
     # Extract quaternion from rotation matrix (Shepperd's method)
+    # Eigen M[i,j] → Warp m[j,i]
     r00 = m[0, 0]
     r11 = m[1, 1]
     r22 = m[2, 2]
@@ -169,26 +176,26 @@ def _read_from_backend_kernel(
     if trace > zero_d:
         s = wp.sqrt(trace + one_d) * two_d
         qw = quarter_d * s
-        qx = (m[2, 1] - m[1, 2]) / s
-        qy = (m[0, 2] - m[2, 0]) / s
-        qz = (m[1, 0] - m[0, 1]) / s
+        qx = (m[1, 2] - m[2, 1]) / s
+        qy = (m[2, 0] - m[0, 2]) / s
+        qz = (m[0, 1] - m[1, 0]) / s
     elif r00 > r11 and r00 > r22:
         s = wp.sqrt(one_d + r00 - r11 - r22) * two_d
-        qw = (m[2, 1] - m[1, 2]) / s
+        qw = (m[1, 2] - m[2, 1]) / s
         qx = quarter_d * s
-        qy = (m[0, 1] + m[1, 0]) / s
-        qz = (m[0, 2] + m[2, 0]) / s
+        qy = (m[1, 0] + m[0, 1]) / s
+        qz = (m[2, 0] + m[0, 2]) / s
     elif r11 > r22:
         s = wp.sqrt(one_d + r11 - r00 - r22) * two_d
-        qw = (m[0, 2] - m[2, 0]) / s
-        qx = (m[0, 1] + m[1, 0]) / s
+        qw = (m[2, 0] - m[0, 2]) / s
+        qx = (m[1, 0] + m[0, 1]) / s
         qy = quarter_d * s
-        qz = (m[1, 2] + m[2, 1]) / s
+        qz = (m[2, 1] + m[1, 2]) / s
     else:
         s = wp.sqrt(one_d + r22 - r00 - r11) * two_d
-        qw = (m[1, 0] - m[0, 1]) / s
-        qx = (m[0, 2] + m[2, 0]) / s
-        qy = (m[1, 2] + m[2, 1]) / s
+        qw = (m[0, 1] - m[1, 0]) / s
+        qx = (m[2, 0] + m[0, 2]) / s
+        qy = (m[2, 1] + m[1, 2]) / s
         qz = quarter_d * s
 
     # Normalize quaternion
@@ -205,14 +212,14 @@ def _read_from_backend_kernel(
         wp.quat(wp.float32(qx), wp.float32(qy), wp.float32(qz), wp.float32(qw)),
     )
 
-    # Extract velocity: linear from last column, angular from skew-symmetric
+    # Extract velocity (column-major): linear from Eigen column 3, angular from skew-symmetric
     v = src_velocities[backend_idx]
-    vx = wp.float32(v[0, 3])
-    vy = wp.float32(v[1, 3])
-    vz = wp.float32(v[2, 3])
-    wx = wp.float32(v[2, 1])
-    wy = wp.float32(v[0, 2])
-    wz = wp.float32(v[1, 0])
+    vx = wp.float32(v[3, 0])
+    vy = wp.float32(v[3, 1])
+    vz = wp.float32(v[3, 2])
+    wx = wp.float32(v[1, 2])
+    wy = wp.float32(v[2, 0])
+    wz = wp.float32(v[0, 1])
 
     out_body_qd[body_idx] = wp.spatial_vector(vx, vy, vz, wx, wy, wz)
 
