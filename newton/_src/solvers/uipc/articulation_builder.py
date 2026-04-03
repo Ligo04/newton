@@ -532,10 +532,7 @@ class ArticulationBuilder:
             self._build_fixed_joints_batch(fixed_joints)
         for jdata in free_joints:
             stc = SoftTransformConstraint()
-            stc.apply_to(
-                jdata["child_slot"].geometry(),
-                np.array([1000.0, 1000.0]),
-            )
+            stc.apply_to(jdata["child_slot"].geometry())
         if ball_joints:
             self._build_ball_joints_batch(ball_joints, model)
 

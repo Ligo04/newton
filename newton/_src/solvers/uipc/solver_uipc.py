@@ -162,7 +162,7 @@ class SolverUIPC(SolverBase):
         if scene_config is None:
             scene_config: dict[str, Any] = UScene.default_config()
             scene_config["dt"] = dt
-        scene_config["d_hat"] = 0.01
+        scene_config["d_hat"] = 0.001
         scene_config["contact"]["enable"] = False
         if model.gravity is not None:
             gravity_np = model.gravity.numpy().flatten()
@@ -514,6 +514,16 @@ class SolverUIPC(SolverBase):
             self._transforms_wp = None
             self._velocities_wp = None
 
+        # Pre-allocate GPU buffers for reading state back from UIPC (from-UIPC direction).
+        # Uses uipc.adapter.warp.buffer() so copy_transform_to/copy_velocity_to can write
+        # directly into device memory owned by us.
+        if n > 0:
+            self._abd_transform_buf = uipc.adapter.warp.buffer(n, dtype=wp.mat44d, device=model.device)
+            self._abd_velocity_buf = uipc.adapter.warp.buffer(n, dtype=wp.mat44d, device=model.device)
+        else:
+            self._abd_transform_buf = None
+            self._abd_velocity_buf = None
+
         self._initialized = True
 
     # ------------------------------------------------------------------
@@ -629,31 +639,31 @@ class SolverUIPC(SolverBase):
     #         self._abd_accessor.copy_from(self._abd_state_geo)
 
     def _sync_body_state_from_uipc(self, state_out: State) -> None:
-        """Read UIPC body state back into Newton state arrays via zero-copy GPU buffers.
+        """Read UIPC body state back into Newton state arrays via pre-allocated GPU buffers.
 
-        ``transform_buffer()`` triggers a GPU conversion (Vector12 → Matrix4x4)
-        inside the UIPC backend and returns a :class:`BufferView` pointing at
-        device memory.  We wrap it as a Warp array with no copy.  The kernel
-        accounts for Eigen's column-major layout by swapping row/column indices.
+        Uses ``copy_transform_to`` / ``copy_velocity_to`` to let UIPC copy its
+        internal state into our pre-allocated :class:`uipc.adapter.warp` buffers.
+        The kernel accounts for Eigen's column-major layout by swapping row/column
+        indices.
         """
         model = self.model
         n = self.mapping.num_mapped_bodies
         if n > 0 and state_out.body_q is not None:
             assert self.mapping.backend_offsets_wp is not None
+            assert self._abd_transform_buf is not None
+            assert self._abd_velocity_buf is not None
 
-            # Zero-copy wrap of UIPC GPU buffers (re-wrapped each step because
-            # transform_buffer() writes into an internal device buffer that may
-            # be resized between steps).
-            transforms_wp = uipc.adapter.warp.from_buffer_view(self._abd_accessor.transform_buffer(), wp.mat44d)
-            velocities_wp = uipc.adapter.warp.from_buffer_view(self._abd_accessor.velocity_buffer(), wp.mat44d)
+            # Copy UIPC backend state into our pre-allocated device buffers.
+            self._abd_accessor.copy_transform_to(self._abd_transform_buf.buffer_view())
+            self._abd_accessor.copy_velocity_to(self._abd_velocity_buf.buffer_view())
 
             wp.launch(
                 _read_from_backend_kernel,
                 dim=n,
                 inputs=[
                     self.mapping.backend_offsets_wp,
-                    transforms_wp.warp(),
-                    velocities_wp.warp(),
+                    self._abd_transform_buf.warp(),
+                    self._abd_velocity_buf.warp(),
                     self.mapping.body_indices_wp,
                     state_out.body_q,
                     state_out.body_qd,
