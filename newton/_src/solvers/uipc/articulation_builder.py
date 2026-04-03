@@ -32,7 +32,6 @@ from uipc.constitution import (
     AffineBodySphericalJoint,
     SoftTransformConstraint,
 )
-from uipc.geometry import linemesh, pointcloud
 from uipc.geometry import trimesh as uipc_trimesh
 from uipc.unit import MPa
 
@@ -627,10 +626,7 @@ class ArticulationBuilder:
         model: Any,
     ) -> None:
         """Create all revolute joints in a single batched linemesh."""
-        n = len(joints)
-
         all_verts: list[np.ndarray] = []
-        all_edges: list[list[int]] = []
         parent_slots: list[Any] = []
         parent_ids: list[int] = []
         child_slots: list[Any] = []
@@ -671,7 +667,6 @@ class ArticulationBuilder:
 
             all_verts.append(pivot)
             all_verts.append(pivot + axis_world)
-            all_edges.append([2 * edge_idx, 2 * edge_idx + 1])
 
             parent_slots.append(p_slot)
             parent_ids.append(p_id)
@@ -703,14 +698,12 @@ class ArticulationBuilder:
             art.register_joint(j, q_start, qd_start, init_angle)
             anim_dispatch.append((art, j, edge_idx))
 
-        # Build batched linemesh
-        jm = linemesh(
-            np.array(all_verts, dtype=np.float64),
-            np.array(all_edges, dtype=np.int32),
-        )
-
-        AffineBodyRevoluteJoint().apply_to(
-            jm,
+        # Build batched linemesh via create_geometry
+        pos0s = np.array(all_verts[0::2], dtype=np.float64)
+        pos1s = np.array(all_verts[1::2], dtype=np.float64)
+        jm = AffineBodyRevoluteJoint().create_geometry(
+            pos0s,
+            pos1s,
             parent_slots,
             np.array(parent_ids, dtype=np.int32),
             child_slots,
@@ -766,7 +759,6 @@ class ArticulationBuilder:
         body_transforms = self._body_transforms
 
         all_verts: list[np.ndarray] = []
-        all_edges: list[list[int]] = []
         parent_slots: list[Any] = []
         parent_ids: list[int] = []
         child_slots: list[Any] = []
@@ -808,7 +800,6 @@ class ArticulationBuilder:
 
             all_verts.append(pivot)
             all_verts.append(pivot + axis_world)
-            all_edges.append([2 * edge_idx, 2 * edge_idx + 1])
 
             parent_slots.append(p_slot)
             parent_ids.append(p_id)
@@ -850,14 +841,12 @@ class ArticulationBuilder:
             art.register_joint(j, q_start, qd_start, init_dist)
             anim_dispatch.append((art, j, edge_idx))
 
-        # Build batched linemesh
-        jm = linemesh(
-            np.array(all_verts, dtype=np.float64),
-            np.array(all_edges, dtype=np.int32),
-        )
-
-        AffineBodyPrismaticJoint().apply_to(
-            jm,
+        # Build batched linemesh via create_geometry
+        pos0s = np.array(all_verts[0::2], dtype=np.float64)
+        pos1s = np.array(all_verts[1::2], dtype=np.float64)
+        jm = AffineBodyPrismaticJoint().create_geometry(
+            pos0s,
+            pos1s,
             parent_slots,
             np.array(parent_ids, dtype=np.int32),
             child_slots,
@@ -941,9 +930,7 @@ class ArticulationBuilder:
         if not child_slots:
             return
 
-        jm = pointcloud(np.array([], dtype=np.float64).reshape(0, 3))
-        AffineBodyFixedJoint().apply_to(
-            jm,
+        jm = AffineBodyFixedJoint().create_geometry(
             child_slots,
             np.array(child_ids, dtype=np.int32),
             parent_slots,
@@ -964,39 +951,58 @@ class ArticulationBuilder:
     ) -> None:
         """Create all spherical (ball) joints in a single batched pointcloud."""
         parent_slots: list[Any] = []
+        parent_ids: list[int] = []
         child_slots: list[Any] = []
-        r_locals: list[np.ndarray] = []
+        child_ids: list[int] = []
+        l_positions: list[np.ndarray] = []
+        r_positions: list[np.ndarray] = []
+        strengths: list[float] = []
         joint_indices: list[int] = []
 
+        joint_X_p_np = model.joint_X_p.numpy()
         joint_X_c_np = model.joint_X_c.numpy() if model.joint_X_c is not None else None
 
         for jdata in joints:
             j = jdata["j"]
             p_slot = jdata["parent_slot"]
+            p_id = jdata["parent_instance_id"]
             pivot = jdata["pivot"]
             c_slot = jdata["child_slot"]
+            c_id = jdata["child_instance_id"]
 
             if p_slot is None:
                 p_slot = self._get_or_create_anchor(f"anchor_joint_{j}", pivot)
+                p_id = 0
 
-            child_xform = joint_X_c_np[j] if joint_X_c_np is not None else None
-            if child_xform is not None:
-                r_local = np.array(child_xform[:3], dtype=np.float64)
+            # Parent-side local anchor (joint_X_p translation)
+            l_pos = np.array(joint_X_p_np[j][:3], dtype=np.float64)
+
+            # Child-side local anchor (joint_X_c translation)
+            if joint_X_c_np is not None:
+                r_pos = np.array(joint_X_c_np[j][:3], dtype=np.float64)
             else:
-                r_local = np.zeros(3, dtype=np.float64)
+                r_pos = np.zeros(3, dtype=np.float64)
 
             parent_slots.append(p_slot)
+            parent_ids.append(p_id)
             child_slots.append(c_slot)
-            r_locals.append(r_local)
+            child_ids.append(c_id)
+            l_positions.append(l_pos)
+            r_positions.append(r_pos)
+            strengths.append(100.0)
             joint_indices.append(j)
 
-        jm = pointcloud(np.array([], dtype=np.float64).reshape(0, 3))
-        AffineBodySphericalJoint().apply_to(
-            jm,
+        if not child_slots:
+            return
+
+        jm = AffineBodySphericalJoint().create_geometry(
+            np.array(l_positions, dtype=np.float64),
+            np.array(r_positions, dtype=np.float64),
             parent_slots,
+            np.array(parent_ids, dtype=np.int32),
             child_slots,
-            np.array(r_locals, dtype=np.float64),
-            100.0,
+            np.array(child_ids, dtype=np.int32),
+            np.array(strengths, dtype=np.float64),
         )
 
         jobj = self._scene.objects().create("joints_ball")

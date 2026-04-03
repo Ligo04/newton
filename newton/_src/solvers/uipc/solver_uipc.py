@@ -9,12 +9,13 @@ import warnings
 from collections.abc import Callable
 from typing import Any
 
-import numpy as np
+import numpy as np  # noqa: F401  # used by _sync_body_state_to_uipc
 import uipc
+import uipc.adapter.warp
 import uipc.builtin as uipc_builtin
 import warp as wp
 from uipc import Logger as ULogger
-from uipc import Matrix4x4, view
+from uipc import Matrix4x4
 from uipc.core import AffineBodyStateAccessorFeature
 from uipc.core import Scene as UScene
 from uipc.unit import GPa, MPa
@@ -28,8 +29,6 @@ from .cloth import ClothBuilder
 from .converter import (
     UIpcMappingInfo,
     _read_from_backend_kernel,
-    _spatial_to_vel_mat44_kernel,
-    _transform_to_mat44_kernel,
     populate_backend_offsets,
 )
 from .deformable_body import DeformableBodyBuilder
@@ -165,14 +164,6 @@ class SolverUIPC(SolverBase):
             scene_config["dt"] = dt
         scene_config["d_hat"] = 0.01
         scene_config["contact"]["enable"] = False
-        scene_config["sanity_check"]["gpu_enable"] = True
-        # scene_config["newton"]["velocity_tol"] = 0.1
-        scene_config["line_search"]["report_energy"] = True
-        # scene_config["linear_system"]["solver"] = "linear_pcg"
-        # scene_config["extras"]["debug"]["dump_linear_pcg"] = True
-        # scene_config["extras"]["debug"]["dump_linear_system"] = True
-        # scene_config["extras"]["debug"]["dump_mas_matrices"] = True
-        # scene_config["extras"]["debug"]["dump_surface"] = True
         if model.gravity is not None:
             gravity_np = model.gravity.numpy().flatten()
             scene_config["gravity"] = [[float(gravity_np[0])], [float(gravity_np[1])], [float(gravity_np[2])]]
@@ -514,7 +505,7 @@ class SolverUIPC(SolverBase):
         self._abd_state_geo.instances().create(uipc_builtin.transform, Matrix4x4.Zero())
         self._abd_state_geo.instances().create(uipc_builtin.velocity, Matrix4x4.Zero())
 
-        # Pre-allocate GPU buffers for batch transform sync
+        # Pre-allocate GPU buffers for batch transform sync (to-UIPC direction)
         n = self.mapping.num_mapped_bodies
         if n > 0:
             self._transforms_wp = wp.zeros(n, dtype=wp.mat44d, device=model.device)
@@ -595,7 +586,7 @@ class SolverUIPC(SolverBase):
         )
 
     @override
-    def update_contacts(self, contacts: Contacts) -> None:
+    def update_contacts(self, contacts: Contacts) -> None:  # ty:ignore[invalid-method-override]  # pyright: ignore[reportIncompatibleMethodOverride]
         """Update a Contacts object. No-op -- UIPC handles contacts internally."""
         pass
 
@@ -603,61 +594,66 @@ class SolverUIPC(SolverBase):
     # GPU batch sync methods
     # ------------------------------------------------------------------
 
-    def _sync_body_state_to_uipc(self, state_in: State) -> None:
-        """Write Newton body transforms and velocities into UIPC."""
-        model = self.model
-        n = self.mapping.num_mapped_bodies
+    # def _sync_body_state_to_uipc(self, state_in: State) -> None:
+    #     """Write Newton body transforms and velocities into UIPC."""
+    #     model = self.model
+    #     n = self.mapping.num_mapped_bodies
 
-        if n > 0 and state_in.body_q is not None:
-            wp.launch(
-                _transform_to_mat44_kernel,
-                dim=n,
-                inputs=[state_in.body_q, self.mapping.body_indices_wp, self._transforms_wp],
-                device=model.device,
-            )
-            if state_in.body_qd is not None:
-                wp.launch(
-                    _spatial_to_vel_mat44_kernel,
-                    dim=n,
-                    inputs=[state_in.body_qd, self.mapping.body_indices_wp, self._velocities_wp],
-                    device=model.device,
-                )
+    #     if n > 0 and state_in.body_q is not None:
+    #         wp.launch(
+    #             _transform_to_mat44_kernel,
+    #             dim=n,
+    #             inputs=[state_in.body_q, self.mapping.body_indices_wp, self._transforms_wp],
+    #             device=model.device,
+    #         )
+    #         if state_in.body_qd is not None:
+    #             wp.launch(
+    #                 _spatial_to_vel_mat44_kernel,
+    #                 dim=n,
+    #                 inputs=[state_in.body_qd, self.mapping.body_indices_wp, self._velocities_wp],
+    #                 device=model.device,
+    #             )
 
-            self._abd_accessor.copy_to(self._abd_state_geo)
-            transform_view = view(self._abd_state_geo.transforms())
-            velocity_view = view(self._abd_state_geo.instances().find(uipc_builtin.velocity))  # ty:ignore[no-matching-overload]  # pyright: ignore[reportArgumentType]
+    #         self._abd_accessor.copy_to(self._abd_state_geo)
+    #         transform_view = view(self._abd_state_geo.transforms())
+    #         velocity_view = view(self._abd_state_geo.instances().find(uipc_builtin.velocity))  # ty:ignore[no-matching-overload]  # pyright: ignore[reportArgumentType]
 
-            # UIPC view is numpy-based; vectorised scatter via advanced indexing
-            assert self._transforms_wp is not None
-            assert self._velocities_wp is not None
-            assert self.mapping.backend_offsets_wp is not None
-            offsets = self.mapping.backend_offsets_wp.numpy()
-            transform_view[offsets] = self._transforms_wp.numpy()
-            velocity_view[offsets] = self._velocities_wp.numpy()
+    #         # UIPC view is numpy-based; vectorised scatter via advanced indexing
+    #         assert self._transforms_wp is not None
+    #         assert self._velocities_wp is not None
+    #         assert self.mapping.backend_offsets_wp is not None
+    #         offsets = self.mapping.backend_offsets_wp.numpy()
+    #         transform_view[offsets] = self._transforms_wp.numpy()
+    #         velocity_view[offsets] = self._velocities_wp.numpy()
 
-            self._abd_accessor.copy_from(self._abd_state_geo)
+    #         self._abd_accessor.copy_from(self._abd_state_geo)
 
     def _sync_body_state_from_uipc(self, state_out: State) -> None:
-        """Read UIPC body state back into Newton state arrays using GPU kernels."""
+        """Read UIPC body state back into Newton state arrays via zero-copy GPU buffers.
+
+        ``transform_buffer()`` triggers a GPU conversion (Vector12 → Matrix4x4)
+        inside the UIPC backend and returns a :class:`BufferView` pointing at
+        device memory.  We wrap it as a Warp array with no copy.  The kernel
+        accounts for Eigen's column-major layout by swapping row/column indices.
+        """
         model = self.model
         n = self.mapping.num_mapped_bodies
         if n > 0 and state_out.body_q is not None:
-            self._abd_accessor.copy_to(self._abd_state_geo)
-            transform_view = view(self._abd_state_geo.transforms())
-            velocity_view = view(self._abd_state_geo.instances().find(uipc_builtin.velocity))  # ty:ignore[no-matching-overload]  # pyright: ignore[reportArgumentType]
-
-            # Pass full UIPC view to kernel; offsets index into it directly
             assert self.mapping.backend_offsets_wp is not None
-            transforms_wp = wp.from_numpy(np.ascontiguousarray(transform_view), dtype=wp.mat44d, device=model.device)
-            velocities_wp = wp.from_numpy(np.ascontiguousarray(velocity_view), dtype=wp.mat44d, device=model.device)
+
+            # Zero-copy wrap of UIPC GPU buffers (re-wrapped each step because
+            # transform_buffer() writes into an internal device buffer that may
+            # be resized between steps).
+            transforms_wp = uipc.adapter.warp.from_buffer_view(self._abd_accessor.transform_buffer(), wp.mat44d)
+            velocities_wp = uipc.adapter.warp.from_buffer_view(self._abd_accessor.velocity_buffer(), wp.mat44d)
 
             wp.launch(
                 _read_from_backend_kernel,
                 dim=n,
                 inputs=[
                     self.mapping.backend_offsets_wp,
-                    transforms_wp,
-                    velocities_wp,
+                    transforms_wp.warp(),
+                    velocities_wp.warp(),
                     self.mapping.body_indices_wp,
                     state_out.body_q,
                     state_out.body_qd,
