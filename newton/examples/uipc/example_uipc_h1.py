@@ -77,6 +77,8 @@ class Example:
             dt=self.sim_dt,
             logger_level=uipc.Logger.Info,
         )
+        self.solver.configure_scene({"contact": {"enable": True}})
+        self.solver.initialize()
 
         self.state_1 = self.model.state()
         self.control = self.model.control()

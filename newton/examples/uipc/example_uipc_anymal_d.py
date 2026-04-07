@@ -44,16 +44,27 @@ class Example:
             hide_collision_shapes=True,
         )
 
-        articulation_builder.joint_q[:3] = [0.0, 0.0, 0.62]
+        articulation_builder.joint_q[:3] = [0.0, 0.0, 0.70]
         if len(articulation_builder.joint_q) > 6:
             articulation_builder.joint_q[3:7] = [0.0, 0.0, 0.0, 1.0]
 
-        for i in range(articulation_builder.joint_dof_count):
-            articulation_builder.joint_target_ke[i] = 150
-            articulation_builder.joint_target_kd[i] = 5
-            articulation_builder.joint_target_mode[i] = int(JointTargetMode.POSITION)
-            if articulation_builder.joint_type[i] == newton.JointType.REVOLUTE:
-                articulation_builder.joint_armature[i] = 1e-2
+        # joint_target_* and joint_armature are indexed by DOF, while
+        # joint_type is indexed by joint — walk both spaces in parallel.
+        joint_count = len(articulation_builder.joint_type)
+        for j in range(joint_count):
+            jtype = articulation_builder.joint_type[j]
+            qd_start = articulation_builder.joint_qd_start[j]
+            qd_end = (
+                articulation_builder.joint_qd_start[j + 1]
+                if j + 1 < joint_count
+                else articulation_builder.joint_dof_count
+            )
+            for d in range(qd_start, qd_end):
+                articulation_builder.joint_target_ke[d] = 150
+                articulation_builder.joint_target_kd[d] = 5
+                articulation_builder.joint_target_mode[d] = int(JointTargetMode.POSITION)
+                if jtype == newton.JointType.REVOLUTE:
+                    articulation_builder.joint_armature[d] = 1e-2
 
         if self.world_count > 1:
             builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
@@ -72,7 +83,10 @@ class Example:
             self.model,
             dt=self.sim_dt,
             logger_level=uipc.Logger.Info,
+            auto_init=False,
         )
+        self.solver.configure_scene({"contact": {"enable": True}})
+        self.solver.initialize()
 
         self.state_1 = self.model.state()
         self.control = self.model.control()

@@ -308,6 +308,128 @@ def _mesh_to_vf(mesh: Mesh) -> tuple[np.ndarray, np.ndarray]:
     return mesh._vertices.copy().astype(np.float64), mesh._indices.reshape(-1, 3).copy().astype(np.int32)
 
 
+def _signed_volume(verts: np.ndarray, faces: np.ndarray) -> float:
+    """Signed volume of a closed triangle mesh via the divergence theorem.
+
+    Positive when face normals point outward, negative when inward.  Used
+    to detect and fix winding so UIPC ABD's volume sanity check passes.
+    """
+    v0 = verts[faces[:, 0]]
+    v1 = verts[faces[:, 1]]
+    v2 = verts[faces[:, 2]]
+    return float(np.einsum("ij,ij->i", v0, np.cross(v1, v2)).sum() / 6.0)
+
+
+def _orient_outward(verts: np.ndarray, faces: np.ndarray) -> np.ndarray:
+    """Return ``faces`` flipped so the mesh has positive signed volume.
+
+    Works for any closed manifold (convex or concave) — unlike a
+    centroid-based per-face check which only handles star-shaped meshes.
+    """
+    if _signed_volume(verts, faces) < 0.0:
+        faces = faces[:, [0, 2, 1]].copy()
+    return faces
+
+
+def _is_trimesh_closed(faces: np.ndarray) -> bool:
+    """Return True iff every edge of the triangle mesh is shared by exactly two faces.
+
+    UIPC's ABD constitution computes per-body volume via the divergence
+    theorem, which requires a closed (watertight) manifold.  USD-loaded
+    visual/collision meshes are frequently open, so we check before handing
+    them to UIPC and fall back to a convex hull when necessary.
+    """
+    if len(faces) == 0:
+        return False
+    e0 = faces[:, [0, 1]]
+    e1 = faces[:, [1, 2]]
+    e2 = faces[:, [2, 0]]
+    edges = np.vstack([e0, e1, e2])
+    # Canonicalise edge orientation so (a, b) and (b, a) hash identically
+    edges = np.sort(edges, axis=1)
+    view = np.ascontiguousarray(edges).view(np.dtype([("", edges.dtype)] * 2))
+    _, counts = np.unique(view, return_counts=True)
+    return bool(np.all(counts == 2))
+
+
+def _aabb_box_mesh(verts: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Build a closed axis-aligned bounding box trimesh around ``verts``.
+
+    Last-resort substitute when both the merged mesh and its convex
+    hull have non-positive volume (degenerate / coplanar geometry).
+    """
+    lo = verts.min(axis=0)
+    hi = verts.max(axis=0)
+    box_verts = np.array(
+        [
+            [lo[0], lo[1], lo[2]],
+            [hi[0], lo[1], lo[2]],
+            [hi[0], hi[1], lo[2]],
+            [lo[0], hi[1], lo[2]],
+            [lo[0], lo[1], hi[2]],
+            [hi[0], lo[1], hi[2]],
+            [hi[0], hi[1], hi[2]],
+            [lo[0], hi[1], hi[2]],
+        ],
+        dtype=np.float64,
+    )
+    # Outward-facing CCW windings (right-hand rule).
+    box_faces = np.array(
+        [
+            [0, 3, 2],
+            [0, 2, 1],  # -Z
+            [4, 5, 6],
+            [4, 6, 7],  # +Z
+            [0, 1, 5],
+            [0, 5, 4],  # -Y
+            [2, 3, 7],
+            [2, 7, 6],  # +Y
+            [1, 2, 6],
+            [1, 6, 5],  # +X
+            [0, 4, 7],
+            [0, 7, 3],  # -X
+        ],
+        dtype=np.int32,
+    )
+    return box_verts, box_faces
+
+
+def _convex_hull_fallback(verts: np.ndarray) -> tuple[np.ndarray, np.ndarray] | None:
+    """Build a closed convex-hull trimesh around ``verts`` with outward normals.
+
+    Used when the merged trimesh for a body fails the closure check —
+    typically because the source USD/mesh shapes are non-watertight.
+
+    Returns ``None`` if the input is degenerate (coplanar/colinear) and
+    Qhull cannot construct a 3D hull.
+    """
+    from scipy.spatial import ConvexHull, QhullError
+
+    try:
+        hull = ConvexHull(verts)
+    except QhullError:
+        return None
+    hull_verts = verts[hull.vertices].astype(np.float64)
+    # Compact remap of original vertex indices
+    remap = -np.ones(len(verts), dtype=np.int64)
+    remap[hull.vertices] = np.arange(len(hull.vertices), dtype=np.int64)
+    faces = remap[hull.simplices].astype(np.int32)
+
+    # scipy's ConvexHull does NOT guarantee consistent winding across
+    # simplices (some come out CW, others CCW), so a single global flip is
+    # insufficient — UIPC's per-face divergence sum then disagrees with the
+    # closed-mesh formula and fires the volume>0 assertion.  Reorient each
+    # triangle individually using ``hull.equations`` (outward plane normals).
+    normals = hull.equations[:, :3]  # shape (nfaces, 3), unit outward
+    tri = hull_verts[faces]  # (nfaces, 3, 3)
+    face_normals = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
+    # Flip any face whose CCW normal points opposite the hull's outward normal.
+    flip = np.einsum("ij,ij->i", face_normals, normals) < 0.0
+    if flip.any():
+        faces[flip] = faces[flip][:, [0, 2, 1]]
+    return hull_verts, faces
+
+
 def _weld_vertices(
     verts: np.ndarray,
     faces: np.ndarray,
@@ -373,6 +495,9 @@ def build_body_mesh(model: Model, body_idx: int) -> tuple[np.ndarray, np.ndarray
     if not shape_indices:
         return None
 
+    # CAPSULE/CYLINDER/CONE primitives follow the model's up axis.
+    primitive_up_axis = Axis.from_any(model.up_axis)
+
     all_verts: list[np.ndarray] = []
     all_faces: list[np.ndarray] = []
     vert_offset = 0
@@ -382,8 +507,6 @@ def build_body_mesh(model: Model, body_idx: int) -> tuple[np.ndarray, np.ndarray
         tf_np = shape_transform_np[s]
         scale = shape_scale_np[s]
 
-        verts = None
-        faces = None
         # Whether scale is already baked into the generated mesh
         scale_baked = False
         if geo_type in (GeoType.MESH, GeoType.CONVEX_MESH):
@@ -404,21 +527,18 @@ def build_body_mesh(model: Model, body_idx: int) -> tuple[np.ndarray, np.ndarray
             verts, faces = _mesh_to_vf(m)
             scale_baked = True
         elif geo_type == GeoType.CAPSULE:
-            # Newton's CAPSULE primitive convention: long axis = Z (see
-            # ``ModelBuilder.add_shape_capsule``).  ``Mesh.create_capsule``
-            # defaults to ``up_axis=Y``, so pass Z explicitly to keep the
-            # generated mesh aligned with the collision primitive.
-            m = Mesh.create_capsule(float(scale[0]), float(scale[1]), up_axis=Axis.Z, compute_inertia=False)
+            # Capsule long axis follows ``model.up_axis``.
+            m = Mesh.create_capsule(float(scale[0]), float(scale[1]), up_axis=primitive_up_axis, compute_inertia=False)
             verts, faces = _mesh_to_vf(m)
             scale_baked = True
         elif geo_type == GeoType.CYLINDER:
-            # Newton's CYLINDER primitive convention: long axis = Z.
-            m = Mesh.create_cylinder(float(scale[0]), float(scale[1]), up_axis=Axis.Z, compute_inertia=False)
+            # Cylinder long axis follows ``model.up_axis``.
+            m = Mesh.create_cylinder(float(scale[0]), float(scale[1]), up_axis=primitive_up_axis, compute_inertia=False)
             verts, faces = _mesh_to_vf(m)
             scale_baked = True
         elif geo_type == GeoType.CONE:
-            # Newton's CONE primitive convention: long axis = Z (apex at +Z).
-            m = Mesh.create_cone(float(scale[0]), float(scale[1]), up_axis=Axis.Z, compute_inertia=False)
+            # Cone long axis (apex) follows ``model.up_axis``.
+            m = Mesh.create_cone(float(scale[0]), float(scale[1]), up_axis=primitive_up_axis, compute_inertia=False)
             verts, faces = _mesh_to_vf(m)
             scale_baked = True
         elif geo_type == GeoType.PLANE:
@@ -427,26 +547,69 @@ def build_body_mesh(model: Model, body_idx: int) -> tuple[np.ndarray, np.ndarray
             warnings.warn(f"Shape {s} (body {body_idx}): unsupported GeoType {geo_type}", stacklevel=2)
             continue
 
-        if verts is not None and faces is not None:
-            effective_scale = np.ones(3) if scale_baked else scale.astype(np.float64)
-            is_identity = (
-                np.allclose(tf_np[:3], 0.0, atol=1e-7)
-                and np.allclose(tf_np[3:], [0, 0, 0, 1], atol=1e-7)
-                and np.allclose(effective_scale, 1.0, atol=1e-7)
-            )
-            if not is_identity:
-                tf_wp = wp.transform(tf_np[:3], tf_np[3:])
-                verts = _transform_points(verts, tf_wp, effective_scale)
-            all_faces.append(faces + vert_offset)
-            all_verts.append(verts)
-            vert_offset += len(verts)
+        # Every reachable branch above either assigns verts/faces or
+        # ``continue``s, so we can use them unconditionally here.
+        effective_scale = np.ones(3) if scale_baked else scale.astype(np.float64)
+        is_identity = (
+            np.allclose(tf_np[:3], 0.0, atol=1e-7)
+            and np.allclose(tf_np[3:], [0, 0, 0, 1], atol=1e-7)
+            and np.allclose(effective_scale, 1.0, atol=1e-7)
+        )
+        if not is_identity:
+            tf_wp = wp.transform(tf_np[:3], tf_np[3:])
+            verts = _transform_points(verts, tf_wp, effective_scale)
+        all_faces.append(faces + vert_offset)
+        all_verts.append(verts)
+        vert_offset += len(verts)
 
     if not all_verts:
         return None
 
     merged_verts = np.vstack(all_verts).astype(np.float64)
     merged_faces = np.vstack(all_faces).astype(np.int32)
-    return _weld_vertices(merged_verts, merged_faces)
+    welded_verts, welded_faces = _weld_vertices(merged_verts, merged_faces)
+
+    # UIPC ABD's ``AffineBodyConstitution`` asserts ``volume > 0`` per body.
+    # Two failure modes arise from real USD assets:
+    #   (1) merged mesh is non-watertight (e.g. mixed mesh + primitive)
+    #   (2) the closed mesh has near-zero signed volume (nearly coplanar
+    #       vertices, or convex-hull fallback of a thin/flat link)
+    # In both cases we need a positive-volume substitute or UIPC aborts.
+    # Minimum absolute volume accepted before we fall back to an AABB box.
+    _vol_eps = 1e-12
+
+    def _finalize(v: np.ndarray, f: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        f = _orient_outward(v, f)
+        if abs(_signed_volume(v, f)) < _vol_eps:
+            # Degenerate / coplanar — last-resort AABB box.
+            warnings.warn(
+                f"Body {body_idx}: collapsed to AABB box (near-zero volume mesh).",
+                stacklevel=3,
+            )
+            bv, bf = _aabb_box_mesh(v)
+            return np.ascontiguousarray(bv, dtype=np.float64), np.ascontiguousarray(
+                _orient_outward(bv, bf), dtype=np.int32
+            )
+        # IMPORTANT: ``uipc.geometry.trimesh`` expects C-contiguous (N, 3)
+        # arrays.  Pybind11 silently mis-reads strided / non-contiguous
+        # buffers as column-major, which transposes the mesh and produces
+        # a (usually negative-volume) garbage geometry.  Force contiguity.
+        return np.ascontiguousarray(v, dtype=np.float64), np.ascontiguousarray(f, dtype=np.int32)
+
+    if _is_trimesh_closed(welded_faces):
+        return _finalize(welded_verts, welded_faces)
+
+    warnings.warn(
+        f"Body {body_idx}: merged mesh is not closed; falling back to convex hull "
+        "for UIPC ABD volume computation. Collision fidelity may be reduced.",
+        stacklevel=2,
+    )
+    hull = _convex_hull_fallback(welded_verts)
+    if hull is None:
+        # Qhull rejected the point set (colinear/coplanar) — use AABB box.
+        bv, bf = _aabb_box_mesh(welded_verts)
+        return _finalize(bv, _orient_outward(bv, bf))
+    return _finalize(hull[0], hull[1])
 
 
 def populate_backend_offsets(mapping: UIpcMappingInfo, device: wp.Device) -> None:

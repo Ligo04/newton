@@ -118,7 +118,7 @@ class SolverUIPC(SolverBase):
         kappa: float = 100 * MPa,
         default_mass_density: float = 1000.0,
         logger_level=ULogger.Error,
-        auto_init: bool = True,
+        auto_init: bool = False,
     ):
         """Create a UIPC solver instance from a Newton model.
 
