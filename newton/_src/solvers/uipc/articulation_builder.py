@@ -32,7 +32,6 @@ from uipc.constitution import (
     AffineBodySphericalJoint,
     SoftTransformConstraint,
 )
-from uipc.geometry import trimesh as uipc_trimesh
 from uipc.unit import MPa
 
 from ...sim import Control, JointType, Model, State
@@ -553,8 +552,11 @@ class ArticulationBuilder:
         """Get or create a fixed anchor body at *position*.
 
         Used when a revolute or prismatic joint is attached to the world
-        (parent == -1).  Creates a tiny fixed AffineBody tetrahedron at
-        the given position and returns its geometry slot.
+        (parent == -1).  Creates a 1-vertex ABD proxy body at the given
+        position via :meth:`AffineBodyConstitution.create_proxy` and returns
+        its geometry slot.  The proxy is much cheaper than a full tetrahedron
+        and already carries ABD attributes, so the constitution does not need
+        to be re-applied.
 
         Args:
             name: Unique name for the anchor object.
@@ -566,24 +568,14 @@ class ArticulationBuilder:
         if name in self._anchor_slots:
             return self._anchor_slots[name]
 
-        # Create a minimal tetrahedron.  Offset it 0.5 m along the axis
-        # that is furthest from other geometry so it doesn't collide with
-        # the child link at the pivot.
-        r = 0.005  # 5 mm half-extent
-        verts = np.array(
-            [
-                [r, 0.0, 0.0],
-                [-r, r, 0.0],
-                [-r, -r, r],
-                [-r, 0.0, -r],
-            ],
-            dtype=np.float64,
-        )
-        faces = np.array(
-            [[0, 1, 2], [0, 2, 3], [0, 3, 1], [1, 3, 2]],
-            dtype=np.int32,
-        )
-        sc = uipc_trimesh(verts, faces)
+        # Create a 1-vertex ABD proxy.  Mass / inertia / volume are small but
+        # non-zero; the anchor is marked fixed below so these values only
+        # need to be well-defined, not physically meaningful.
+        mass = 1.0
+        mass_center = np.zeros(3, dtype=np.float64)
+        inertia = np.eye(3, dtype=np.float64) * 1e-6
+        volume = 1e-9
+        sc = self._abd.create_proxy(self._kappa, mass, mass_center, inertia, volume)
 
         # Offset the anchor 0.5 m along the local Y axis to avoid overlap
         # with the child link geometry sitting at the pivot.
@@ -592,22 +584,6 @@ class ArticulationBuilder:
         mat4 = np.eye(4, dtype=np.float64)
         mat4[:3, 3] = anchor_pos
         view(sc.transforms())[:] = mat4
-
-        # Create a dedicated contact element with all pairs disabled so the
-        # anchor never participates in collision detection.
-        if not hasattr(self, "_anchor_contact_elem"):
-            tabular = self._scene.contact_tabular()
-            self._anchor_contact_elem = tabular.create("_anchor")
-            # Disable self-contact
-            tabular.insert(self._anchor_contact_elem, self._anchor_contact_elem, 0.0, 0.0, False)
-            # Disable contact with the default element
-            if self._contact_elem is not None:
-                tabular.insert(self._anchor_contact_elem, self._contact_elem, 0.0, 0.0, False)
-        self._anchor_contact_elem.apply_to(sc)
-        if self._subscene_elem is not None:
-            self._subscene_elem.apply_to(sc)
-        self._abd.apply_to(sc=sc, kappa=self._kappa, mass_density=1000.0)
-
         # Mark as fixed so it doesn't move
         view(sc.instances().find(uipc_builtin.is_fixed))[:] = 1  # type: ignore  # pyright: ignore[reportArgumentType]
 
@@ -867,9 +843,9 @@ class ArticulationBuilder:
             )
 
         # Set per-edge init_distance
-        dist_view = view(jm.edges().find("init_distance"))
+        dist_view = view(jm.edges().find("init_distance"))  # ty:ignore[no-matching-overload]
         for i, d in enumerate(init_distances):
-            dist_view[i] = d  # ty:ignore[no-matching-overload]  # pyright: ignore[reportArgumentType]
+            dist_view[i] = d
 
         jobj = self._scene.objects().create("joints_prismatic")
         jslot, _ = jobj.geometries().create(jm)
@@ -986,7 +962,7 @@ class ArticulationBuilder:
             child_ids.append(c_id)
             l_positions.append(l_pos)
             r_positions.append(r_pos)
-            strengths.append(100.0)
+            strengths.append(1000.0)
             joint_indices.append(j)
 
         if not child_slots:

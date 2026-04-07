@@ -37,7 +37,7 @@ class Example:
         g1.default_shape_cfg.mu = 0.75
 
         asset_path = newton.utils.download_asset("unitree_g1")
-
+        print(asset_path)
         g1.add_usd(
             str(asset_path / "usd_structured" / "g1_29dof_with_hand_rev_1_0.usda"),
             xform=wp.transform(wp.vec3(0, 0, 0.2)),
@@ -47,12 +47,20 @@ class Example:
             skip_mesh_approximation=True,
         )
 
-        for i in range(6, g1.joint_dof_count):
-            g1.joint_target_ke[i] = 500.0
-            g1.joint_target_kd[i] = 10.0
-            g1.joint_target_mode[i] = int(JointTargetMode.POSITION)
-            if g1.joint_type[i] == newton.JointType.REVOLUTE:
-                g1.joint_armature[i] = 1e-2
+        # Skip the 6-DOF free base joint (joint 0); configure every DOF of the
+        # remaining articulation joints. ``joint_type`` is per-joint while the
+        # drive/armature arrays are per-DOF, so we iterate joints and expand
+        # each joint's DOF range via ``joint_qd_start``.
+        for j in range(1, g1.joint_count):
+            dof_start = g1.joint_qd_start[j]
+            dof_end = g1.joint_qd_start[j + 1] if j + 1 < g1.joint_count else g1.joint_dof_count
+            is_revolute = g1.joint_type[j] == newton.JointType.REVOLUTE
+            for i in range(dof_start, dof_end):
+                g1.joint_target_ke[i] = 500.0
+                g1.joint_target_kd[i] = 10.0
+                g1.joint_target_mode[i] = int(JointTargetMode.POSITION)
+                if is_revolute:
+                    g1.joint_armature[i] = 1e-2
 
         # Approximate meshes for faster collision detection
         g1.approximate_meshes("bounding_box")

@@ -12,10 +12,8 @@ from typing import Any
 import numpy as np  # noqa: F401  # used by _sync_body_state_to_uipc
 import uipc
 import uipc.adapter.warp
-import uipc.builtin as uipc_builtin
 import warp as wp
 from uipc import Logger as ULogger
-from uipc import Matrix4x4
 from uipc.core import AffineBodyStateAccessorFeature
 from uipc.core import Scene as UScene
 from uipc.unit import GPa, MPa
@@ -164,6 +162,7 @@ class SolverUIPC(SolverBase):
             scene_config["dt"] = dt
         scene_config["d_hat"] = 0.001
         scene_config["contact"]["enable"] = False
+        print(scene_config)
         if model.gravity is not None:
             gravity_np = model.gravity.numpy().flatten()
             scene_config["gravity"] = [[float(gravity_np[0])], [float(gravity_np[1])], [float(gravity_np[2])]]
@@ -174,10 +173,10 @@ class SolverUIPC(SolverBase):
         self._subscene_tabular_fn: Callable | None = None
 
         # Builders (populated during initialize)
-        self._rigid_body_builder: RigidBodyBuilder | None = None
-        self._articulation_builder: ArticulationBuilder | None = None
-        self._cloth_builder: ClothBuilder | None = None
-        self._deformable_builder: DeformableBodyBuilder | None = None
+        self._rigid_body_builder: RigidBodyBuilder
+        self._articulation_builder: ArticulationBuilder
+        self._cloth_builder: ClothBuilder
+        self._deformable_builder: DeformableBodyBuilder
 
         if auto_init:
             self.initialize()
@@ -445,8 +444,8 @@ class SolverUIPC(SolverBase):
 
         # Host-side indexing for per-world ranges (multi-world only)
         if model.world_count > 1:
-            body_ws = model.body_world_start.numpy()
-            joint_ws = model.joint_world_start.numpy()
+            body_ws = model.body_world_start.numpy()  # ty:ignore[unresolved-attribute]  # pyright: ignore[reportOptionalMemberAccess]
+            joint_ws = model.joint_world_start.numpy()  # ty:ignore[unresolved-attribute]  # pyright: ignore[reportOptionalMemberAccess]
             particle_ws = model.particle_world_start.numpy() if model.particle_world_start is not None else None
         else:
             body_ws = None
@@ -456,7 +455,7 @@ class SolverUIPC(SolverBase):
         for world_index in range(model.world_count):
             if body_ws is not None:
                 body_range = (int(body_ws[world_index]), int(body_ws[world_index + 1]))
-                joint_range = (int(joint_ws[world_index]), int(joint_ws[world_index + 1]))
+                joint_range = (int(joint_ws[world_index]), int(joint_ws[world_index + 1]))  # ty:ignore[not-subscriptable]  # pyright: ignore[reportOptionalSubscript]
                 particle_range = (
                     (int(particle_ws[world_index]), int(particle_ws[world_index + 1]))
                     if particle_ws is not None
@@ -498,25 +497,14 @@ class SolverUIPC(SolverBase):
             raise RuntimeError(
                 "UIPC world initialization failed (world is not valid). Check the UIPC log above for details."
             )
+
         populate_backend_offsets(self.mapping, model.device)
-
-        self._abd_accessor: AffineBodyStateAccessorFeature = self.world.features().find(AffineBodyStateAccessorFeature)  # ty:ignore[invalid-assignment]
-        self._abd_state_geo = self._abd_accessor.create_geometry()
-        self._abd_state_geo.instances().create(uipc_builtin.transform, Matrix4x4.Zero())
-        self._abd_state_geo.instances().create(uipc_builtin.velocity, Matrix4x4.Zero())
-
-        # Pre-allocate GPU buffers for batch transform sync (to-UIPC direction)
-        n = self.mapping.num_mapped_bodies
-        if n > 0:
-            self._transforms_wp = wp.zeros(n, dtype=wp.mat44d, device=model.device)
-            self._velocities_wp = wp.zeros(n, dtype=wp.mat44d, device=model.device)
-        else:
-            self._transforms_wp = None
-            self._velocities_wp = None
 
         # Pre-allocate GPU buffers for reading state back from UIPC (from-UIPC direction).
         # Uses uipc.adapter.warp.buffer() so copy_transform_to/copy_velocity_to can write
         # directly into device memory owned by us.
+        self._abd_accessor: AffineBodyStateAccessorFeature = self.world.features().find(AffineBodyStateAccessorFeature)  # ty:ignore[invalid-assignment]
+        n = self.mapping.num_mapped_bodies
         if n > 0:
             self._abd_transform_buf = uipc.adapter.warp.buffer(n, dtype=wp.mat44d, device=model.device)
             self._abd_velocity_buf = uipc.adapter.warp.buffer(n, dtype=wp.mat44d, device=model.device)
@@ -604,40 +592,6 @@ class SolverUIPC(SolverBase):
     # GPU batch sync methods
     # ------------------------------------------------------------------
 
-    # def _sync_body_state_to_uipc(self, state_in: State) -> None:
-    #     """Write Newton body transforms and velocities into UIPC."""
-    #     model = self.model
-    #     n = self.mapping.num_mapped_bodies
-
-    #     if n > 0 and state_in.body_q is not None:
-    #         wp.launch(
-    #             _transform_to_mat44_kernel,
-    #             dim=n,
-    #             inputs=[state_in.body_q, self.mapping.body_indices_wp, self._transforms_wp],
-    #             device=model.device,
-    #         )
-    #         if state_in.body_qd is not None:
-    #             wp.launch(
-    #                 _spatial_to_vel_mat44_kernel,
-    #                 dim=n,
-    #                 inputs=[state_in.body_qd, self.mapping.body_indices_wp, self._velocities_wp],
-    #                 device=model.device,
-    #             )
-
-    #         self._abd_accessor.copy_to(self._abd_state_geo)
-    #         transform_view = view(self._abd_state_geo.transforms())
-    #         velocity_view = view(self._abd_state_geo.instances().find(uipc_builtin.velocity))  # ty:ignore[no-matching-overload]  # pyright: ignore[reportArgumentType]
-
-    #         # UIPC view is numpy-based; vectorised scatter via advanced indexing
-    #         assert self._transforms_wp is not None
-    #         assert self._velocities_wp is not None
-    #         assert self.mapping.backend_offsets_wp is not None
-    #         offsets = self.mapping.backend_offsets_wp.numpy()
-    #         transform_view[offsets] = self._transforms_wp.numpy()
-    #         velocity_view[offsets] = self._velocities_wp.numpy()
-
-    #         self._abd_accessor.copy_from(self._abd_state_geo)
-
     def _sync_body_state_from_uipc(self, state_out: State) -> None:
         """Read UIPC body state back into Newton state arrays via pre-allocated GPU buffers.
 
@@ -654,8 +608,8 @@ class SolverUIPC(SolverBase):
             assert self._abd_velocity_buf is not None
 
             # Copy UIPC backend state into our pre-allocated device buffers.
-            self._abd_accessor.copy_transform_to(self._abd_transform_buf.buffer_view())
-            self._abd_accessor.copy_velocity_to(self._abd_velocity_buf.buffer_view())
+            self._abd_accessor.copy_transform_to(self._abd_transform_buf.buffer_view(), 0, n)
+            self._abd_accessor.copy_velocity_to(self._abd_velocity_buf.buffer_view(), 0, n)
 
             wp.launch(
                 _read_from_backend_kernel,

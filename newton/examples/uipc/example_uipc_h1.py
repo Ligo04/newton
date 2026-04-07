@@ -46,12 +46,18 @@ class Example:
         # Approximate meshes for faster collision detection
         h1.approximate_meshes("bounding_box")
 
-        for i in range(len(h1.joint_target_ke)):
-            h1.joint_target_ke[i] = 150
-            h1.joint_target_kd[i] = 5
-            h1.joint_target_mode[i] = int(JointTargetMode.POSITION)
-            if h1.joint_type[i] == newton.JointType.REVOLUTE:
-                h1.joint_armature[i] = 1e-2
+        # ``joint_type`` is per-joint while drive/armature arrays are per-DOF.
+        # Iterate joints and expand each joint's DOF range via ``joint_qd_start``.
+        for j in range(h1.joint_count):
+            dof_start = h1.joint_qd_start[j]
+            dof_end = h1.joint_qd_start[j + 1] if j + 1 < h1.joint_count else h1.joint_dof_count
+            is_revolute = h1.joint_type[j] == newton.JointType.REVOLUTE
+            for i in range(dof_start, dof_end):
+                h1.joint_target_ke[i] = 150
+                h1.joint_target_kd[i] = 5
+                h1.joint_target_mode[i] = int(JointTargetMode.POSITION)
+                if is_revolute:
+                    h1.joint_armature[i] = 1e-2
 
         if self.world_count > 1:
             builder = newton.ModelBuilder()
