@@ -123,6 +123,7 @@ class ArticulationBuilder:
         self._scene = scene
         self._mapping = mapping
         self._dt = dt
+        self._device = model.device
         self._abd = AffineBodyConstitution()
         self._kappa = kappa
 
@@ -438,7 +439,7 @@ class ArticulationBuilder:
                 if (model.articulation_label and 0 <= a < len(model.articulation_label))
                 else f"articulation_{a}"
             )
-            self.articulations[a] = Articulation(name=label, dt=self._dt)
+            self.articulations[a] = Articulation(name=label, dt=self._dt, device=self._device)
 
         # Pre-fetch numpy arrays
         state = model.state()
@@ -482,6 +483,7 @@ class ArticulationBuilder:
                 self.articulations[art_idx] = Articulation(
                     name=f"articulation_{art_idx}",
                     dt=self._dt,
+                    device=self._device,
                 )
             art = self.articulations[art_idx]
 
@@ -1031,24 +1033,30 @@ class ArticulationBuilder:
         if model.joint_target_mode is None:
             return
 
-        # Ensure model arrays are on CPU for the kernel
-        joint_type_cpu = model.joint_type.to("cpu")
-        joint_target_mode_cpu = model.joint_target_mode.to("cpu")
-
-        # Control arrays (per-step, may be None)
-        target_pos_cpu = control.joint_target_pos.to("cpu") if control.joint_target_pos is not None else None
-        target_vel_cpu = control.joint_target_vel.to("cpu") if control.joint_target_vel is not None else None
-        joint_f_cpu = control.joint_f.to("cpu") if control.joint_f is not None else None
+        # Model + control arrays stay on the solver device — the
+        # cache_control kernel runs on ``self._device``.
+        joint_type = model.joint_type.to(self._device)
+        joint_target_mode = model.joint_target_mode.to(self._device)
+        target_pos = control.joint_target_pos.to(self._device) if control.joint_target_pos is not None else None
+        target_vel = control.joint_target_vel.to(self._device) if control.joint_target_vel is not None else None
+        joint_f = control.joint_f.to(self._device) if control.joint_f is not None else None
 
         for art in self.articulations.values():
             if art.num_active_joints > 0:
                 art.cache_control(
-                    joint_type_cpu,
-                    joint_target_mode_cpu,
-                    target_pos_cpu,
-                    target_vel_cpu,
-                    joint_f_cpu,
+                    joint_type,
+                    joint_target_mode,
+                    target_pos,
+                    target_vel,
+                    joint_f,
                 )
+
+        # Each Articulation.cache_control wp.copy's the device-side
+        # output buffers into the CPU arrays consumed by the UIPC
+        # animation callbacks. Those copies are async on the device
+        # stream, so synchronise once before world.advance() runs the
+        # animator on the host side.
+        wp.synchronize_device(self._device)
 
     def write_joint_readback(self, state_out: State) -> None:
         """Write cached joint readback values to Newton state arrays.
@@ -1066,18 +1074,21 @@ class ArticulationBuilder:
         if state_out.joint_q is None:
             return
 
-        # CPU staging arrays for the kernel to scatter into
-        joint_q_cpu = state_out.joint_q.to("cpu")
-        joint_qd_cpu = state_out.joint_qd.to("cpu") if state_out.joint_qd is not None else None
+        # The scatter kernel writes directly into the solver-device
+        # joint_q / joint_qd buffers — no CPU round trip required.
+        joint_q = state_out.joint_q.to(self._device)
+        joint_qd = state_out.joint_qd.to(self._device) if state_out.joint_qd is not None else None
 
         for art in self.articulations.values():
             if art.num_active_joints > 0:
-                art.write_readback(joint_q_cpu, joint_qd_cpu)
+                art.write_readback(joint_q, joint_qd)
 
-        # Copy back to device
-        wp.copy(state_out.joint_q, joint_q_cpu)
-        if joint_qd_cpu is not None and state_out.joint_qd is not None:
-            wp.copy(state_out.joint_qd, joint_qd_cpu)
+        # If .to() returned a fresh allocation (i.e. the original lived
+        # on a different device) propagate the result back.
+        if joint_q is not state_out.joint_q:
+            wp.copy(state_out.joint_q, joint_q)
+        if joint_qd is not None and state_out.joint_qd is not None and joint_qd is not state_out.joint_qd:
+            wp.copy(state_out.joint_qd, joint_qd)
 
     def increment_step(self) -> None:
         """Increment the step counter on all articulations."""

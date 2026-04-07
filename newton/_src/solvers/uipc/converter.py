@@ -15,6 +15,7 @@ import uipc.builtin as uipc_builtin
 import warp as wp
 from uipc import Quaternion, Transform
 
+from ...core.types import Axis
 from ...geometry import GeoType, Mesh
 from ...sim import Model
 
@@ -25,9 +26,9 @@ from ...sim import Model
 
 @wp.kernel(enable_backward=False)
 def _transform_to_mat44_kernel(
-    body_q: wp.array(dtype=wp.transform),
-    body_indices: wp.array(dtype=wp.int32),
-    out_transforms: wp.array(dtype=wp.mat44d, ndim=1),
+    body_q: wp.array[wp.transform],
+    body_indices: wp.array[wp.int32],
+    out_transforms: wp.array[wp.mat44d],
 ):
     """Convert Newton wp.transform (pos + quat) to 4x4 double matrices in batch."""
     tid = wp.tid()
@@ -72,9 +73,9 @@ def _transform_to_mat44_kernel(
 
 @wp.kernel(enable_backward=False)
 def _spatial_to_vel_mat44_kernel(
-    body_qd: wp.array(dtype=wp.spatial_vector),
-    body_indices: wp.array(dtype=wp.int32),
-    out_velocities: wp.array(dtype=wp.mat44d, ndim=1),
+    body_qd: wp.array[wp.spatial_vector],
+    body_indices: wp.array[wp.int32],
+    out_velocities: wp.array[wp.mat44d],
 ):
     """Convert Newton wp.spatial_vector (linear, angular) to 4x4 velocity matrices in batch.
 
@@ -116,11 +117,11 @@ def _spatial_to_vel_mat44_kernel(
 
 @wp.kernel(enable_backward=False)
 def _write_to_backend_kernel(
-    backend_offsets: wp.array(dtype=wp.uint32),
-    src_transforms: wp.array(dtype=wp.mat44d, ndim=1),
-    src_velocities: wp.array(dtype=wp.mat44d, ndim=1),
-    dst_transforms: wp.array(dtype=wp.mat44d, ndim=1),
-    dst_velocities: wp.array(dtype=wp.mat44d, ndim=1),
+    backend_offsets: wp.array[wp.uint32],
+    src_transforms: wp.array[wp.mat44d],
+    src_velocities: wp.array[wp.mat44d],
+    dst_transforms: wp.array[wp.mat44d],
+    dst_velocities: wp.array[wp.mat44d],
 ):
     """Scatter body transforms/velocities into UIPC backend arrays by offset."""
     tid = wp.tid()
@@ -131,12 +132,12 @@ def _write_to_backend_kernel(
 
 @wp.kernel(enable_backward=False)
 def _read_from_backend_kernel(
-    backend_offsets: wp.array(dtype=wp.uint32),
-    src_transforms: wp.array(dtype=wp.mat44d, ndim=1),
-    src_velocities: wp.array(dtype=wp.mat44d, ndim=1),
-    body_indices: wp.array(dtype=wp.int32),
-    out_body_q: wp.array(dtype=wp.transform),
-    out_body_qd: wp.array(dtype=wp.spatial_vector),
+    backend_offsets: wp.array[wp.uint32],
+    src_transforms: wp.array[wp.mat44d],
+    src_velocities: wp.array[wp.mat44d],
+    body_indices: wp.array[wp.int32],
+    out_body_q: wp.array[wp.transform],
+    out_body_qd: wp.array[wp.spatial_vector],
 ):
     """Gather UIPC backend transforms/velocities back into Newton state arrays.
 
@@ -403,15 +404,21 @@ def build_body_mesh(model: Model, body_idx: int) -> tuple[np.ndarray, np.ndarray
             verts, faces = _mesh_to_vf(m)
             scale_baked = True
         elif geo_type == GeoType.CAPSULE:
-            m = Mesh.create_capsule(float(scale[0]), float(scale[1]), compute_inertia=False)
+            # Newton's CAPSULE primitive convention: long axis = Z (see
+            # ``ModelBuilder.add_shape_capsule``).  ``Mesh.create_capsule``
+            # defaults to ``up_axis=Y``, so pass Z explicitly to keep the
+            # generated mesh aligned with the collision primitive.
+            m = Mesh.create_capsule(float(scale[0]), float(scale[1]), up_axis=Axis.Z, compute_inertia=False)
             verts, faces = _mesh_to_vf(m)
             scale_baked = True
         elif geo_type == GeoType.CYLINDER:
-            m = Mesh.create_cylinder(float(scale[0]), float(scale[1]), compute_inertia=False)
+            # Newton's CYLINDER primitive convention: long axis = Z.
+            m = Mesh.create_cylinder(float(scale[0]), float(scale[1]), up_axis=Axis.Z, compute_inertia=False)
             verts, faces = _mesh_to_vf(m)
             scale_baked = True
         elif geo_type == GeoType.CONE:
-            m = Mesh.create_cone(float(scale[0]), float(scale[1]), compute_inertia=False)
+            # Newton's CONE primitive convention: long axis = Z (apex at +Z).
+            m = Mesh.create_cone(float(scale[0]), float(scale[1]), up_axis=Axis.Z, compute_inertia=False)
             verts, faces = _mesh_to_vf(m)
             scale_baked = True
         elif geo_type == GeoType.PLANE:
