@@ -14,6 +14,7 @@ import numpy as np
 import uipc.builtin as uipc_builtin
 import warp as wp
 from uipc import Quaternion, Transform
+from uipc.geometry import SimplicialComplexSlot
 
 from ...core.types import Axis
 from ...geometry import GeoType, Mesh
@@ -257,11 +258,11 @@ class UIpcMappingInfo:
     """Stores the mapping between Newton model indices and UIPC objects."""
 
     # body_idx -> UIPC geometry slot (shared when instanced)
-    body_geo_slots: dict[int, Any] = field(default_factory=dict)
+    body_geo_slots: dict[int, SimplicialComplexSlot] = field(default_factory=dict)
     # body_idx -> instance index within its geometry (0 for non-instanced bodies)
     body_instance_ids: dict[int, int] = field(default_factory=dict)
     # joint_idx -> UIPC joint geometry slot
-    joint_geo_slots: dict[int, Any] = field(default_factory=dict)
+    joint_geo_slots: dict[int, SimplicialComplexSlot] = field(default_factory=dict)
     # joint_idx -> UIPC joint linemesh (for reading angle/position)
     joint_mesh: dict[int, Any] = field(default_factory=dict)
     # body_idx -> UIPC object

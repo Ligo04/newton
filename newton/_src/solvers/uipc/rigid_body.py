@@ -339,7 +339,7 @@ class RigidBodyBuilder:
                 sc.instances().resize(n)
 
             # Per-instance transforms
-            transforms_view = view(sc.transforms())
+            transforms_view: np.ndarray = view(sc.transforms())
             for i, info in enumerate(group_bodies):
                 transforms_view[i] = info.transform
 
@@ -356,13 +356,13 @@ class RigidBodyBuilder:
             )
 
             # Override per-instance mass density where different from reference
-            density_view = view(sc.meta().find(uipc_builtin.mass_density))  # ty:ignore[no-matching-overload]  # pyright: ignore[reportArgumentType]
+            density_view: np.ndarray = view(sc.meta().find(uipc_builtin.mass_density))  # ty:ignore[no-matching-overload]  # pyright: ignore[reportArgumentType]
             density_view[:] = ref.mass_density
 
             label_surface(sc)
 
             # Per-instance kinematic flag
-            is_fixed_view = view(sc.instances().find(uipc_builtin.is_fixed))  # ty:ignore[no-matching-overload]  # pyright: ignore[reportArgumentType]
+            is_fixed_view: np.ndarray = view(sc.instances().find(uipc_builtin.is_fixed))  # ty:ignore[no-matching-overload]  # pyright: ignore[reportArgumentType]
             for i, info in enumerate(group_bodies):
                 if info.is_kinematic:
                     is_fixed_view[i] = 1  # pyright: ignore[reportArgumentType]

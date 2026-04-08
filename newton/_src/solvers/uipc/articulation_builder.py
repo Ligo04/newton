@@ -32,6 +32,8 @@ from uipc.constitution import (
     AffineBodySphericalJoint,
     SoftTransformConstraint,
 )
+from uipc.core import Animation, Object
+from uipc.geometry import SimplicialComplex, SimplicialComplexSlot
 from uipc.unit import MPa
 
 from ...sim import Control, JointType, Model, State
@@ -134,7 +136,7 @@ class ArticulationBuilder:
         self._body_transforms: np.ndarray | None = None
 
         # Cache of anchor body geo slots for world-anchored joints
-        self._anchor_slots: dict[str, Any] = {}
+        self._anchor_slots: dict[str, SimplicialComplexSlot] = {}
 
         # Transient subscene element set per build_joints call
         self._subscene_elem: Any | None = None
@@ -650,7 +652,7 @@ class ArticulationBuilder:
         self,
         name: str,
         position: np.ndarray,
-    ) -> Any:
+    ) -> SimplicialComplexSlot:
         """Get or create a fixed anchor body at *position*.
 
         Used when a revolute or prismatic joint is attached to the world
@@ -689,7 +691,7 @@ class ArticulationBuilder:
         # Mark as fixed so it doesn't move
         view(sc.instances().find(uipc_builtin.is_fixed))[:] = 1  # type: ignore  # pyright: ignore[reportArgumentType]
 
-        obj = self._scene.objects().create(name)
+        obj: Object = self._scene.objects().create(name)
         geo_slot, _ = obj.geometries().create(sc)
         self._anchor_slots[name] = geo_slot
         return geo_slot
@@ -702,9 +704,9 @@ class ArticulationBuilder:
     ) -> None:
         """Create all revolute joints in a single batched linemesh."""
         all_verts: list[np.ndarray] = []
-        parent_slots: list[Any] = []
+        parent_slots: list[SimplicialComplexSlot] = []
         parent_ids: list[int] = []
-        child_slots: list[Any] = []
+        child_slots: list[SimplicialComplexSlot] = []
         child_ids: list[int] = []
         strengths: list[float] = []
         drive_strengths: list[float] = []
@@ -727,9 +729,9 @@ class ArticulationBuilder:
             art: Articulation = jdata["art"]
             pivot: np.ndarray = jdata["pivot"]
             joint_world_mat: np.ndarray = jdata["joint_world_mat"]
-            p_slot: Any | None = jdata["parent_slot"]
+            p_slot: SimplicialComplexSlot | None = jdata["parent_slot"]
             p_id: int = jdata["parent_instance_id"]
-            c_slot: Any = jdata["child_slot"]
+            c_slot: SimplicialComplexSlot = jdata["child_slot"]
             c_id: int = jdata["child_instance_id"]
 
             if p_slot is None:
@@ -769,10 +771,13 @@ class ArticulationBuilder:
                 uppers.append(1e18)
                 limit_strengths.append(1.0)
 
-            # Register joint with its articulation
+            # Register joint with its articulation. The Newton initial
+            # joint_q is captured here only so we can write it onto the
+            # ``init_angle`` edge attribute below (with negated sign) —
+            # the animator itself no longer needs the offset.
             init_angle = float(joint_q_np[q_start]) if joint_q_np is not None else 0.0
             init_angles.append(init_angle)
-            art.register_joint(j, q_start, qd_start, init_angle)
+            art.register_joint(j, q_start, qd_start)
             anim_dispatch.append((art, j, edge_idx))
 
         # Build batched linemesh via create_geometry
@@ -803,18 +808,26 @@ class ArticulationBuilder:
                 np.array(limit_strengths, dtype=np.float64),
             )
 
-        # Note on ``init_angle``: UIPC's ``AffineBodyRevoluteJoint`` exposes
-        # an ``init_angle`` edge attribute that defaults to 0 and is **added**
-        # to ``aim_angle`` to compute the effective driving target (so
-        # ``effective = init_angle + aim_angle``). We deliberately leave
-        # ``init_angle`` at 0 here and instead subtract the Newton initial
-        # ``joint_q`` from ``aim_angle`` inside ``Articulation.revolute_joint_anim``
-        # — see ``init_position`` plumbing in ``articulation.py``. The
-        # subtraction MUST live in the animator because the per-step target
-        # comes from ``control.joint_target_pos`` (an absolute angle in
-        # Newton convention) and only the animator sees it after caching.
+        # Write ``init_angle`` onto the UIPC edges so that ``angle`` and
+        # ``aim_angle`` both operate in Newton's absolute coordinate
+        # convention. UIPC's kernels compute
+        #
+        #     current_angle_edge = raw_angle - init_angle
+        #     effective_target   = aim_angle + init_angle
+        #     actual_limit       = limit     + init_angle
+        #
+        # where ``raw_angle`` is measured from the construction-time
+        # rest pose (zero at build) and the Newton absolute coordinate
+        # satisfies ``Newton_q = init_q_Newton + raw_angle``. Picking
+        # ``init_angle = -init_q_Newton`` makes the three edge-space
+        # quantities (``angle``, ``aim_angle``, ``limit/{lower,upper}``)
+        # all match Newton directly, so the animator can read/write
+        # them without any per-step offset and the limits passed to
+        # ``AffineBodyRevoluteJointLimit`` can stay in Newton space.
+        init_angle_view: np.ndarray = view(jm.edges().find("init_angle"))  # ty:ignore[no-matching-overload]
+        init_angle_view[:] = -np.array(init_angles, dtype=np.float64)
 
-        jobj = self._scene.objects().create("joints_revolute")
+        jobj: Object = self._scene.objects().create("joints_revolute")
         jslot, _ = jobj.geometries().create(jm)
 
         # Record mappings for each joint
@@ -824,15 +837,15 @@ class ArticulationBuilder:
             self._mapping.joint_geo_slots[j] = jslot
             self._mapping.joint_mesh[j] = jm
 
-        # Single animator callback dispatching to all revolute joints
-        dispatch_copy = list(anim_dispatch)
-
-        def _revolute_batch_anim(info: Any, dispatch: list = dispatch_copy) -> None:
+        # Single animator callback dispatching to all revolute joints.
+        # ``anim_dispatch`` is a local list that is no longer mutated
+        # after this point, so the closure can capture it by reference.
+        def _revolute_batch_anim(info: Animation.UpdateInfo) -> None:
             try:
-                geo = info.geo_slots()[0].geometry()
+                geo: SimplicialComplex = info.geo_slots()[0].geometry()
             except (TypeError, IndexError):
                 return
-            for art, newton_j, edge_idx in dispatch:
+            for art, newton_j, edge_idx in anim_dispatch:
                 art.revolute_joint_anim(geo, newton_j, edge_idx)
 
         self._scene.animator().insert(jobj, _revolute_batch_anim)
@@ -847,9 +860,9 @@ class ArticulationBuilder:
         body_transforms = self._body_transforms
 
         all_verts: list[np.ndarray] = []
-        parent_slots: list[Any] = []
+        parent_slots: list[SimplicialComplexSlot] = []
         parent_ids: list[int] = []
-        child_slots: list[Any] = []
+        child_slots: list[SimplicialComplexSlot] = []
         child_ids: list[int] = []
         strengths: list[float] = []
         drive_strengths: list[float] = []
@@ -858,10 +871,12 @@ class ArticulationBuilder:
         uppers: list[float] = []
         limit_strengths: list[float] = []
         has_any_limit = False
+        init_distance_edge_vals: list[float] = []
 
         joint_axis_np = model.joint_axis.numpy()
         joint_qd_start_np = model.joint_qd_start.numpy()
         joint_q_start_np = model.joint_q_start.numpy()
+        joint_q_np = state.joint_q.numpy() if state.joint_q is not None else None
 
         anim_dispatch: list[tuple[Articulation, int, int]] = []
         for edge_idx, jdata in enumerate(joints):
@@ -871,9 +886,9 @@ class ArticulationBuilder:
             joint_world_mat: np.ndarray = jdata["joint_world_mat"]
             parent_body: int = jdata["parent_body"]
             child_body: int = jdata["child_body"]
-            p_slot: Any | None = jdata["parent_slot"]
+            p_slot: SimplicialComplexSlot | None = jdata["parent_slot"]
             p_id: int = jdata["parent_instance_id"]
-            c_slot: Any = jdata["child_slot"]
+            c_slot: SimplicialComplexSlot = jdata["child_slot"]
             c_id: int = jdata["child_instance_id"]
 
             if p_slot is None:
@@ -896,18 +911,32 @@ class ArticulationBuilder:
             drive_strengths.append(100.0)
             ext_forces.append(0.0)
 
-            # Compute init distance from FK (for ``register_joint`` so the
-            # animator can offset between Newton's absolute coordinate and
-            # UIPC's delta-from-construction convention).
+            # Physical axial distance between parent and child bodies at
+            # construction time — this is what UIPC's internal
+            # ``DPJ::Distance`` kernel will report at t=0 (before any
+            # motion).
             if body_transforms is not None and parent_body >= 0:
                 parent_pos = body_transforms[parent_body][:3, 3]
                 child_pos = body_transforms[child_body][:3, 3]
-                init_dist = float(np.dot(child_pos - parent_pos, axis_world))
+                fk_init_dist = float(np.dot(child_pos - parent_pos, axis_world))
             elif body_transforms is not None:
                 child_pos = body_transforms[child_body][:3, 3]
-                init_dist = float(np.dot(child_pos - pivot, axis_world))
+                fk_init_dist = float(np.dot(child_pos - pivot, axis_world))
             else:
-                init_dist = 0.0
+                fk_init_dist = 0.0
+
+            # The edge-side ``init_distance`` we will write below has to
+            # compensate for *both* the physical offset between the
+            # bodies AND the Newton initial joint_q so that the
+            # ``distance`` and ``aim_distance`` edge attributes (and the
+            # limit constraints) operate in Newton's absolute coordinate
+            # convention. See the block after the batched ``apply_to``
+            # calls below for the derivation.
+            newton_init_q = float(joint_q_np[q_start]) if joint_q_np is not None else 0.0
+            init_distance_edge_vals.append(fk_init_dist - newton_init_q)
+            print("init_distance_edge_vals", init_distance_edge_vals)
+            print("fk_init_dist", fk_init_dist)
+            print("newton_init_q", newton_init_q)
 
             # Limits
             lower, upper = self._extract_limits(
@@ -926,7 +955,7 @@ class ArticulationBuilder:
                 uppers.append(1e18)
                 limit_strengths.append(1.0)
 
-            art.register_joint(j, q_start, qd_start, init_dist)
+            art.register_joint(j, q_start, qd_start)
             anim_dispatch.append((art, j, edge_idx))
 
         # Build batched linemesh via create_geometry
@@ -957,7 +986,29 @@ class ArticulationBuilder:
                 np.array(limit_strengths, dtype=np.float64),
             )
 
-        jobj = self._scene.objects().create("joints_prismatic")
+        # Write ``init_distance`` onto the UIPC edges so that the
+        # ``distance`` and ``aim_distance`` edge attributes (and the
+        # prismatic limit constraints) operate in Newton's absolute
+        # coordinate convention. UIPC's kernels compute
+        #
+        #     current_distance_edge = physical_distance - init_distance
+        #     effective_target      = aim_distance      + init_distance
+        #     actual_limit          = limit             + init_distance
+        #
+        # where ``physical_distance`` is the live axial distance between
+        # the two bodies (equal to ``fk_init_dist`` at t=0) and the
+        # Newton absolute coordinate satisfies
+        # ``Newton_q = init_q_Newton + (physical_distance - fk_init_dist)``.
+        # Solving for ``init_distance`` such that
+        # ``current_distance_edge == Newton_q`` gives
+        # ``init_distance = fk_init_dist - init_q_Newton``. With that
+        # choice, ``aim_distance`` and the limit edge attributes are
+        # also in Newton space, so the animator writes targets
+        # directly and this builder passes Newton limits unmodified.
+        init_distance_view: np.ndarray = view(jm.edges().find("init_distance"))  # ty:ignore[no-matching-overload]
+        init_distance_view[:] = np.array(init_distance_edge_vals, dtype=np.float64)
+
+        jobj: Object = self._scene.objects().create("joints_prismatic")
         jslot, _ = jobj.geometries().create(jm)
 
         for art, j, edge_idx in anim_dispatch:
@@ -966,14 +1017,12 @@ class ArticulationBuilder:
             self._mapping.joint_geo_slots[j] = jslot
             self._mapping.joint_mesh[j] = jm
 
-        dispatch_copy: list[tuple[Articulation, int, int]] = list(anim_dispatch)
-
-        def _prismatic_batch_anim(info: Any, dispatch: list[tuple[Articulation, int, int]] = dispatch_copy) -> None:
+        def _prismatic_batch_anim(info: Animation.UpdateInfo) -> None:
             try:
-                geo = info.geo_slots()[0].geometry()
+                geo: SimplicialComplex = info.geo_slots()[0].geometry()
             except (TypeError, IndexError):
                 return
-            for art, newton_j, edge_idx in dispatch:
+            for art, newton_j, edge_idx in anim_dispatch:
                 art.prismatic_joint_anim(geo, newton_j, edge_idx)
 
         self._scene.animator().insert(jobj, _prismatic_batch_anim)
@@ -984,23 +1033,23 @@ class ArticulationBuilder:
     ) -> None:
         """Create all fixed joints in a single batched pointcloud."""
         # Separate world-anchored (no parent) from inter-body fixed joints
-        child_slots: list[Any] = []
+        child_slots: list[SimplicialComplexSlot] = []
         child_ids: list[int] = []
-        parent_slots: list[Any] = []
+        parent_slots: list[SimplicialComplexSlot] = []
         parent_ids: list[int] = []
         strengths: list[float] = []
         joint_indices: list[int] = []
 
         for jdata in joints:
             j: int = jdata["j"]
-            p_slot: Any | None = jdata["parent_slot"]
+            p_slot: SimplicialComplexSlot | None = jdata["parent_slot"]
             p_id: int = jdata["parent_instance_id"]
-            c_slot: Any = jdata["child_slot"]
+            c_slot: SimplicialComplexSlot = jdata["child_slot"]
             c_id: int = jdata["child_instance_id"]
 
             if p_slot is None:
                 # No parent → mark child instance as fixed directly
-                view(c_slot.geometry().instances().find(uipc_builtin.is_fixed))[c_id] = 1
+                view(c_slot.geometry().instances().find(uipc_builtin.is_fixed))[c_id] = 1  # pyright: ignore[reportArgumentType]
                 continue
 
             child_slots.append(c_slot)
@@ -1021,7 +1070,7 @@ class ArticulationBuilder:
             np.array(strengths, dtype=np.float64),
         )
 
-        jobj = self._scene.objects().create("joints_fixed")
+        jobj: Object = self._scene.objects().create("joints_fixed")
         jslot, _ = jobj.geometries().create(jm)
         for j in joint_indices:
             self._mapping.joint_geo_slots[j] = jslot
@@ -1033,9 +1082,9 @@ class ArticulationBuilder:
         model: Any,
     ) -> None:
         """Create all spherical (ball) joints in a single batched pointcloud."""
-        parent_slots: list[Any] = []
+        parent_slots: list[SimplicialComplexSlot] = []
         parent_ids: list[int] = []
-        child_slots: list[Any] = []
+        child_slots: list[SimplicialComplexSlot] = []
         child_ids: list[int] = []
         l_positions: list[np.ndarray] = []
         r_positions: list[np.ndarray] = []
@@ -1047,10 +1096,10 @@ class ArticulationBuilder:
 
         for jdata in joints:
             j: int = jdata["j"]
-            p_slot: Any | None = jdata["parent_slot"]
+            p_slot: SimplicialComplexSlot | None = jdata["parent_slot"]
             p_id: int = jdata["parent_instance_id"]
             pivot: np.ndarray = jdata["pivot"]
-            c_slot: Any = jdata["child_slot"]
+            c_slot: SimplicialComplexSlot = jdata["child_slot"]
             c_id: int = jdata["child_instance_id"]
 
             if p_slot is None:
@@ -1088,7 +1137,7 @@ class ArticulationBuilder:
             np.array(strengths, dtype=np.float64),
         )
 
-        jobj = self._scene.objects().create("joints_ball")
+        jobj: Object = self._scene.objects().create("joints_ball")
         jslot, _ = jobj.geometries().create(jm)
         for j in joint_indices:
             self._mapping.joint_geo_slots[j] = jslot
