@@ -95,7 +95,7 @@ def _time_initialize(model: newton.Model, backend: str) -> float:
         auto_init=False,
         backend=backend,
     )
-    solver.configure_scene({"contact": {"enable": True}})
+    solver.set_contact(True)
     solver.configure_contact_tabular(_contact_tabular_fn)
 
     start = time.perf_counter()

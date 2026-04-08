@@ -293,7 +293,7 @@ class Example:
             logger_level=uipc.Logger.Info,
             auto_init=False,
         )
-        self.solver.configure_scene({"contact": {"enable": True}})
+        self.solver.set_contact(True)
         self.solver.configure_contact_tabular(_contact_tabular_fn)
         self.solver.initialize()
 

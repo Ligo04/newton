@@ -320,6 +320,7 @@ class Example:
 
         self.capture()
         self.capture_ik()
+        self.viewer._paused = True
 
     def set_joint_targets(self):
         self.time_in_waypoint += self.frame_dt
@@ -503,15 +504,13 @@ class Example:
             wps = []
             cup_pos_higher = wp.vec3([self.cup_pos[0] + self.place_offset, self.cup_pos[1], self.z_rest])
             cup_pos_lower = wp.vec3([self.cup_pos[0] + self.place_offset, self.cup_pos[1], self.z_rest - 0.1])
-            wps.extend(
-                [
-                    [cup_pos_higher, 2.0, grasp_pos, rot_hand],
-                    [cup_pos_higher, 0.25, loose_pos, rot_hand],
-                    [cup_pos_higher, 1.0, grasp_pos, rot_hand],
-                    [cup_pos_lower, 1.0, grasp_pos, rot_hand],
-                    [cup_pos_lower, 1.0, no_grasp_pos, rot_hand],
-                ]
-            )
+            wps.extend([
+                [cup_pos_higher, 2.0, grasp_pos, rot_hand],
+                [cup_pos_higher, 2.0, loose_pos, rot_hand],
+                [cup_pos_higher, 1.0, loose_pos, rot_hand],
+                [cup_pos_lower, 1.0, loose_pos, rot_hand],
+                [cup_pos_lower, 1.0, 0.0, rot_hand],
+            ])
             self.waypoints.extend(wps)
 
     @staticmethod

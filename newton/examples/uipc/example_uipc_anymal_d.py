@@ -85,7 +85,7 @@ class Example:
             logger_level=uipc.Logger.Info,
             auto_init=False,
         )
-        self.solver.configure_scene({"contact": {"enable": True}})
+        self.solver.set_contact(True)
         self.solver.initialize()
 
         self.state_1 = self.model.state()

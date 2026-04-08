@@ -378,6 +378,69 @@ class ArticulationBuilder:
 
         return self._body_transforms
 
+    def _compute_shape_body_anchors(
+        self,
+        joint_type_np: np.ndarray,
+        joint_parent_np: np.ndarray,
+        joint_child_np: np.ndarray,
+    ) -> dict[int, int]:
+        """Map every body to its nearest shape-bearing ancestor via a FIXED chain.
+
+        A shapeless body (one that has no entry in ``body_geo_slots`` because
+        ``RigidBodyBuilder`` skipped it — typically because the URDF declared
+        the link with no ``<collision>``, ``<visual>``, or ``<inertial>``, e.g.
+        ``fr3_link8`` / ``fr3_hand_tcp``) cannot appear on either side of a
+        UIPC constitution. However if the only joints connecting such a body
+        to a shape-bearing ancestor are all of type ``FIXED``, the body's pose
+        is rigidly tied to that ancestor and we can treat it as an alias.
+
+        Returns a dict where:
+
+        * Shape-bearing body ``b`` maps to ``b`` itself.
+        * Shapeless body ``b`` reachable from a shape-bearing ancestor via a
+          chain of fixed joints maps to that ancestor.
+        * Shapeless body ``b`` with no such ancestor maps to ``-1`` (the
+          caller should fall back to the world-anchored code path).
+
+        Args:
+            joint_type_np: ``model.joint_type`` numpy view.
+            joint_parent_np: ``model.joint_parent`` numpy view.
+            joint_child_np: ``model.joint_child`` numpy view.
+
+        Returns:
+            A dict keyed by body index covering every body in the model.
+        """
+        # Build child_body -> parent_body map for FIXED joints only.
+        fixed_parent_of: dict[int, int] = {}
+        for j in range(len(joint_type_np)):
+            if JointType(joint_type_np[j]) != JointType.FIXED:
+                continue
+            c = int(joint_child_np[j])
+            p = int(joint_parent_np[j])
+            if p >= 0:
+                fixed_parent_of[c] = p
+
+        anchors: dict[int, int] = {}
+        for b in range(self._model.body_count):
+            if b in self._mapping.body_geo_slots:
+                anchors[b] = b
+                continue
+            cur = b
+            visited: set[int] = {b}
+            while cur in fixed_parent_of:
+                cur = fixed_parent_of[cur]
+                if cur in visited:
+                    cur = -1
+                    break
+                visited.add(cur)
+                if cur in self._mapping.body_geo_slots:
+                    break
+            if cur >= 0 and cur in self._mapping.body_geo_slots:
+                anchors[b] = cur
+            else:
+                anchors[b] = -1
+        return anchors
+
     def build_joints(
         self,
         contact_elem: Any,
@@ -448,6 +511,19 @@ class ArticulationBuilder:
         joint_parent_np = model.joint_parent.numpy()
         joint_child_np = model.joint_child.numpy()
 
+        # Resolve shapeless-body fixed-chain anchors. URDFs with frame-only
+        # links (e.g. ``fr3_link8``, ``fr3_hand_tcp``) inside fixed chains
+        # leave the shapeless link without an ABD body, but its pose is
+        # rigidly tied to the nearest shape-bearing ancestor through the
+        # fixed chain. ``anchors[b]`` returns ``b`` itself for shape-bearing
+        # bodies, the ancestor index for collapsible shapeless bodies, or
+        # ``-1`` if no fixed-chain anchor exists.
+        anchors = self._compute_shape_body_anchors(
+            joint_type_np,
+            joint_parent_np,
+            joint_child_np,
+        )
+
         # -- Classify joints by type and collect per-joint data ----------------
         revolute_joints: list[dict] = []
         prismatic_joints: list[dict] = []
@@ -460,13 +536,37 @@ class ArticulationBuilder:
             parent_body = int(joint_parent_np[j])
             child_body = int(joint_child_np[j])
 
+            # A shapeless child has no ABD body. For FIXED joints this is
+            # expected — the chain is re-attached when a downstream joint
+            # references this shapeless link as its parent (handled by
+            # ``anchors`` below). For movable joints we cannot represent it
+            # at all and warn.
             if child_body not in self._mapping.body_geo_slots:
+                if joint_type != JointType.FIXED:
+                    warnings.warn(
+                        f"Joint {j}: child body {child_body} has no ABD "
+                        f"geometry but joint type is {joint_type.name}; "
+                        f"SolverUIPC cannot simulate a movable shapeless "
+                        f"link and is dropping this joint.",
+                        stacklevel=2,
+                    )
                 continue
+
+            # Remap shapeless parent to its shape-bearing fixed-chain
+            # ancestor. ``effective_parent_body`` is what UIPC sees on the
+            # parent side of the constraint; ``parent_body`` stays as the
+            # original Newton index so that pivot/axis computations using
+            # ``self._body_transforms[parent_body]`` (which is in the
+            # original parent's local frame) remain correct.
+            if parent_body >= 0 and parent_body not in self._mapping.body_geo_slots:
+                effective_parent_body = anchors.get(parent_body, -1)
+            else:
+                effective_parent_body = parent_body
 
             child_slot = self._mapping.body_geo_slots[child_body]
             child_instance_id = self._mapping.body_instance_ids.get(child_body, 0)
-            parent_slot = self._mapping.body_geo_slots.get(parent_body)
-            parent_instance_id = self._mapping.body_instance_ids.get(parent_body, 0)
+            parent_slot = self._mapping.body_geo_slots.get(effective_parent_body)
+            parent_instance_id = self._mapping.body_instance_ids.get(effective_parent_body, 0)
 
             # Joint world-frame transform (from the FK-computed body transforms)
             jp = joint_X_p_np[j]
@@ -613,6 +713,7 @@ class ArticulationBuilder:
         uppers: list[float] = []
         limit_strengths: list[float] = []
         has_any_limit = False
+        init_angles: list[float] = []
 
         joint_axis_np = model.joint_axis.numpy()
         joint_qd_start_np = model.joint_qd_start.numpy()
@@ -622,14 +723,14 @@ class ArticulationBuilder:
         # Dispatch list for animator callback: (art, newton_joint_idx, edge_idx)
         anim_dispatch: list[tuple[Articulation, int, int]] = []
         for edge_idx, jdata in enumerate(joints):
-            j = jdata["j"]
-            art = jdata["art"]
-            pivot = jdata["pivot"]
-            joint_world_mat = jdata["joint_world_mat"]
-            p_slot = jdata["parent_slot"]
-            p_id = jdata["parent_instance_id"]
-            c_slot = jdata["child_slot"]
-            c_id = jdata["child_instance_id"]
+            j: int = jdata["j"]
+            art: Articulation = jdata["art"]
+            pivot: np.ndarray = jdata["pivot"]
+            joint_world_mat: np.ndarray = jdata["joint_world_mat"]
+            p_slot: Any | None = jdata["parent_slot"]
+            p_id: int = jdata["parent_instance_id"]
+            c_slot: Any = jdata["child_slot"]
+            c_id: int = jdata["child_instance_id"]
 
             if p_slot is None:
                 p_slot = self._get_or_create_anchor(f"anchor_joint_{j}", pivot)
@@ -670,6 +771,7 @@ class ArticulationBuilder:
 
             # Register joint with its articulation
             init_angle = float(joint_q_np[q_start]) if joint_q_np is not None else 0.0
+            init_angles.append(init_angle)
             art.register_joint(j, q_start, qd_start, init_angle)
             anim_dispatch.append((art, j, edge_idx))
 
@@ -700,6 +802,17 @@ class ArticulationBuilder:
                 np.array(uppers, dtype=np.float64),
                 np.array(limit_strengths, dtype=np.float64),
             )
+
+        # Note on ``init_angle``: UIPC's ``AffineBodyRevoluteJoint`` exposes
+        # an ``init_angle`` edge attribute that defaults to 0 and is **added**
+        # to ``aim_angle`` to compute the effective driving target (so
+        # ``effective = init_angle + aim_angle``). We deliberately leave
+        # ``init_angle`` at 0 here and instead subtract the Newton initial
+        # ``joint_q`` from ``aim_angle`` inside ``Articulation.revolute_joint_anim``
+        # — see ``init_position`` plumbing in ``articulation.py``. The
+        # subtraction MUST live in the animator because the per-step target
+        # comes from ``control.joint_target_pos`` (an absolute angle in
+        # Newton convention) and only the animator sees it after caching.
 
         jobj = self._scene.objects().create("joints_revolute")
         jslot, _ = jobj.geometries().create(jm)
@@ -741,7 +854,6 @@ class ArticulationBuilder:
         strengths: list[float] = []
         drive_strengths: list[float] = []
         ext_forces: list[float] = []
-        init_distances: list[float] = []
         lowers: list[float] = []
         uppers: list[float] = []
         limit_strengths: list[float] = []
@@ -753,16 +865,16 @@ class ArticulationBuilder:
 
         anim_dispatch: list[tuple[Articulation, int, int]] = []
         for edge_idx, jdata in enumerate(joints):
-            j = jdata["j"]
-            art = jdata["art"]
-            pivot = jdata["pivot"]
-            joint_world_mat = jdata["joint_world_mat"]
-            parent_body = jdata["parent_body"]
-            child_body = jdata["child_body"]
-            p_slot = jdata["parent_slot"]
-            p_id = jdata["parent_instance_id"]
-            c_slot = jdata["child_slot"]
-            c_id = jdata["child_instance_id"]
+            j: int = jdata["j"]
+            art: Articulation = jdata["art"]
+            pivot: np.ndarray = jdata["pivot"]
+            joint_world_mat: np.ndarray = jdata["joint_world_mat"]
+            parent_body: int = jdata["parent_body"]
+            child_body: int = jdata["child_body"]
+            p_slot: Any | None = jdata["parent_slot"]
+            p_id: int = jdata["parent_instance_id"]
+            c_slot: Any = jdata["child_slot"]
+            c_id: int = jdata["child_instance_id"]
 
             if p_slot is None:
                 p_slot = self._get_or_create_anchor(f"anchor_joint_{j}", pivot)
@@ -784,7 +896,9 @@ class ArticulationBuilder:
             drive_strengths.append(100.0)
             ext_forces.append(0.0)
 
-            # Compute init_distance
+            # Compute init distance from FK (for ``register_joint`` so the
+            # animator can offset between Newton's absolute coordinate and
+            # UIPC's delta-from-construction convention).
             if body_transforms is not None and parent_body >= 0:
                 parent_pos = body_transforms[parent_body][:3, 3]
                 child_pos = body_transforms[child_body][:3, 3]
@@ -794,7 +908,6 @@ class ArticulationBuilder:
                 init_dist = float(np.dot(child_pos - pivot, axis_world))
             else:
                 init_dist = 0.0
-            init_distances.append(init_dist)
 
             # Limits
             lower, upper = self._extract_limits(
@@ -844,11 +957,6 @@ class ArticulationBuilder:
                 np.array(limit_strengths, dtype=np.float64),
             )
 
-        # Set per-edge init_distance
-        dist_view = view(jm.edges().find("init_distance"))  # ty:ignore[no-matching-overload]
-        for i, d in enumerate(init_distances):
-            dist_view[i] = d
-
         jobj = self._scene.objects().create("joints_prismatic")
         jslot, _ = jobj.geometries().create(jm)
 
@@ -858,9 +966,9 @@ class ArticulationBuilder:
             self._mapping.joint_geo_slots[j] = jslot
             self._mapping.joint_mesh[j] = jm
 
-        dispatch_copy = list(anim_dispatch)
+        dispatch_copy: list[tuple[Articulation, int, int]] = list(anim_dispatch)
 
-        def _prismatic_batch_anim(info: Any, dispatch: list = dispatch_copy) -> None:
+        def _prismatic_batch_anim(info: Any, dispatch: list[tuple[Articulation, int, int]] = dispatch_copy) -> None:
             try:
                 geo = info.geo_slots()[0].geometry()
             except (TypeError, IndexError):
@@ -884,11 +992,11 @@ class ArticulationBuilder:
         joint_indices: list[int] = []
 
         for jdata in joints:
-            j = jdata["j"]
-            p_slot = jdata["parent_slot"]
-            p_id = jdata["parent_instance_id"]
-            c_slot = jdata["child_slot"]
-            c_id = jdata["child_instance_id"]
+            j: int = jdata["j"]
+            p_slot: Any | None = jdata["parent_slot"]
+            p_id: int = jdata["parent_instance_id"]
+            c_slot: Any = jdata["child_slot"]
+            c_id: int = jdata["child_instance_id"]
 
             if p_slot is None:
                 # No parent → mark child instance as fixed directly
@@ -938,12 +1046,12 @@ class ArticulationBuilder:
         joint_X_c_np = model.joint_X_c.numpy() if model.joint_X_c is not None else None
 
         for jdata in joints:
-            j = jdata["j"]
-            p_slot = jdata["parent_slot"]
-            p_id = jdata["parent_instance_id"]
-            pivot = jdata["pivot"]
-            c_slot = jdata["child_slot"]
-            c_id = jdata["child_instance_id"]
+            j: int = jdata["j"]
+            p_slot: Any | None = jdata["parent_slot"]
+            p_id: int = jdata["parent_instance_id"]
+            pivot: np.ndarray = jdata["pivot"]
+            c_slot: Any = jdata["child_slot"]
+            c_id: int = jdata["child_instance_id"]
 
             if p_slot is None:
                 p_slot = self._get_or_create_anchor(f"anchor_joint_{j}", pivot)

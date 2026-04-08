@@ -160,7 +160,6 @@ class SolverUIPC(SolverBase):
         if scene_config is None:
             scene_config: dict[str, Any] = UScene.default_config()
             scene_config["dt"] = dt
-        scene_config["d_hat"] = 0.001
         scene_config["contact"]["enable"] = False
         print(scene_config)
         if model.gravity is not None:
@@ -218,6 +217,46 @@ class SolverUIPC(SolverBase):
                 "Cannot configure scene after initialization. Pass auto_init=False to defer initialization."
             )
         self._scene_config.update(config)
+
+    def set_contact(self, enable: bool, d_hat: float | None = None) -> None:
+        """Enable/disable global contact handling and optionally tune ``d_hat``.
+
+        Toggles the ``contact.enable`` flag on the underlying UIPC scene config,
+        and (optionally) updates the IPC barrier distance ``contact.d_hat``
+        [m]. ``d_hat`` is the thickness of the contact "safety layer": pairs
+        whose surface distance drops below it receive a barrier force that
+        repels them before an actual penetration occurs. Smaller values allow
+        tighter contacts (e.g. a gripper closing on a thin object) but demand
+        more Newton iterations and smaller time steps to stay stable. The UIPC
+        default is ``0.01`` m.
+
+        Safe to call either before or after :meth:`initialize`:
+
+        - **Before init:** updates the cached scene config that will be passed
+          to ``uipc.Scene`` on :meth:`initialize`.
+        - **After init:** updates ``scene.config()`` in place. Takes effect on
+          the next ``scene.update()`` / ``world.advance()`` call.
+
+        Args:
+            enable: ``True`` to enable contact, ``False`` to disable.
+            d_hat: Optional IPC barrier distance [m]. When provided, updates
+                ``contact.d_hat``. When ``None`` (default), the current value
+                is left untouched.
+        """
+        flag = bool(enable)
+
+        if self._initialized:
+            # Mutate the live scene config. UIPC exposes scene.config() as a
+            # mutable view onto the underlying JSON-like config object.
+            scene_cfg = self.scene.config()
+            scene_cfg["contact"]["enable"] = flag  # ty:ignore[not-subscriptable]
+            if d_hat is not None:
+                scene_cfg["contact"]["d_hat"] = float(d_hat)  # ty:ignore[not-subscriptable]
+        else:
+            contact_cfg = self._scene_config.setdefault("contact", {})
+            contact_cfg["enable"] = flag
+            if d_hat is not None:
+                contact_cfg["d_hat"] = float(d_hat)
 
     def configure_contact_tabular(self, fn: Callable) -> None:
         """Register a callback to configure the UIPC contact tabular before initialization.

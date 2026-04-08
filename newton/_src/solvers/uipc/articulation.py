@@ -168,6 +168,11 @@ class Articulation:
         # Newton model index mapping (populated by register_joint)
         self._joint_q_start: dict[int, int] = {}
         self._joint_qd_start: dict[int, int] = {}
+        # Per-joint initial angle [rad] / distance [m] in Newton convention.
+        # Used by ``revolute_joint_anim`` / ``prismatic_joint_anim`` to
+        # convert between absolute Newton joint coordinates and UIPC's
+        # delta-from-construction-pose convention. See ``register_joint``.
+        self._joint_init_value: dict[int, float] = {}
 
         # -- UIPC geometry references (populated by ArticulationBuilder) --
         self.joint_geo_slots: dict[int, Any] = {}
@@ -183,6 +188,7 @@ class Articulation:
         self.target_force: wp.array | None = None  # (J,) float64
         self.is_constrained: wp.array | None = None  # (J,) int32
         self.is_force_constrained: wp.array | None = None  # (J,) int32
+        self.init_position: wp.array | None = None  # (J,) float64 — Newton init q values
 
         # -- Mapping arrays for kernel dispatch (allocated by setup_state)
         # These live on ``self._device`` (typically CUDA).
@@ -230,7 +236,12 @@ class Articulation:
             newton_idx: Newton joint index.
             q_start: Start index in ``joint_q`` for this joint.
             qd_start: Start index in ``joint_qd`` for this joint.
-            init_value: Initial angle [rad] or distance [m].
+            init_value: Initial angle [rad] or distance [m] of the joint at
+                construction time. Stored so that the animator callbacks can
+                convert between Newton's absolute joint-coordinate convention
+                and UIPC's delta-from-construction convention. The animator
+                writes ``aim_angle = target - init_value`` and reads back
+                ``joint_position = curr_angle + init_value``.
 
         Returns:
             Local (0-based) index within this articulation.
@@ -240,6 +251,7 @@ class Articulation:
         self._joint_to_local[newton_idx] = local
         self._joint_q_start[newton_idx] = q_start
         self._joint_qd_start[newton_idx] = qd_start
+        self._joint_init_value[newton_idx] = float(init_value)
         return local
 
     # ------------------------------------------------------------------
@@ -277,6 +289,13 @@ class Articulation:
         self.target_force = wp.zeros(J, dtype=wp.float64, device="cpu")
         self.is_constrained = wp.zeros(J, dtype=wp.int32, device="cpu")
         self.is_force_constrained = wp.zeros(J, dtype=wp.int32, device="cpu")
+        # Initial joint values in Newton convention, sized like the local
+        # arrays above so animator callbacks can index by ``local``.
+        init_vals_np = np.array(
+            [self._joint_init_value.get(idx, 0.0) for idx in self.active_joint_indices],
+            dtype=np.float64,
+        )
+        self.init_position = wp.array(init_vals_np, dtype=wp.float64, device="cpu")
 
         # -- Device-side mirrors for kernel I/O ----------------------------
         self._joint_position_dev = wp.zeros(J, dtype=wp.float64, device=device)
@@ -334,10 +353,17 @@ class Articulation:
         vel_np = self.joint_velocity.numpy()
         curr_angle = view(geo.edges().find("angle"))[edge_idx]
 
+        # UIPC's ``angle`` is a delta from the construction-time relative
+        # pose; Newton's ``joint_q`` is an absolute angle. Convert by adding
+        # the recorded ``init_position`` (the Newton joint_q at build time).
+        assert self.init_position is not None
+        init_val = float(self.init_position.numpy()[local])
+        absolute_angle = float(curr_angle) + init_val
+
         # Update readback (numpy view writes through to wp.array on CPU)
         if self._step_count > 0:
-            vel_np[local] = (curr_angle - pos_np[local]) / self._dt
-        pos_np[local] = curr_angle
+            vel_np[local] = (absolute_angle - pos_np[local]) / self._dt
+        pos_np[local] = absolute_angle
 
         # Constraint and force flags
         driving = bool(self.is_constrained.numpy()[local])
@@ -351,9 +377,11 @@ class Articulation:
         if force_only:
             view(geo.edges().find("external_force"))[edge_idx] = self.target_force.numpy()[local]
 
-        # Position/velocity driving
+        # Position/velocity driving — Newton target is absolute, UIPC
+        # ``aim_angle`` is the delta from the construction reference, so
+        # subtract ``init_val`` here.
         if driving:
-            view(geo.edges().find("aim_angle"))[edge_idx] = self.target_position.numpy()[local]
+            view(geo.edges().find("aim_angle"))[edge_idx] = float(self.target_position.numpy()[local]) - init_val
 
     def prismatic_joint_anim(
         self,
@@ -385,10 +413,18 @@ class Articulation:
         vel_np = self.joint_velocity.numpy()
         curr_dist = view(geo.edges().find("distance"))[edge_idx]
 
+        # UIPC's ``distance`` is a delta from the construction-time
+        # ``init_distance``; Newton's ``joint_q`` is the absolute prismatic
+        # coordinate. Add ``init_position`` (the Newton ``init_q``) to
+        # convert. Same offset story as ``revolute_joint_anim``.
+        assert self.init_position is not None
+        init_val = float(self.init_position.numpy()[local])
+        absolute_dist = float(curr_dist) + init_val
+
         # Update readback (numpy view writes through to wp.array on CPU)
         if self._step_count > 0:
-            vel_np[local] = (curr_dist - pos_np[local]) / self._dt
-        pos_np[local] = curr_dist
+            vel_np[local] = (absolute_dist - pos_np[local]) / self._dt
+        pos_np[local] = absolute_dist
 
         # Constraint and force flags
         driving = bool(self.is_constrained.numpy()[local])
@@ -402,7 +438,7 @@ class Articulation:
             view(geo.edges().find("external_force"))[edge_idx] = self.target_force.numpy()[local]
 
         if driving:
-            view(geo.edges().find("aim_distance"))[edge_idx] = self.target_position.numpy()[local]
+            view(geo.edges().find("aim_distance"))[edge_idx] = float(self.target_position.numpy()[local]) - init_val
 
     # ------------------------------------------------------------------
     # Per-step control caching & state readback
