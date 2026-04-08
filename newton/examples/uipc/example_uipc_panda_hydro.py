@@ -107,6 +107,11 @@ class Example:
 
         left_finger_idx = find_body("fr3_leftfinger")
         right_finger_idx = find_body("fr3_rightfinger")
+        # fr3_hand is the IK end-effector frame. Store it here while the
+        # ``find_body`` closure is in scope — the hand body index depends
+        # on the URDF traversal order, so hardcoding (``10`` in the
+        # original example) is brittle once extra bodies are added.
+        self.hand_body_idx = find_body("fr3_hand")
 
         # Add gripper pads (mesh) before convex-hull approximation so they
         # get merged with each finger into a single closed ABD body.
@@ -167,7 +172,7 @@ class Example:
         # directly on the table, which fails UIPC's sanity check. We lift
         # everything by ``uipc_gap`` so the initial distances satisfy the
         # solver's minimum-separation constraint.
-        uipc_gap = 0.012
+        uipc_gap = 0.0012
         box_size = 0.05
         table_pos = wp.vec3(0.08, -0.5, box_size + uipc_gap)
         table_body = builder_single.add_body(
@@ -223,7 +228,7 @@ class Example:
         if self.scene == SceneType.PEN:
             radius = 0.005
             length = 0.14
-            self.object_pos = [0.0, -0.5, 2 * box_size + 2 * uipc_gap + radius + 0.001]
+            self.object_pos = [0.0, -0.5, 2 * box_size + radius + 0.001 + uipc_gap]
             object_xform = wp.transform(
                 wp.vec3(self.object_pos),
                 wp.quat_from_axis_angle(wp.vec3(0.0, 1.0, 0.0), np.pi / 2),
@@ -234,11 +239,11 @@ class Example:
                 radius=radius,
                 half_height=length / 2,
             )
-            self.grasping_offset = [-0.03, 0.0, 0.13]
+            self.grasping_offset = [-0.03, 0.0, 0.1]
             self.place_offset = -0.02
         else:  # CUBE
             size = 0.04
-            self.object_pos = [0.0, -0.5, 2 * box_size + 2 * uipc_gap + 0.5 * size]
+            self.object_pos = [0.0, -0.5, 2 * box_size + uipc_gap + 0.5 * size]
             object_xform = wp.transform(wp.vec3(self.object_pos), wp.quat_identity())
             self.object_body_local = builder_single.add_body(xform=object_xform, label="object")
             builder_single.add_shape_box(
@@ -247,7 +252,7 @@ class Example:
                 hy=size / 2,
                 hz=size / 2,
             )
-            self.grasping_offset = [0.03, 0.0, 0.14]
+            self.grasping_offset = [0.0, 0.0, 0.1]
             self.place_offset = 0.0
 
         # ------------------------------------------------------------------
@@ -273,8 +278,9 @@ class Example:
         self.solver = newton.solvers.SolverUIPC(
             self.model,
             dt=self.sim_dt,
-            logger_level=uipc.Logger.Info,
+            logger_level=uipc.Logger.Error,
         )
+        self.solver.configure_scene({"line_search": {"report_energy": True}})
         self.solver.set_contact(True)
         self.solver.initialize()
 
@@ -311,12 +317,11 @@ class Example:
         self.object_max_z = [self.object_pos[2]] * self.world_count if self.test_mode else None
 
     def _setup_ik(self):
-        # Use fr3_hand as the IK end-effector, matching example_robot_panda_hydro
-        # (which hardcodes index 10 — that is fr3_hand, not fr3_leftfinger).
-        # The grasping_offset values are calibrated against the hand frame, so
-        # targeting the hand here is required for the waypoint sequence to
-        # actually reach the cube / pen on the table.
-        self.ee_index = 10
+        # Use fr3_hand as the IK end-effector. The grasping_offset values
+        # are calibrated against the hand frame, so targeting the hand
+        # here is required for the waypoint sequence to actually reach
+        # the cube / pen on the table.
+        self.ee_index = self.hand_body_idx
         body_q_np = self.state_ik.body_q.numpy()
         ee_tf = wp.transform(*body_q_np[self.ee_index])
 
@@ -348,7 +353,7 @@ class Example:
         )
 
         # Pick-and-place + drop-into-cup waypoints.
-        # Tuple layout: (target_pos, duration, gripper_close, _).
+        # Tuple layout: (target_pos, duration, gripper_close, rot_hand).
         self.time_in_waypoint = 0.0
         self.current_waypoint = 0
         self.z_rest = 0.5
@@ -393,7 +398,6 @@ class Example:
         wp_idx = self.current_waypoint
         next_idx = (wp_idx + 1) % len(self.waypoints)
         t = self.time_in_waypoint / self.waypoints[wp_idx][1]
-        t = min(t, 1.0)
 
         target_position = self.waypoints[wp_idx][0] * (1.0 - t) + self.waypoints[next_idx][0] * t
         target_angle_z = self.waypoints[wp_idx][3] * (1.0 - t) + self.waypoints[next_idx][3] * t

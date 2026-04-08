@@ -160,7 +160,10 @@ class SolverUIPC(SolverBase):
         if scene_config is None:
             scene_config: dict[str, Any] = UScene.default_config()
             scene_config["dt"] = dt
+        scene_config["d_hat"] = 0.001
         scene_config["contact"]["enable"] = False
+        scene_config["newton"]["velocity_tol"] = 0.001
+        scene_config["newton"]["translation_tol"] = 0.01
         print(scene_config)
         if model.gravity is not None:
             gravity_np = model.gravity.numpy().flatten()
@@ -218,7 +221,7 @@ class SolverUIPC(SolverBase):
             )
         self._scene_config.update(config)
 
-    def set_contact(self, enable: bool, d_hat: float | None = None) -> None:
+    def set_contact(self, enable: bool, d_hat: float = 0.001) -> None:
         """Enable/disable global contact handling and optionally tune ``d_hat``.
 
         Toggles the ``contact.enable`` flag on the underlying UIPC scene config,
