@@ -353,7 +353,7 @@ class Articulation:
 
         # Force/torque control
         if force_only:
-            view(geo.edges().find("external_force"))[edge_idx] = self.target_force.numpy()[local]
+            view(geo.edges().find("external_torque"))[edge_idx] = self.target_force.numpy()[local]
 
         # Position/velocity driving — ``aim_angle`` is in Newton absolute
         # space thanks to the ``init_angle`` edge offset, so write the

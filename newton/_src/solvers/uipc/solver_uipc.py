@@ -9,7 +9,6 @@ import warnings
 from collections.abc import Callable
 from typing import Any
 
-import numpy as np  # noqa: F401  # used by _sync_body_state_to_uipc
 import uipc
 import uipc.adapter.warp
 import warp as wp
@@ -21,12 +20,15 @@ from uipc.unit import GPa, MPa
 from ...core.types import override
 from ...sim import Contacts, Control, Model, State
 from ...sim.enums import JointType
+from ..flags import SolverNotifyFlags
 from ..solver import SolverBase
 from .articulation_builder import ArticulationBuilder
 from .cloth import ClothBuilder
 from .converter import (
     UIpcMappingInfo,
     _read_from_backend_kernel,
+    _spatial_to_vel_mat44_kernel,
+    _transform_to_mat44_kernel,
     populate_backend_offsets,
 )
 from .deformable_body import DeformableBodyBuilder
@@ -616,14 +618,168 @@ class SolverUIPC(SolverBase):
     def notify_model_changed(self, flags: int) -> None:
         """Notify the solver that parts of the model were modified.
 
+        Supported flags:
+            - :attr:`~newton.SolverNotifyFlags.BODY_PROPERTIES`: push
+              ``model.body_q`` and ``model.body_qd`` into the UIPC backend
+              for the mapped affine bodies (state reset).
+            - :attr:`~newton.SolverNotifyFlags.JOINT_PROPERTIES`: recompute
+              forward kinematics from ``model.joint_q`` and push the
+              resulting body state into UIPC.
+
+        Other flags (``BODY_INERTIAL_PROPERTIES``, ``SHAPE_PROPERTIES``,
+        etc.) are not currently supported and trigger a warning; recreating
+        the solver is the recommended workaround for those.
+
+        .. note::
+
+            After ``JOINT_PROPERTIES`` the rigid-body state (``body_q`` /
+            ``body_qd``) is reset consistently, but UIPC's internal
+            revolute/prismatic joint angle tracker does **not** reflect the
+            reset until the simulation has taken at least one step that
+            drives the joint through the new configuration. If your
+            downstream code relies on ``state.joint_q`` immediately after a
+            reset, prefer reading from ``model.joint_q`` (which is updated
+            by the internal FK call) until the next step completes.
+
         Args:
             flags: Bit-mask of model-update flags.
         """
-        warnings.warn(
-            "SolverUIPC.notify_model_changed: incremental model updates are not yet supported. "
-            "Consider recreating the solver if the model has changed significantly.",
-            stacklevel=2,
+        if not self._initialized:
+            # Nothing to push yet -- :meth:`initialize` will read the
+            # model's current state when it runs.
+            return
+
+        state_mask = SolverNotifyFlags.BODY_PROPERTIES | SolverNotifyFlags.JOINT_PROPERTIES
+        unsupported_mask = (
+            SolverNotifyFlags.BODY_INERTIAL_PROPERTIES
+            | SolverNotifyFlags.SHAPE_PROPERTIES
+            | SolverNotifyFlags.JOINT_DOF_PROPERTIES
         )
+
+        if flags & unsupported_mask:
+            warnings.warn(
+                "SolverUIPC.notify_model_changed: inertial / shape / joint-axis updates are "
+                "not supported. Recreate the solver if these properties have changed.",
+                stacklevel=2,
+            )
+
+        if flags & state_mask == 0:
+            return
+
+        # Recompute FK so that model.body_q / self._articulation_builder._body_transforms
+        # reflect the new model.joint_q before we push state into UIPC.
+        if flags & SolverNotifyFlags.JOINT_PROPERTIES:
+            # Full-model FK sweep (joint_range=None) updates all child body
+            # transforms and flushes them back to model.body_q.
+            self._articulation_builder.compute_fk()
+
+        self._push_body_state_to_uipc()
+
+    def _push_body_state_to_uipc(self) -> None:
+        """Push ``model.body_q`` / ``model.body_qd`` into the UIPC backend.
+
+        Uses Warp kernels to build the 4x4 transform / velocity matrices
+        on-device in one batched launch, then performs a single
+        device→host copy and scatters the rows into each geometry slot's
+        per-instance ``transform`` / ``velocity`` attributes before calling
+        ``AffineBodyStateAccessorFeature.copy_from`` to synchronise the
+        UIPC backend.
+
+        UIPC's Python API only exposes ``copy_from(SimplicialComplex)``
+        for the write direction, so a single host copy is unavoidable —
+        but the math and the 128-bit element construction are done on
+        GPU instead of per-body Python, which is a large speedup for
+        models with many affine bodies.
+        """
+        mapping = self.mapping
+        if mapping.num_mapped_bodies == 0 or not mapping.body_geo_slots:
+            return
+
+        model = self.model
+        if model.body_q is None:
+            return
+        assert mapping.body_indices_wp is not None
+        assert self._abd_transform_buf is not None
+        assert self._abd_velocity_buf is not None
+
+        n = mapping.num_mapped_bodies
+        device = model.device
+
+        # Batch-convert every mapped body's transform (and velocity, if
+        # available) into UIPC's 4x4 mat64 layout on-device. The same
+        # ``_abd_transform_buf`` / ``_abd_velocity_buf`` pool used by the
+        # read-back path is re-purposed for this write direction to
+        # avoid an extra allocation.
+        wp.launch(
+            _transform_to_mat44_kernel,
+            dim=n,
+            inputs=[model.body_q, mapping.body_indices_wp, self._abd_transform_buf.warp()],
+            device=device,
+        )
+        if model.body_qd is not None:
+            wp.launch(
+                _spatial_to_vel_mat44_kernel,
+                dim=n,
+                inputs=[model.body_qd, mapping.body_indices_wp, self._abd_velocity_buf.warp()],
+                device=device,
+            )
+        else:
+            self._abd_velocity_buf.warp().zero_()
+
+        # Single device→host sync: both buffers now hold per-mapped-body
+        # mat44d rows aligned with ``mapping.body_indices_wp``.
+        transforms_host = self._abd_transform_buf.warp().numpy()
+        velocities_host = self._abd_velocity_buf.warp().numpy()
+
+        # Build / reuse a body_idx → row-in-host-array lookup. This is a
+        # function of ``body_indices_wp``, which is immutable after
+        # ``populate_backend_offsets``, so cache it on the solver.
+        if getattr(self, "_mapped_body_row", None) is None:
+            body_indices_np = mapping.body_indices_wp.numpy()
+            self._mapped_body_row = {int(b): i for i, b in enumerate(body_indices_np)}
+        body_row = self._mapped_body_row
+
+        # Group mapped bodies by the geometry slot they share (instanced
+        # bodies share a slot with distinct instance ids).
+        slot_bodies: dict[int, list[int]] = {}
+        slot_objs: dict[int, Any] = {}
+        for body_idx, slot in mapping.body_geo_slots.items():
+            sid = slot.id()
+            slot_bodies.setdefault(sid, []).append(body_idx)
+            slot_objs[sid] = slot
+
+        for sid, body_list in slot_bodies.items():
+            slot = slot_objs[sid]
+            geo = slot.geometry()
+
+            # ``copy_to`` ensures ``transform`` and ``velocity`` instance
+            # attributes exist and are sized to the slot's instance
+            # count; we then selectively overwrite the rows we own.
+            self._abd_accessor.copy_to(geo)
+
+            transform_attr = geo.instances().find("transform")
+            velocity_attr = geo.instances().find("velocity")
+            if transform_attr is None:
+                warnings.warn(
+                    f"SolverUIPC.notify_model_changed: geometry slot {sid} has no 'transform' "
+                    "instance attribute after copy_to; skipping.",
+                    stacklevel=3,
+                )
+                continue
+            transform_view = transform_attr.view()
+            velocity_view = velocity_attr.view() if velocity_attr is not None else None
+
+            for body_idx in body_list:
+                row = body_row.get(body_idx)
+                if row is None:
+                    continue  # unmapped body (e.g. shapeless kinematic)
+                inst_id = mapping.body_instance_ids.get(body_idx, 0)
+                transform_view[inst_id] = transforms_host[row]
+                if velocity_view is not None:
+                    velocity_view[inst_id] = velocities_host[row]
+
+            # Push the (now-updated) per-instance attributes into UIPC.
+            self._abd_accessor.copy_from(geo)
 
     @override
     def update_contacts(self, contacts: Contacts) -> None:  # ty:ignore[invalid-method-override]  # pyright: ignore[reportIncompatibleMethodOverride]
