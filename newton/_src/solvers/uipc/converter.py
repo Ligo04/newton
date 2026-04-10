@@ -275,6 +275,7 @@ class UIpcMappingInfo:
     body_indices_wp: wp.array | None = None  # sorted body indices, int32
     backend_offsets_wp: wp.array | None = None  # UIPC backend offsets, uint32
     num_mapped_bodies: int = 0
+    max_backend_count: int = 0  # max(backend_offsets) + 1, for buffer allocation
 
     # Cloth geometry mappings: list of (particle_indices, geo_slot) per cloth mesh
     cloth_geo_slots: list[Any] = field(default_factory=list)
@@ -659,3 +660,4 @@ def populate_backend_offsets(mapping: UIpcMappingInfo, device: wp.Device) -> Non
     mapping.body_indices_wp = wp.from_numpy(indices_np, dtype=wp.int32, device=device)
     mapping.backend_offsets_wp = wp.from_numpy(offsets_np, dtype=wp.uint32, device=device)
     mapping.num_mapped_bodies = n
+    mapping.max_backend_count = int(offsets_np.max()) + 1 if n > 0 else 0

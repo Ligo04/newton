@@ -751,7 +751,7 @@ class ArticulationBuilder:
             child_slots.append(c_slot)
             child_ids.append(c_id)
             strengths.append(100.0)
-            drive_strengths.append(1000.0)
+            drive_strengths.append(100.0)
             ext_forces.append(0.0)
 
             # Limits
@@ -897,7 +897,7 @@ class ArticulationBuilder:
             child_slots.append(c_slot)
             child_ids.append(c_id)
             strengths.append(100.0)
-            drive_strengths.append(1000.0)
+            drive_strengths.append(100.0)
             ext_forces.append(0.0)
 
             # Newton initial ``joint_q`` — captured here only so it can

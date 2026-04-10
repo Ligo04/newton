@@ -58,8 +58,8 @@ class Example:
         builder.color()
         self.model = builder.finalize()
 
-        # self.solver = newton.solvers.SolverVBD(self.model)
-        self.solver = newton.solvers.SolverMuJoCo(self.model)
+        self.solver = newton.solvers.SolverVBD(self.model)
+        # self.solver = newton.solvers.SolverMuJoCo(self.model)
         # self.solver = newton.solvers.SolverSemiImplicit(self.model, joint_attach_ke=1600.0, joint_attach_kd=20.0)
         # self.solver = newton.solvers.SolverFeatherstone(self.model)
 

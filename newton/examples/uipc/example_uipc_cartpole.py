@@ -39,13 +39,7 @@ class Example:
             enable_self_collisions=False,
             collapse_fixed_joints=True,
         )
-        # Set initial joint positions: cart at origin, pole1 tilted 0.3 rad,
-        # pole2 upright. Applied to the single cartpole so every replicated
-        # world starts from the same pose.
-        assert cartpole.joint_dof_count == 3
-        cartpole.joint_q[0] = 0.0  # railCartJoint  (prismatic, cart position)
-        cartpole.joint_q[1] = 0.3  # cartPoleJoint  (revolute, pole1 angle)
-        cartpole.joint_q[2] = 0.0  # polePoleJoint  (revolute, pole2 angle)
+        cartpole.joint_q[-3:] = [0.0, 0.3, 0.0]
 
         if self.world_count > 1:
             builder = newton.ModelBuilder(newton.Axis.Z)

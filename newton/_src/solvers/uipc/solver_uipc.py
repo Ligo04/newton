@@ -535,9 +535,13 @@ class SolverUIPC(SolverBase):
         # directly into device memory owned by us.
         self._abd_accessor: AffineBodyStateAccessorFeature = self.world.features().find(AffineBodyStateAccessorFeature)  # ty:ignore[invalid-assignment]
         n = self.mapping.num_mapped_bodies
+        # Allocate buffers large enough to cover the highest backend index,
+        # which may exceed num_mapped_bodies when UIPC assigns non-contiguous
+        # backend offsets across worlds.
+        buf_count = self.mapping.max_backend_count
         if n > 0:
-            self._abd_transform_buf = uipc.adapter.warp.buffer(n, dtype=wp.mat44d, device=model.device)
-            self._abd_velocity_buf = uipc.adapter.warp.buffer(n, dtype=wp.mat44d, device=model.device)
+            self._abd_transform_buf = uipc.adapter.warp.buffer(buf_count, dtype=wp.mat44d, device=model.device)
+            self._abd_velocity_buf = uipc.adapter.warp.buffer(buf_count, dtype=wp.mat44d, device=model.device)
         else:
             self._abd_transform_buf = None
             self._abd_velocity_buf = None
@@ -791,8 +795,11 @@ class SolverUIPC(SolverBase):
             assert self._abd_velocity_buf is not None
 
             # Copy UIPC backend state into our pre-allocated device buffers.
-            self._abd_accessor.copy_transform_to(self._abd_transform_buf.buffer_view(), 0, n)
-            self._abd_accessor.copy_velocity_to(self._abd_velocity_buf.buffer_view(), 0, n)
+            # Read the full backend range so that non-contiguous offsets
+            # (common with multi-world replicate) are all covered.
+            buf_count = self.mapping.max_backend_count
+            self._abd_accessor.copy_transform_to(self._abd_transform_buf.buffer_view(), 0, buf_count)
+            self._abd_accessor.copy_velocity_to(self._abd_velocity_buf.buffer_view(), 0, buf_count)
 
             wp.launch(
                 _read_from_backend_kernel,
