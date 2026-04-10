@@ -83,7 +83,6 @@ class Example:
             self.model,
             dt=self.sim_dt,
             logger_level=uipc.Logger.Info,
-            auto_init=False,
         )
         self.solver.set_contact(True)
         self.solver.initialize()

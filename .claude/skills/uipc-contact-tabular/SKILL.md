@@ -83,8 +83,7 @@ win. This is exactly how the user callback patches defaults.
 
 ## The `configure_contact_tabular` Callback
 
-Call **before** `initialize()`. Requires `auto_init=False` when constructing
-the solver.
+Call **before** `initialize()`.
 
 ```python
 def setup_contacts(tabular, world_index, ground_elem, env_elem, robo_elem, actor_elem):
@@ -104,7 +103,7 @@ def setup_contacts(tabular, world_index, ground_elem, env_elem, robo_elem, actor
     }
 
 
-solver = newton.solvers.SolverUIPC(model, auto_init=False)
+solver = newton.solvers.SolverUIPC(model)
 solver.configure_contact_tabular(setup_contacts)
 solver.initialize()
 ```

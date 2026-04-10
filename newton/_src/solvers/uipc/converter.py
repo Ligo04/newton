@@ -18,6 +18,7 @@ from uipc.geometry import SimplicialComplexSlot
 
 from ...core.types import Axis
 from ...geometry import GeoType, Mesh
+from ...geometry.flags import ShapeFlags
 from ...sim import Model
 
 # ---------------------------------------------------------------------------
@@ -491,8 +492,16 @@ def build_body_mesh(model: Model, body_idx: int) -> tuple[np.ndarray, np.ndarray
     shape_type_np = model.shape_type.numpy()
     shape_transform_np = model.shape_transform.numpy()
     shape_scale_np = model.shape_scale.numpy()
+    shape_flags_np = model.shape_flags.numpy() if model.shape_flags is not None else None
 
-    shape_indices = [s for s in range(model.shape_count) if shape_body[s] == body_idx]
+    # Only use collision shapes (not visual-only shapes) to avoid duplicate
+    # overlapping meshes that break the watertight topology after welding.
+    shape_indices = [
+        s
+        for s in range(model.shape_count)
+        if shape_body[s] == body_idx
+        and (shape_flags_np is None or (int(shape_flags_np[s]) & int(ShapeFlags.COLLIDE_SHAPES)))
+    ]
     if not shape_indices:
         return None
 

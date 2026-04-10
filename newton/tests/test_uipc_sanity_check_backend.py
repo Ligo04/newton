@@ -92,7 +92,6 @@ def _time_initialize(model: newton.Model, backend: str) -> float:
         model,
         dt=1.0 / 60.0,
         logger_level=uipc.Logger.Warn,
-        auto_init=False,
         backend=backend,
     )
     solver.set_contact(True)

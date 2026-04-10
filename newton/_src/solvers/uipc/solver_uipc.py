@@ -52,7 +52,7 @@ class SolverUIPC(SolverBase):
 
     .. code-block:: python
 
-        solver = newton.solvers.SolverUIPC(model, dt=1.0 / 60.0, auto_init=False)
+        solver = newton.solvers.SolverUIPC(model, dt=1.0 / 60.0)
 
         # Customize scene config
         solver.configure_scene({"newton_tol": 1e-3, "line_search": {"max_iter": 8}})
@@ -74,9 +74,6 @@ class SolverUIPC(SolverBase):
         for i in range(100):
             solver.step(state_in, state_out, control, contacts, dt)
             state_in, state_out = state_out, state_in
-
-    When ``auto_init=True`` (the default), the constructor calls
-    :meth:`initialize` automatically, preserving full backward compatibility.
 
     For multi-world models produced by :meth:`~newton.ModelBuilder.replicate`,
     the solver uses UIPC's ``subscene_tabular`` to configure contact isolation
@@ -119,8 +116,7 @@ class SolverUIPC(SolverBase):
         scene_config: dict[str, Any] | None = None,  # pyright: ignore[reportRedeclaration]
         kappa: float = 100 * MPa,
         default_mass_density: float = 1000.0,
-        logger_level=ULogger.Error,
-        auto_init: bool = False,
+        logger_level=ULogger.Warn,
     ):
         """Create a UIPC solver instance from a Newton model.
 
@@ -138,10 +134,6 @@ class SolverUIPC(SolverBase):
                 ``uipc.Logger.Error``, ``uipc.Logger.Warn``, ``uipc.Logger.Info``,
                 ``uipc.Logger.Debug``, or ``uipc.Logger.Trace``.
                 Defaults to ``uipc.Logger.Critical`` to suppress UIPC console spam.
-            auto_init: If ``True`` (default), call :meth:`initialize` at the end
-                of the constructor. Set to ``False`` to configure the scene and
-                contact tabular before initialization via :meth:`configure_scene`
-                and :meth:`configure_contact_tabular`.
         """
         super().__init__(model=model)
         self.import_uipc()
@@ -158,15 +150,14 @@ class SolverUIPC(SolverBase):
         self._kappa = kappa
         self._default_mass_density = default_mass_density
 
-        # Scene config: start from default, apply Newton model overrides
+        # Scene config: start from UIPC defaults, apply Newton model overrides.
         if scene_config is None:
             scene_config: dict[str, Any] = UScene.default_config()
-            scene_config["dt"] = dt
+        scene_config["dt"] = dt
         scene_config["d_hat"] = 0.001
         scene_config["contact"]["enable"] = False
         scene_config["newton"]["velocity_tol"] = 0.001
         scene_config["newton"]["translation_tol"] = 0.01
-        print(scene_config)
         if model.gravity is not None:
             gravity_np = model.gravity.numpy().flatten()
             scene_config["gravity"] = [[float(gravity_np[0])], [float(gravity_np[1])], [float(gravity_np[2])]]
@@ -182,9 +173,6 @@ class SolverUIPC(SolverBase):
         self._cloth_builder: ClothBuilder
         self._deformable_builder: DeformableBodyBuilder
 
-        if auto_init:
-            self.initialize()
-
     # ------------------------------------------------------------------
     # Pre-initialization configuration
     # ------------------------------------------------------------------
@@ -193,7 +181,7 @@ class SolverUIPC(SolverBase):
         """Update UIPC scene configuration before initialization.
 
         Merges the provided key-value pairs into the scene config dict. Must be
-        called **before** :meth:`initialize` (i.e. with ``auto_init=False``).
+        called **before** :meth:`initialize`.
 
         Args:
             config: Dictionary of UIPC scene configuration overrides. These are
@@ -210,7 +198,7 @@ class SolverUIPC(SolverBase):
 
         .. code-block:: python
 
-            solver = SolverUIPC(model, auto_init=False)
+            solver = SolverUIPC(model)
             solver.configure_scene({
                 "newton_tol": 1e-3,
                 "line_search": {"max_iter": 8},
@@ -218,9 +206,7 @@ class SolverUIPC(SolverBase):
             solver.initialize()
         """
         if self._initialized:
-            raise RuntimeError(
-                "Cannot configure scene after initialization. Pass auto_init=False to defer initialization."
-            )
+            raise RuntimeError("Cannot configure scene after initialization.")
         self._scene_config.update(config)
 
     def set_contact(self, enable: bool, d_hat: float = 0.001) -> None:
@@ -257,11 +243,15 @@ class SolverUIPC(SolverBase):
             scene_cfg["contact"]["enable"] = flag  # ty:ignore[not-subscriptable]
             if d_hat is not None:
                 scene_cfg["contact"]["d_hat"] = float(d_hat)  # ty:ignore[not-subscriptable]
+                scene_cfg["d_hat"] = float(d_hat)  # ty:ignore[not-subscriptable]
         else:
             contact_cfg = self._scene_config.setdefault("contact", {})
             contact_cfg["enable"] = flag
             if d_hat is not None:
                 contact_cfg["d_hat"] = float(d_hat)
+                # Also update the top-level d_hat which UIPC reads as the
+                # authoritative barrier distance.
+                self._scene_config["d_hat"] = float(d_hat)
 
     def configure_contact_tabular(self, fn: Callable) -> None:
         """Register a callback to configure the UIPC contact tabular before initialization.
@@ -280,7 +270,7 @@ class SolverUIPC(SolverBase):
         invoked once per world so that users can create additional elements,
         insert custom contact pairs, or modify the defaults.
 
-        Must be called **before** :meth:`initialize` (i.e. with ``auto_init=False``).
+        Must be called **before** :meth:`initialize`.
 
         Args:
             fn: A callable with signature
@@ -306,14 +296,12 @@ class SolverUIPC(SolverBase):
                 tabular.insert(gripper_elem, ground_elem, 0.8, 1e9, False)
 
 
-            solver = SolverUIPC(model, auto_init=False)
+            solver = SolverUIPC(model)
             solver.configure_contact_tabular(setup_contacts)
             solver.initialize()
         """
         if self._initialized:
-            raise RuntimeError(
-                "Cannot configure contact tabular after initialization. Pass auto_init=False to defer initialization."
-            )
+            raise RuntimeError("Cannot configure contact tabular after initialization.")
         self._contact_tabular_fn = fn
 
     def configure_subscene_tabular(self, fn: Callable) -> None:
@@ -324,7 +312,7 @@ class SolverUIPC(SolverBase):
         other (replicating the old ``separate_worlds`` behavior). This callback
         lets you override the default subscene contact table.
 
-        Must be called **before** :meth:`initialize` (i.e. with ``auto_init=False``).
+        Must be called **before** :meth:`initialize`.
 
         Args:
             fn: A callable with signature
@@ -347,14 +335,12 @@ class SolverUIPC(SolverBase):
                 tabular.insert(world_subscenes[0], world_subscenes[1], True)
 
 
-            solver = SolverUIPC(model, auto_init=False)
+            solver = SolverUIPC(model)
             solver.configure_subscene_tabular(setup_subscenes)
             solver.initialize()
         """
         if self._initialized:
-            raise RuntimeError(
-                "Cannot configure subscene tabular after initialization. Pass auto_init=False to defer initialization."
-            )
+            raise RuntimeError("Cannot configure subscene tabular after initialization.")
         self._subscene_tabular_fn = fn
 
     # ------------------------------------------------------------------
@@ -369,10 +355,9 @@ class SolverUIPC(SolverBase):
         Builds rigid body / articulation / cloth / deformable geometries and
         calls ``world.init(scene)``.
 
-        This method is called automatically when ``auto_init=True`` (the
-        default). When ``auto_init=False``, call this explicitly after
-        :meth:`configure_scene`, :meth:`configure_contact_tabular`, and
-        :meth:`configure_subscene_tabular`.
+        Call this explicitly after any :meth:`configure_scene`,
+        :meth:`configure_contact_tabular`, and
+        :meth:`configure_subscene_tabular` calls.
 
         Raises:
             RuntimeError: If already initialized.
@@ -386,6 +371,7 @@ class SolverUIPC(SolverBase):
         self.engine = uipc.Engine(backend_name=self._backend, workspace=self._workspace)
         self.world = uipc.World(self.engine)
         self.scene = uipc.Scene(self._scene_config)
+        print("scene_config", self._scene_config)
 
         # Contact tabular — shared ground + per-world env / robot element pairs
         contact_tabular = self.scene.contact_tabular()
@@ -573,8 +559,7 @@ class SolverUIPC(SolverBase):
     ) -> None:
         """Simulate one time step using UIPC.
 
-        If the solver was created with ``auto_init=False`` and
-        :meth:`initialize` has not been called yet, it is called
+        If :meth:`initialize` has not been called yet, it is called
         automatically before the first step.
 
         Args:
