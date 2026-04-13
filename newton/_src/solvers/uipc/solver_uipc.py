@@ -180,15 +180,18 @@ class SolverUIPC(SolverBase):
     def configure_scene(self, config: dict[str, Any]) -> None:
         """Update UIPC scene configuration before initialization.
 
-        Merges the provided key-value pairs into the scene config dict. Must be
-        called **before** :meth:`initialize`.
+        Performs a recursive deep merge of the provided overrides into the
+        existing scene config.  For nested dicts the merge descends into
+        sub-keys so that unmentioned siblings are preserved.  Non-dict
+        values (scalars, lists) are replaced outright.
+
+        Must be called **before** :meth:`initialize`.
 
         Args:
-            config: Dictionary of UIPC scene configuration overrides. These are
-                merged (shallow update) into the base config. Common keys include
-                ``"dt"``, ``"gravity"``, ``"newton_tol"``, ``"line_search"``,
-                ``"cfl"``, ``"friction"``, etc. Refer to the UIPC documentation
-                for the full list.
+            config: Dictionary of UIPC scene configuration overrides.
+                Common keys include ``"dt"``, ``"gravity"``,
+                ``"newton"``, ``"line_search"``, ``"cfl"``, ``"friction"``,
+                etc.  Refer to the UIPC documentation for the full list.
 
         Raises:
             RuntimeError: If the solver has already been initialized.
@@ -199,15 +202,25 @@ class SolverUIPC(SolverBase):
         .. code-block:: python
 
             solver = SolverUIPC(model)
-            solver.configure_scene({
-                "newton_tol": 1e-3,
-                "line_search": {"max_iter": 8},
-            })
+            solver.configure_scene(
+                {
+                    "newton": {"velocity_tol": 1e-3},
+                    "line_search": {"max_iter": 8},
+                }
+            )
             solver.initialize()
         """
         if self._initialized:
             raise RuntimeError("Cannot configure scene after initialization.")
-        self._scene_config.update(config)
+
+        def merge(base: dict, override: dict) -> None:
+            for key, value in override.items():
+                if key in base and isinstance(base[key], dict) and isinstance(value, dict):
+                    merge(base[key], value)
+                else:
+                    base[key] = value
+
+        merge(self._scene_config, config)
 
     def set_contact(self, enable: bool, d_hat: float = 0.001) -> None:
         """Enable/disable global contact handling and optionally tune ``d_hat``.
@@ -242,15 +255,10 @@ class SolverUIPC(SolverBase):
             scene_cfg = self.scene.config()
             scene_cfg["contact"]["enable"] = flag  # ty:ignore[not-subscriptable]
             if d_hat is not None:
-                scene_cfg["contact"]["d_hat"] = float(d_hat)  # ty:ignore[not-subscriptable]
-                scene_cfg["d_hat"] = float(d_hat)  # ty:ignore[not-subscriptable]
+                scene_cfg["d_hat"] = float(d_hat)  # ty:ignore[invalid-assignment]
         else:
-            contact_cfg = self._scene_config.setdefault("contact", {})
-            contact_cfg["enable"] = flag
+            self._scene_config["contact"]["enable"] = flag
             if d_hat is not None:
-                contact_cfg["d_hat"] = float(d_hat)
-                # Also update the top-level d_hat which UIPC reads as the
-                # authoritative barrier distance.
                 self._scene_config["d_hat"] = float(d_hat)
 
     def configure_contact_tabular(self, fn: Callable) -> None:
@@ -347,7 +355,7 @@ class SolverUIPC(SolverBase):
     # Initialization
     # ------------------------------------------------------------------
 
-    def initialize(self) -> None:
+    def initialize(self, state: State | None = None) -> None:
         """Build UIPC scene objects from the Newton model and initialize the world.
 
         Creates a single UIPC Engine, World, and Scene. For multi-world models,
@@ -358,6 +366,12 @@ class SolverUIPC(SolverBase):
         Call this explicitly after any :meth:`configure_scene`,
         :meth:`configure_contact_tabular`, and
         :meth:`configure_subscene_tabular` calls.
+
+        Args:
+            state: Optional initial :class:`State` whose ``body_q`` /
+                ``body_qd`` are pushed to UIPC after world init.  Typically
+                the state the user has populated via :func:`newton.eval_fk`.
+                If ``None``, falls back to running FK from ``model.joint_q``.
 
         Raises:
             RuntimeError: If already initialized.
@@ -497,7 +511,6 @@ class SolverUIPC(SolverBase):
                 particle_range = (0, model.particle_count)
             se = subscene_elements[world_index] if subscene_elements else None
             rb.build_body_shape_mapping(body_range)
-            ab.compute_fk(joint_range)
             rb.build_affine_bodies(
                 env_elems[world_index],
                 robo_elems[world_index],
@@ -506,7 +519,6 @@ class SolverUIPC(SolverBase):
                 free_joint_bodies,
                 body_range,
                 se,
-                ab._body_transforms,
                 body_element_overrides,
                 no_instance_bodies=ball_joint_bodies,
             )
@@ -546,6 +558,24 @@ class SolverUIPC(SolverBase):
             self._abd_transform_buf = None
             self._abd_velocity_buf = None
 
+        # Push initial body transforms into UIPC.  Prefer the state
+        # provided by the caller (which the user typically populates via
+        # ``newton.eval_fk``) so the initial UIPC pose matches whatever
+        # the downstream simulation will see.  Fall back to running our
+        # own FK from ``model.joint_q`` if no state is supplied.
+        if state is not None and state.body_q is not None and model.body_q is not None:
+            wp.copy(model.body_q, state.body_q)
+            if state.body_qd is not None and model.body_qd is not None:
+                wp.copy(model.body_qd, state.body_qd)
+        else:
+            for world_index in range(model.world_count):
+                if body_ws is not None:
+                    joint_range = (int(joint_ws[world_index]), int(joint_ws[world_index + 1]))  # ty:ignore[not-subscriptable]  # pyright: ignore[reportOptionalSubscript]
+                else:
+                    joint_range = (0, model.joint_count)
+                ab.compute_fk(joint_range)
+        self._push_body_state_to_uipc()
+
         self._initialized = True
 
     # ------------------------------------------------------------------
@@ -574,7 +604,7 @@ class SolverUIPC(SolverBase):
             dt: The time step [s].
         """
         if not self._initialized:
-            self.initialize()
+            self.initialize(state_in)
 
         if abs(dt - self._dt) > 1e-10 and self._step_count == 0:
             warnings.warn(
@@ -589,12 +619,16 @@ class SolverUIPC(SolverBase):
         # Phase 1: Cache joint control
         self._articulation_builder.cache_joint_control(control)
 
+        # DEBUG: snapshot body_q before advance
+        _body_q_before = state_in.body_q.numpy().copy() if state_in.body_q is not None else None
+
         # Phase 2: Advance UIPC (animator callbacks fire here)
         self.world.advance()
         self.world.retrieve()
 
         # Phase 3: Read back results
         self._sync_body_state_from_uipc(state_out)
+        self._articulation_builder.read_joint_state_post_retrieve()
         self._articulation_builder.write_joint_readback(state_out)
 
         if state_out.body_f is not None:
@@ -647,7 +681,7 @@ class SolverUIPC(SolverBase):
 
         if flags & unsupported_mask:
             warnings.warn(
-                "SolverUIPC.notify_model_changed: inertial / shape / joint-axis updates are "
+                "SolverUIPC.notify_model_changed: inertial / shape / joint_dof updates are "
                 "not supported. Recreate the solver if these properties have changed.",
                 stacklevel=2,
             )

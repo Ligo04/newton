@@ -173,6 +173,9 @@ class Articulation:
         # -- UIPC geometry references (populated by ArticulationBuilder) --
         self.joint_geo_slots: dict[int, SimplicialComplexSlot] = {}
         self.joint_mesh: dict[int, Any] = {}
+        # Per-joint edge index and type for post-retrieve readback.
+        self._joint_edge_idx: dict[int, int] = {}
+        self._joint_is_revolute: dict[int, bool] = {}
 
         # -- Animator-facing CPU arrays (allocated by setup_state) -----
         # These are read/written by UIPC animation callbacks via numpy
@@ -331,12 +334,7 @@ class Articulation:
         local = self._joint_to_local[newton_joint_idx]
         pos_np = self.joint_position.numpy()
         vel_np = self.joint_velocity.numpy()
-        # ``init_angle`` was written on the UIPC edge at build time as
-        # ``-init_q_Newton`` so that ``angle`` reads back in Newton's
-        # absolute convention and ``aim_angle`` is interpreted the same
-        # way — no per-step offset is needed here. See
-        # ``_build_revolute_joints_batch`` in ``articulation_builder.py``.
-        curr_angle = float(view(geo.edges().find("angle"))[edge_idx])
+        curr_angle: np.float64 = view(geo.edges().find("angle"))[edge_idx]
 
         # Update readback (numpy view writes through to wp.array on CPU)
         if self._step_count > 0:
@@ -389,11 +387,6 @@ class Articulation:
         local = self._joint_to_local[newton_joint_idx]
         pos_np = self.joint_position.numpy()
         vel_np = self.joint_velocity.numpy()
-        # ``init_distance`` was written on the UIPC edge at build time as
-        # ``FK_init_dist - init_q_Newton`` so that ``distance`` reads back
-        # in Newton's absolute convention and ``aim_distance`` is
-        # interpreted the same way — no per-step offset is needed. See
-        # ``_build_prismatic_joints_batch`` in ``articulation_builder.py``.
         curr_dist = float(view(geo.edges().find("distance"))[edge_idx])
 
         # Update readback (numpy view writes through to wp.array on CPU)
@@ -531,3 +524,36 @@ class Articulation:
             ],
             device=device,
         )
+
+    def read_post_retrieve(self) -> None:
+        """Re-read edge attributes after ``world.retrieve()``.
+
+        The animator callback fires during ``world.advance()`` and reads
+        ``angle`` / ``distance`` values from the **previous** retrieve.
+        This method re-reads the edge attributes so that
+        ``joint_position`` reflects the **current** frame.
+        """
+        if not self._ensure_state():
+            return
+        assert self.joint_position is not None
+        assert self.joint_velocity is not None
+
+        pos_np = self.joint_position.numpy()
+        vel_np = self.joint_velocity.numpy()
+
+        for newton_j in self.active_joint_indices:
+            local = self._joint_to_local[newton_j]
+            if newton_j not in self._joint_edge_idx:
+                continue
+            edge_idx = self._joint_edge_idx[newton_j]
+            geo: SimplicialComplex = self.joint_geo_slots[newton_j].geometry()
+
+            if self._joint_is_revolute[newton_j]:
+                curr_val: float = float(view(geo.edges().find("angle"))[edge_idx])
+            else:
+                curr_val = float(view(geo.edges().find("distance"))[edge_idx])
+
+            old_val = pos_np[local]
+            if self._step_count > 0:
+                vel_np[local] = (curr_val - old_val) / self._dt
+            pos_np[local] = curr_val

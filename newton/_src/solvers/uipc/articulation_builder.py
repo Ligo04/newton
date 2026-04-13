@@ -287,9 +287,9 @@ class ArticulationBuilder:
         stored in ``self._body_transforms`` and synced back to
         ``model.body_q``.
 
-        Must be called **before** :meth:`RigidBodyBuilder.build_affine_bodies`
-        so that the pre-computed transforms can be used when creating
-        UIPC geometries (transforms must be set before geometry creation).
+        If :meth:`set_body_transforms` has not been called yet, the
+        transforms are seeded from ``model.body_q`` so that bodies
+        without joints have valid transforms.
 
         Args:
             joint_range: ``(start, end)`` slice of joints to process, or
@@ -315,10 +315,8 @@ class ArticulationBuilder:
         if any(a is None for a in required):
             return None
 
-        # Lazily allocate (shared across multi-world calls).
-        # Seed from model.body_q so that bodies without joints (e.g.
-        # kinematic bodies) already have a valid world-frame transform.
         if self._body_transforms is None:
+            # Fallback: seed from model.body_q for bodies without joints.
             self._body_transforms = np.zeros(
                 (model.body_count, 4, 4),
                 dtype=np.float64,
@@ -454,8 +452,8 @@ class ArticulationBuilder:
         Creates one :class:`Articulation` per Newton articulation, builds
         the UIPC geometry for each joint, and registers Animator callbacks.
 
-        Must be called **after** :meth:`compute_fk` so that
-        ``self._body_transforms`` is populated.
+        Joint world-space pivots and axes are computed directly from
+        ``model.body_q`` and ``model.joint_X_p``.
 
         Args:
             contact_elem: Contact element for robot link geometries.
@@ -507,7 +505,7 @@ class ArticulationBuilder:
             self.articulations[a] = Articulation(name=label, dt=self._dt, device=self._device)
 
         # Pre-fetch numpy arrays
-        state = model.state()
+        body_q_np = model.body_q.numpy() if model.body_q is not None else None
         joint_X_p_np = model.joint_X_p.numpy()
         joint_type_np = model.joint_type.numpy()
         joint_parent_np = model.joint_parent.numpy()
@@ -558,8 +556,8 @@ class ArticulationBuilder:
             # ancestor. ``effective_parent_body`` is what UIPC sees on the
             # parent side of the constraint; ``parent_body`` stays as the
             # original Newton index so that pivot/axis computations using
-            # ``self._body_transforms[parent_body]`` (which is in the
-            # original parent's local frame) remain correct.
+            # ``body_transforms[parent_body]`` (which is in the original
+            # parent's local frame) remain correct.
             if parent_body >= 0 and parent_body not in self._mapping.body_geo_slots:
                 effective_parent_body = anchors.get(parent_body, -1)
             else:
@@ -570,11 +568,13 @@ class ArticulationBuilder:
             parent_slot = self._mapping.body_geo_slots.get(effective_parent_body)
             parent_instance_id = self._mapping.body_instance_ids.get(effective_parent_body, 0)
 
-            # Joint world-frame transform (from the FK-computed body transforms)
+            # Joint world-frame transform from model.body_q and joint_X_p
             jp = joint_X_p_np[j]
             jp_mat = newton_transform_to_mat4(wp.transform(jp[:3], jp[3:]))
-            if parent_body >= 0 and self._body_transforms is not None:
-                joint_world_mat = self._body_transforms[parent_body] @ jp_mat
+            if parent_body >= 0 and body_q_np is not None:
+                pq = body_q_np[parent_body]
+                parent_mat = newton_transform_to_mat4(wp.transform(pq[:3], pq[3:]))
+                joint_world_mat = parent_mat @ jp_mat
             else:
                 joint_world_mat = jp_mat
             pivot = joint_world_mat[:3, 3].copy()
@@ -622,13 +622,11 @@ class ArticulationBuilder:
         if revolute_joints:
             self._build_revolute_joints_batch(
                 revolute_joints,
-                state,
                 model,
             )
         if prismatic_joints:
             self._build_prismatic_joints_batch(
                 prismatic_joints,
-                state,
                 model,
             )
         if fixed_joints:
@@ -699,7 +697,6 @@ class ArticulationBuilder:
     def _build_revolute_joints_batch(
         self,
         joints: list[dict],
-        state: Any,
         model: Any,
     ) -> None:
         """Create all revolute joints in a single batched linemesh."""
@@ -715,12 +712,10 @@ class ArticulationBuilder:
         uppers: list[float] = []
         limit_strengths: list[float] = []
         has_any_limit = False
-        init_angles: list[float] = []
 
         joint_axis_np = model.joint_axis.numpy()
         joint_qd_start_np = model.joint_qd_start.numpy()
         joint_q_start_np = model.joint_q_start.numpy()
-        joint_q_np = state.joint_q.numpy() if state.joint_q is not None else None
 
         # Dispatch list for animator callback: (art, newton_joint_idx, edge_idx)
         anim_dispatch: list[tuple[Articulation, int, int]] = []
@@ -751,7 +746,7 @@ class ArticulationBuilder:
             child_slots.append(c_slot)
             child_ids.append(c_id)
             strengths.append(100.0)
-            drive_strengths.append(100.0)
+            drive_strengths.append(1000.0)
             ext_forces.append(0.0)
 
             # Limits
@@ -771,12 +766,6 @@ class ArticulationBuilder:
                 uppers.append(1e18)
                 limit_strengths.append(100.0)
 
-            # Register joint with its articulation. The Newton initial
-            # joint_q is captured here only so we can write it onto the
-            # ``init_angle`` edge attribute below (with negated sign) —
-            # the animator itself no longer needs the offset.
-            init_angle = float(joint_q_np[q_start]) if joint_q_np is not None else 0.0
-            init_angles.append(init_angle)
             art.register_joint(j, q_start, qd_start)
             anim_dispatch.append((art, j, edge_idx))
 
@@ -808,18 +797,6 @@ class ArticulationBuilder:
                 np.array(limit_strengths, dtype=np.float64),
             )
 
-        # Write ``init_angle`` onto the UIPC edges so that ``angle`` and
-        # ``aim_angle`` both operate in Newton's absolute coordinate
-        # convention. UIPC's kernels compute
-        #
-        #     current_angle_edge = raw_angle - init_angle
-        #     effective_target   = aim_angle + init_angle
-        #     actual_limit       = limit     + init_angle
-        #
-        init_angles_np = np.array(init_angles, dtype=np.float64)
-        init_angle_view: np.ndarray = view(jm.edges().find("init_angle"))  # ty:ignore[no-matching-overload]
-        init_angle_view[:] = -init_angles_np
-
         jobj: Object = self._scene.objects().create("joints_revolute")
         jslot: SimplicialComplexSlot = jobj.geometries().create(jm)[0]
 
@@ -827,6 +804,8 @@ class ArticulationBuilder:
         for art, j, edge_idx in anim_dispatch:
             art.joint_geo_slots[j] = jslot
             art.joint_mesh[j] = jm
+            art._joint_edge_idx[j] = edge_idx
+            art._joint_is_revolute[j] = True
             self._mapping.joint_geo_slots[j] = jslot
             self._mapping.joint_mesh[j] = jm
 
@@ -846,7 +825,6 @@ class ArticulationBuilder:
     def _build_prismatic_joints_batch(
         self,
         joints: list[dict],
-        state: Any,
         model: Any,
     ) -> None:
         """Create all prismatic joints in a single batched linemesh."""
@@ -862,12 +840,10 @@ class ArticulationBuilder:
         uppers: list[float] = []
         limit_strengths: list[float] = []
         has_any_limit = False
-        init_qs: list[float] = []
 
         joint_axis_np = model.joint_axis.numpy()
         joint_qd_start_np = model.joint_qd_start.numpy()
         joint_q_start_np = model.joint_q_start.numpy()
-        joint_q_np = state.joint_q.numpy() if state.joint_q is not None else None
 
         anim_dispatch: list[tuple[Articulation, int, int]] = []
         for edge_idx, jdata in enumerate(joints):
@@ -899,12 +875,6 @@ class ArticulationBuilder:
             strengths.append(100.0)
             drive_strengths.append(100.0)
             ext_forces.append(0.0)
-
-            # Newton initial ``joint_q`` — captured here only so it can
-            # be written (with negated sign) onto the ``init_distance``
-            # edge attribute after ``apply_to`` below.
-            init_q = float(joint_q_np[q_start]) if joint_q_np is not None else 0.0
-            init_qs.append(init_q)
 
             # Limits
             lower, upper = self._extract_limits(
@@ -953,10 +923,6 @@ class ArticulationBuilder:
                 np.array(uppers, dtype=np.float64),
                 np.array(limit_strengths, dtype=np.float64),
             )
-        # ``AffineBodyPrismaticJointLimit`` stay in Newton space.
-        init_qs_np = np.array(init_qs, dtype=np.float64)
-        init_distance_view: np.ndarray = view(jm.edges().find("init_distance"))  # ty:ignore[no-matching-overload]
-        init_distance_view[:] = -init_qs_np
 
         jobj: Object = self._scene.objects().create("joints_prismatic")
         jslot: SimplicialComplexSlot = jobj.geometries().create(jm)[0]
@@ -964,6 +930,8 @@ class ArticulationBuilder:
         for art, j, edge_idx in anim_dispatch:
             art.joint_geo_slots[j] = jslot
             art.joint_mesh[j] = jm
+            art._joint_edge_idx[j] = edge_idx
+            art._joint_is_revolute[j] = False
             self._mapping.joint_geo_slots[j] = jslot
             self._mapping.joint_mesh[j] = jm
 
@@ -1164,6 +1132,19 @@ class ArticulationBuilder:
         # stream, so synchronise once before world.advance() runs the
         # animator on the host side.
         wp.synchronize_device(self._device)
+
+    def read_joint_state_post_retrieve(self) -> None:
+        """Re-read UIPC edge attributes after ``world.retrieve()``.
+
+        The animator callback fires during ``world.advance()`` and reads
+        edge attribute values from the **previous** retrieve. This method
+        updates ``joint_position`` / ``joint_velocity`` on each
+        articulation with the **current** frame values so that the
+        subsequent :meth:`write_joint_readback` writes up-to-date data.
+        """
+        for art in self.articulations.values():
+            if art.num_active_joints > 0:
+                art.read_post_retrieve()
 
     def write_joint_readback(self, state_out: State) -> None:
         """Write cached joint readback values to Newton state arrays.

@@ -76,9 +76,10 @@ class Example:
         )
         # Create articulation from joints
         builder.add_articulation([j_fixed_rev, j_revolute], label="revolute_articulation")
+        self._revolute_joint = j_revolute
 
         # set initial joint angle
-        builder.joint_q[-1] = wp.pi * 0.5
+        # builder.joint_q[-1] = wp.pi * 0.5
 
         # -----------------------------
         # PRISMATIC (slider) joint demo
@@ -113,6 +114,7 @@ class Example:
         )
         # Create articulation from joints
         builder.add_articulation([j_fixed_pri, j_prismatic], label="prismatic_articulation")
+        self._prismatic_joint = j_prismatic
 
         # -----------------------------
         # BALL joint demo (sphere + cuboid)
@@ -213,6 +215,17 @@ class Example:
             self.simulate()
 
         self.sim_time += self.frame_dt
+
+        # Recover joint coordinates from current body state via inverse kinematics.
+        joint_q = wp.zeros_like(self.model.joint_q)
+        joint_qd = wp.zeros_like(self.model.joint_qd)
+        newton.eval_ik(self.model, self.state_0, joint_q, joint_qd)
+
+        joint_q_np = joint_q.numpy()
+        q_start = self.model.joint_q_start.numpy()
+        rev_angle = joint_q_np[q_start[self._revolute_joint]]
+        pri_distance = joint_q_np[q_start[self._prismatic_joint]]
+        print(f"t={self.sim_time:.3f}  revolute angle={rev_angle:.4f} rad  prismatic distance={pri_distance:.4f} m")
 
     def test_post_step(self):
         newton.examples.test_body_state(

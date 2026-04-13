@@ -20,6 +20,7 @@ from ...geometry import GeoType
 from ...sim import BodyFlags, Model
 from .converter import (
     UIpcMappingInfo,
+    _transform_to_mat44_kernel,
     build_body_mesh,
     newton_transform_to_mat4,
 )
@@ -104,6 +105,9 @@ class RigidBodyBuilder:
         self._kappa = kappa
         self._default_mass_density = default_mass_density
 
+        # Body world transforms — populated by init_body_transforms()
+        self._body_transforms: np.ndarray | None = None
+
         # Cache host-side numpy views (computed lazily, shared across methods)
         self._shape_body_np: np.ndarray | None = None
         self._shape_type_np: np.ndarray | None = None
@@ -125,6 +129,38 @@ class RigidBodyBuilder:
         self._shape_type_np = model.shape_type.numpy()
         self._shape_transform_np = model.shape_transform.numpy()
         return True
+
+    def init_body_transforms(self) -> np.ndarray | None:
+        """Initialize body transforms from ``model.body_q``.
+
+        Seeds ``self._body_transforms`` from the builder's initial body
+        poses using a batched Warp kernel.  Must be called **before**
+        :meth:`build_affine_bodies` so that per-instance world-space
+        transforms are available.
+
+        Returns:
+            Body transforms array of shape ``(body_count, 4, 4)`` (float64),
+            or ``None`` if no bodies exist.
+        """
+        model = self._model
+        n = model.body_count
+        if n == 0:
+            return None
+
+        if model.body_q is not None:
+            indices = wp.array(np.arange(n, dtype=np.int32), dtype=wp.int32, device=model.device)
+            out = wp.zeros(n, dtype=wp.mat44d, device=model.device)
+            wp.launch(
+                _transform_to_mat44_kernel,
+                dim=n,
+                inputs=[model.body_q, indices, out],
+                device=model.device,
+            )
+            self._body_transforms = out.numpy().reshape(n, 4, 4)
+        else:
+            self._body_transforms = np.tile(np.eye(4, dtype=np.float64), (n, 1, 1))
+
+        return self._body_transforms
 
     def build_ground_planes(self, contact_elem: Any) -> None:
         """Create UIPC halfplanes for Newton ground plane shapes (body == -1).
@@ -234,11 +270,13 @@ class RigidBodyBuilder:
         free_joint_bodies: set[int],
         body_range: tuple[int, int],
         subscene_elem: Any,
-        body_transforms: np.ndarray | None = None,
         body_element_overrides: dict[int, Any] | None = None,
         no_instance_bodies: set[int] | None = None,
     ) -> None:
         """Convert Newton rigid bodies to UIPC AffineBody geometries.
+
+        Calls :meth:`init_body_transforms` internally to seed per-body
+        world transforms from ``model.body_q`` before creating geometries.
 
         Bodies with identical canonical meshes are grouped into a single UIPC
         geometry with multiple instances (``sc.instances().resize(N)``).  Bodies
@@ -263,10 +301,6 @@ class RigidBodyBuilder:
             body_range: ``(start, end)`` slice of bodies to process.
             subscene_elem: UIPC subscene element to apply to geometries, or
                 ``None`` to skip.
-            body_transforms: Pre-computed body world-frame transforms from
-                :meth:`ArticulationBuilder.compute_fk`, shape
-                ``(body_count, 4, 4)``.  If ``None``, identity transforms
-                are used.
             body_element_overrides: Mapping from body index to a custom contact
                 element.  Overrides the default assignment for the specified
                 bodies.
@@ -279,6 +313,8 @@ class RigidBodyBuilder:
         if model.body_flags is None:
             return
 
+        self.init_body_transforms()
+
         body_flags_np = model.body_flags.numpy()
         body_mass_np = model.body_mass.numpy() if model.body_mass is not None else None
         no_inst = no_instance_bodies or set()
@@ -290,7 +326,7 @@ class RigidBodyBuilder:
             if sk is None:
                 continue
 
-            tf = body_transforms[b] if body_transforms is not None else np.eye(4, dtype=np.float64)
+            tf = self._body_transforms[b] if self._body_transforms is not None else np.eye(4, dtype=np.float64)
             elem = self._resolve_contact_elem(
                 b,
                 env_elem,
