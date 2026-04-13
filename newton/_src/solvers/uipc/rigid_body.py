@@ -12,7 +12,7 @@ import numpy as np
 import uipc.builtin as uipc_builtin
 import warp as wp
 from uipc import view
-from uipc.constitution import AffineBodyConstitution
+from uipc.constitution import AffineBodyConstitution, Empty
 from uipc.geometry import halfplane, label_surface
 from uipc.geometry import trimesh as uipc_trimesh
 
@@ -187,6 +187,47 @@ class RigidBodyBuilder:
                 contact_elem.apply_to(g)
                 ground_obj = self._scene.objects().create(f"ground_plane_{s}")
                 ground_obj.geometries().create(g)
+
+    def build_static_colliders(
+        self,
+        contact_elem: Any,
+        subscene_elem: Any = None,
+    ) -> None:
+        """Create UIPC geometries for world-space static colliders (body == -1, non-PLANE).
+
+        Static colliders are shapes attached to the world frame (``shape_body == -1``)
+        whose geometry type is not ``PLANE`` (planes are handled by
+        :meth:`build_ground_planes`).  Typical examples include table meshes and
+        wall colliders imported from USD without a ``RigidBodyAPI``.
+
+        Uses :class:`~uipc.constitution.Empty` constitution with ``is_fixed = 1``
+        so the geometry participates in IPC contact resolution but has no dynamics.
+
+        Args:
+            contact_elem: Contact element to apply (typically ``env_elem``).
+            subscene_elem: Optional UIPC subscene element for multi-world isolation.
+        """
+        model = self._model
+        mesh_data = build_body_mesh(model, -1)
+        if mesh_data is None:
+            return
+        verts, faces = mesh_data
+
+        sc = uipc_trimesh(verts, faces)
+        contact_elem.apply_to(sc)
+        if subscene_elem is not None:
+            subscene_elem.apply_to(sc)
+
+        Empty().apply_to(sc, mass_density=self._default_mass_density, thickness=0.0)
+        label_surface(sc)
+
+        is_dynamic = sc.vertices().find(uipc_builtin.is_dynamic)
+        view(is_dynamic)[:] = 0  # ty:ignore[no-matching-overload]  # pyright: ignore[reportArgumentType]
+
+        sc.vertices().create(uipc_builtin.gravity, np.array([[0.0], [0.0], [0.0]], dtype=np.float64))
+
+        obj = self._scene.objects().create("static_colliders")
+        obj.geometries().create(sc)
 
     def build_body_shape_mapping(
         self,

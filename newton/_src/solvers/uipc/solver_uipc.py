@@ -119,6 +119,8 @@ class SolverUIPC(SolverBase):
         kappa: float = 100 * MPa,
         default_mass_density: float = 1000.0,
         logger_level=ULogger.Warn,
+        dump_enable: bool = False,
+        dump_path: str | None = None,
     ):
         """Create a UIPC solver instance from a Newton model.
 
@@ -151,6 +153,8 @@ class SolverUIPC(SolverBase):
         self._workspace = workspace
         self._kappa = kappa
         self._default_mass_density = default_mass_density
+        self._dump_enable = dump_enable
+        self._dump_path = dump_path if dump_path is not None else workspace
 
         # Scene config: start from UIPC defaults, apply Newton model overrides.
         if scene_config is None:
@@ -535,6 +539,7 @@ class SolverUIPC(SolverBase):
                 self._cloth_builder.build(env_elems[world_index], particle_range, se)
             if self._deformable_builder.has_deformable:
                 self._deformable_builder.build(env_elems[world_index], particle_range, se)
+            self._rigid_body_builder.build_static_colliders(env_elems[world_index], se)
 
         # Initialize UIPC world and set up state accessors
         self.world.init(scene)
@@ -621,6 +626,10 @@ class SolverUIPC(SolverBase):
 
         # Phase 1: Cache joint control
         self._articulation_builder.cache_joint_control(control)
+
+        # Dump surface geometry before physics advance
+        if self._dump_enable:
+            self.export_surface_obj(self._dump_path)
 
         # Phase 2: Advance UIPC (animator callbacks fire here)
         self.world.advance()
