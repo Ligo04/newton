@@ -505,8 +505,8 @@ class ArticulationBuilder:
             self.articulations[a] = Articulation(name=label, dt=self._dt, device=self._device)
 
         # Pre-fetch numpy arrays
-        body_q_np = model.body_q.numpy() if model.body_q is not None else None
         joint_X_p_np = model.joint_X_p.numpy()
+        joint_X_c_np = model.joint_X_c.numpy()
         joint_type_np = model.joint_type.numpy()
         joint_parent_np = model.joint_parent.numpy()
         joint_child_np = model.joint_child.numpy()
@@ -568,16 +568,14 @@ class ArticulationBuilder:
             parent_slot = self._mapping.body_geo_slots.get(effective_parent_body)
             parent_instance_id = self._mapping.body_instance_ids.get(effective_parent_body, 0)
 
-            # Joint world-frame transform from model.body_q and joint_X_p
+            # Joint anchor and rotation in parent-local and child-local frames
             jp = joint_X_p_np[j]
-            jp_mat = newton_transform_to_mat4(wp.transform(jp[:3], jp[3:]))
-            if parent_body >= 0 and body_q_np is not None:
-                pq = body_q_np[parent_body]
-                parent_mat = newton_transform_to_mat4(wp.transform(pq[:3], pq[3:]))
-                joint_world_mat = parent_mat @ jp_mat
-            else:
-                joint_world_mat = jp_mat
-            pivot = joint_world_mat[:3, 3].copy()
+            parent_pivot = np.array(jp[:3], dtype=np.float64)
+            parent_rot = newton_transform_to_mat4(wp.transform(jp[:3], jp[3:]))[:3, :3].copy()
+
+            jc = joint_X_c_np[j]
+            child_pivot = np.array(jc[:3], dtype=np.float64)
+            child_rot = newton_transform_to_mat4(wp.transform(jc[:3], jc[3:]))[:3, :3].copy()
 
             # Resolve owning articulation
             art_idx = int(joint_articulation[j])
@@ -592,8 +590,10 @@ class ArticulationBuilder:
             jdata = {
                 "j": j,
                 "art": art,
-                "pivot": pivot,
-                "joint_world_mat": joint_world_mat,
+                "parent_pivot": parent_pivot,
+                "parent_rot": parent_rot,
+                "child_pivot": child_pivot,
+                "child_rot": child_rot,
                 "parent_body": parent_body,
                 "parent_slot": parent_slot,
                 "parent_instance_id": parent_instance_id,
@@ -700,7 +700,8 @@ class ArticulationBuilder:
         model: Any,
     ) -> None:
         """Create all revolute joints in a single batched linemesh."""
-        all_verts: list[np.ndarray] = []
+        l_verts: list[np.ndarray] = []  # parent-side positions
+        r_verts: list[np.ndarray] = []  # child-side positions
         parent_slots: list[SimplicialComplexSlot] = []
         parent_ids: list[int] = []
         child_slots: list[SimplicialComplexSlot] = []
@@ -722,31 +723,54 @@ class ArticulationBuilder:
         for edge_idx, jdata in enumerate(joints):
             j: int = jdata["j"]
             art: Articulation = jdata["art"]
-            pivot: np.ndarray = jdata["pivot"]
-            joint_world_mat: np.ndarray = jdata["joint_world_mat"]
+            parent_pivot: np.ndarray = jdata["parent_pivot"]
+            parent_rot: np.ndarray = jdata["parent_rot"]
+            child_pivot: np.ndarray = jdata["child_pivot"]
+            child_rot: np.ndarray = jdata["child_rot"]
+
             p_slot: SimplicialComplexSlot | None = jdata["parent_slot"]
             p_id: int = jdata["parent_instance_id"]
             c_slot: SimplicialComplexSlot = jdata["child_slot"]
             c_id: int = jdata["child_instance_id"]
 
             if p_slot is None:
-                p_slot = self._get_or_create_anchor(f"anchor_joint_{j}", pivot)
+                p_slot = self._get_or_create_anchor(f"anchor_joint_{j}", parent_pivot)
                 p_id = 0
 
             qd_start = int(joint_qd_start_np[j])
-            axis_world = joint_world_mat[:3, :3] @ joint_axis_np[qd_start]
-            axis_world = axis_world / (np.linalg.norm(axis_world) + 1e-12)
+            axis_joint = joint_axis_np[qd_start]
+            parent_axis = parent_rot @ axis_joint
+            child_axis = child_rot @ axis_joint
             q_start = int(joint_q_start_np[j])
 
-            all_verts.append(pivot)
-            all_verts.append(pivot + axis_world)
+            lp0 = parent_pivot
+            lp1 = parent_pivot + parent_axis
+            rp0 = child_pivot
+            rp1 = child_pivot + child_axis
+
+            self._validate_revolute_anchors(
+                j,
+                p_slot,
+                p_id,
+                c_slot,
+                c_id,
+                lp0,
+                lp1,
+                rp0,
+                rp1,
+            )
+
+            l_verts.append(lp0)
+            l_verts.append(lp1)
+            r_verts.append(rp0)
+            r_verts.append(rp1)
 
             parent_slots.append(p_slot)
             parent_ids.append(p_id)
             child_slots.append(c_slot)
             child_ids.append(c_id)
             strengths.append(100.0)
-            drive_strengths.append(1000.0)
+            drive_strengths.append(100.0)
             ext_forces.append(0.0)
 
             # Limits
@@ -769,12 +793,16 @@ class ArticulationBuilder:
             art.register_joint(j, q_start, qd_start)
             anim_dispatch.append((art, j, edge_idx))
 
-        # Build batched linemesh via create_geometry
-        pos0s = np.array(all_verts[0::2], dtype=np.float64)
-        pos1s = np.array(all_verts[1::2], dtype=np.float64)
+        # Build batched linemesh via create_geometry (4-position overload)
+        l_pos0s = np.array(l_verts[0::2], dtype=np.float64)
+        l_pos1s = np.array(l_verts[1::2], dtype=np.float64)
+        r_pos0s = np.array(r_verts[0::2], dtype=np.float64)
+        r_pos1s = np.array(r_verts[1::2], dtype=np.float64)
         jm = AffineBodyRevoluteJoint().create_geometry(
-            pos0s,
-            pos1s,
+            l_pos0s,
+            l_pos1s,
+            r_pos0s,
+            r_pos1s,
             parent_slots,
             np.array(parent_ids, dtype=np.int32),
             child_slots,
@@ -828,7 +856,8 @@ class ArticulationBuilder:
         model: Any,
     ) -> None:
         """Create all prismatic joints in a single batched linemesh."""
-        all_verts: list[np.ndarray] = []
+        l_verts: list[np.ndarray] = []  # parent-side positions
+        r_verts: list[np.ndarray] = []  # child-side positions
         parent_slots: list[SimplicialComplexSlot] = []
         parent_ids: list[int] = []
         child_slots: list[SimplicialComplexSlot] = []
@@ -849,24 +878,46 @@ class ArticulationBuilder:
         for edge_idx, jdata in enumerate(joints):
             j: int = jdata["j"]
             art: Articulation = jdata["art"]
-            pivot: np.ndarray = jdata["pivot"]
-            joint_world_mat: np.ndarray = jdata["joint_world_mat"]
+            parent_pivot: np.ndarray = jdata["parent_pivot"]
+            parent_rot: np.ndarray = jdata["parent_rot"]
+            child_pivot: np.ndarray = jdata["child_pivot"]
+            child_rot: np.ndarray = jdata["child_rot"]
+
             p_slot: SimplicialComplexSlot | None = jdata["parent_slot"]
             p_id: int = jdata["parent_instance_id"]
             c_slot: SimplicialComplexSlot = jdata["child_slot"]
             c_id: int = jdata["child_instance_id"]
 
             if p_slot is None:
-                p_slot = self._get_or_create_anchor(f"anchor_joint_{j}", pivot)
+                p_slot = self._get_or_create_anchor(f"anchor_joint_{j}", parent_pivot)
                 p_id = 0
 
             qd_start = int(joint_qd_start_np[j])
-            axis_world = joint_world_mat[:3, :3] @ joint_axis_np[qd_start]
-            axis_world = axis_world / (np.linalg.norm(axis_world) + 1e-12)
+            axis_joint = joint_axis_np[qd_start]
+            parent_axis = parent_rot @ axis_joint
+            child_axis = child_rot @ axis_joint
             q_start = int(joint_q_start_np[j])
 
-            all_verts.append(pivot)
-            all_verts.append(pivot + axis_world)
+            lp0 = parent_pivot
+            lp1 = parent_pivot + parent_axis
+            rp0 = child_pivot
+            rp1 = child_pivot + child_axis
+            self._validate_prismatic_anchors(
+                j,
+                p_slot,
+                p_id,
+                c_slot,
+                c_id,
+                lp0,
+                lp1,
+                rp0,
+                rp1,
+            )
+
+            l_verts.append(lp0)
+            l_verts.append(lp1)
+            r_verts.append(rp0)
+            r_verts.append(rp1)
 
             parent_slots.append(p_slot)
             parent_ids.append(p_id)
@@ -896,12 +947,16 @@ class ArticulationBuilder:
             art.register_joint(j, q_start, qd_start)
             anim_dispatch.append((art, j, edge_idx))
 
-        # Build batched linemesh via create_geometry
-        pos0s = np.array(all_verts[0::2], dtype=np.float64)
-        pos1s = np.array(all_verts[1::2], dtype=np.float64)
+        # Build batched linemesh via create_geometry (4-position overload)
+        l_pos0s = np.array(l_verts[0::2], dtype=np.float64)
+        l_pos1s = np.array(l_verts[1::2], dtype=np.float64)
+        r_pos0s = np.array(r_verts[0::2], dtype=np.float64)
+        r_pos1s = np.array(r_verts[1::2], dtype=np.float64)
         jm = AffineBodyPrismaticJoint().create_geometry(
-            pos0s,
-            pos1s,
+            l_pos0s,
+            l_pos1s,
+            r_pos0s,
+            r_pos1s,
             parent_slots,
             np.array(parent_ids, dtype=np.int32),
             child_slots,
@@ -951,6 +1006,8 @@ class ArticulationBuilder:
     ) -> None:
         """Create all fixed joints in a single batched pointcloud."""
         # Separate world-anchored (no parent) from inter-body fixed joints
+        l_positions: list[np.ndarray] = []
+        r_positions: list[np.ndarray] = []
         child_slots: list[SimplicialComplexSlot] = []
         child_ids: list[int] = []
         parent_slots: list[SimplicialComplexSlot] = []
@@ -960,6 +1017,8 @@ class ArticulationBuilder:
 
         for jdata in joints:
             j: int = jdata["j"]
+            parent_pivot: np.ndarray = jdata["parent_pivot"]
+            child_pivot: np.ndarray = jdata["child_pivot"]
             p_slot: SimplicialComplexSlot | None = jdata["parent_slot"]
             p_id: int = jdata["parent_instance_id"]
             c_slot: SimplicialComplexSlot = jdata["child_slot"]
@@ -970,6 +1029,8 @@ class ArticulationBuilder:
                 view(c_slot.geometry().instances().find(uipc_builtin.is_fixed))[c_id] = 1  # pyright: ignore[reportArgumentType]
                 continue
 
+            l_positions.append(parent_pivot)
+            r_positions.append(child_pivot)
             child_slots.append(c_slot)
             child_ids.append(c_id)
             parent_slots.append(p_slot)
@@ -981,10 +1042,12 @@ class ArticulationBuilder:
             return
 
         jm = AffineBodyFixedJoint().create_geometry(
-            child_slots,
-            np.array(child_ids, dtype=np.int32),
+            np.array(l_positions, dtype=np.float64),
+            np.array(r_positions, dtype=np.float64),
             parent_slots,
             np.array(parent_ids, dtype=np.int32),
+            child_slots,
+            np.array(child_ids, dtype=np.int32),
             np.array(strengths, dtype=np.float64),
         )
 
@@ -1016,12 +1079,12 @@ class ArticulationBuilder:
             j: int = jdata["j"]
             p_slot: SimplicialComplexSlot | None = jdata["parent_slot"]
             p_id: int = jdata["parent_instance_id"]
-            pivot: np.ndarray = jdata["pivot"]
+            parent_pivot: np.ndarray = jdata["parent_pivot"]
             c_slot: SimplicialComplexSlot = jdata["child_slot"]
             c_id: int = jdata["child_instance_id"]
 
             if p_slot is None:
-                p_slot = self._get_or_create_anchor(f"anchor_joint_{j}", pivot)
+                p_slot = self._get_or_create_anchor(f"anchor_joint_{j}", parent_pivot)
                 p_id = 0
 
             # Parent-side local anchor (joint_X_p translation)
@@ -1062,6 +1125,132 @@ class ArticulationBuilder:
             self._mapping.joint_mesh[j] = jm
 
     @staticmethod
+    def _validate_revolute_anchors(
+        joint_idx: int,
+        p_slot: SimplicialComplexSlot,
+        p_id: int,
+        c_slot: SimplicialComplexSlot,
+        c_id: int,
+        lp0: np.ndarray,
+        lp1: np.ndarray,
+        rp0: np.ndarray,
+        rp1: np.ndarray,
+        atol: float = 1e-4,
+    ) -> None:
+        """Validate revolute joint: anchors and axis endpoints must coincide.
+
+        Args:
+            joint_idx: Newton joint index (for error messages).
+            p_slot: Parent geometry slot.
+            p_id: Parent instance index.
+            c_slot: Child geometry slot.
+            c_id: Child instance index.
+            lp0: Parent-local anchor position (pos0).
+            lp1: Parent-local axis endpoint (pos1).
+            rp0: Child-local anchor position (pos0).
+            rp1: Child-local axis endpoint (pos1).
+            atol: Absolute tolerance for the comparison.
+
+        Raises:
+            RuntimeError: If the world-space positions do not match.
+        """
+        p_tf = np.array(view(p_slot.geometry().transforms())[p_id], dtype=np.float64)
+        c_tf = np.array(view(c_slot.geometry().transforms())[c_id], dtype=np.float64)
+
+        def to_world(tf: np.ndarray, p: np.ndarray) -> np.ndarray:
+            return (tf @ np.append(p, 1.0))[:3]
+
+        l_world_0 = to_world(p_tf, lp0)
+        r_world_0 = to_world(c_tf, rp0)
+        if not np.allclose(l_world_0, r_world_0, atol=atol):
+            raise RuntimeError(
+                f"Revolute joint {joint_idx}: parent/child anchor "
+                f"mismatch in world space. "
+                f"l_world={l_world_0}, r_world={r_world_0}, "
+                f"diff={np.linalg.norm(l_world_0 - r_world_0):.6f}"
+            )
+
+        l_world_1 = to_world(p_tf, lp1)
+        r_world_1 = to_world(c_tf, rp1)
+        if not np.allclose(l_world_1, r_world_1, atol=atol):
+            raise RuntimeError(
+                f"Revolute joint {joint_idx}: parent/child axis "
+                f"endpoint mismatch in world space. "
+                f"l_world={l_world_1}, r_world={r_world_1}, "
+                f"diff={np.linalg.norm(l_world_1 - r_world_1):.6f}"
+            )
+
+    @staticmethod
+    def _validate_prismatic_anchors(
+        joint_idx: int,
+        p_slot: SimplicialComplexSlot,
+        p_id: int,
+        c_slot: SimplicialComplexSlot,
+        c_id: int,
+        lp0: np.ndarray,
+        lp1: np.ndarray,
+        rp0: np.ndarray,
+        rp1: np.ndarray,
+        atol: float = 1e-4,
+    ) -> None:
+        """Validate prismatic joint: axes must be parallel and anchors collinear.
+
+        Unlike revolute joints, prismatic anchors need not coincide — they
+        only need to lie on the same sliding axis.
+
+        Args:
+            joint_idx: Newton joint index (for error messages).
+            p_slot: Parent geometry slot.
+            p_id: Parent instance index.
+            c_slot: Child geometry slot.
+            c_id: Child instance index.
+            lp0: Parent-local anchor position (pos0).
+            lp1: Parent-local axis endpoint (pos1).
+            rp0: Child-local anchor position (pos0).
+            rp1: Child-local axis endpoint (pos1).
+            atol: Absolute tolerance for the comparison.
+
+        Raises:
+            RuntimeError: If axes are not parallel or anchors not collinear.
+        """
+        p_tf = np.array(view(p_slot.geometry().transforms())[p_id], dtype=np.float64)
+        c_tf = np.array(view(c_slot.geometry().transforms())[c_id], dtype=np.float64)
+
+        def to_world(tf: np.ndarray, p: np.ndarray) -> np.ndarray:
+            return (tf @ np.append(p, 1.0))[:3]
+
+        l_world_0 = to_world(p_tf, lp0)
+        l_world_1 = to_world(p_tf, lp1)
+        r_world_0 = to_world(c_tf, rp0)
+        r_world_1 = to_world(c_tf, rp1)
+
+        # Axes must be parallel: cross product ≈ 0
+        l_axis = l_world_1 - l_world_0
+        r_axis = r_world_1 - r_world_0
+        l_axis = l_axis / (np.linalg.norm(l_axis) + 1e-12)
+        r_axis = r_axis / (np.linalg.norm(r_axis) + 1e-12)
+        print(f"validate prismatic anchors: lp0: {lp0}, lp1: {lp1}, rp0: {rp0}, rp1: {rp1}")
+        print(f"l_world_0: {l_world_0}, l_world_1: {l_world_1}, r_world_0: {r_world_0}, r_world_1: {r_world_1}")
+        print(f"l_axis: {l_axis}, r_axis: {r_axis}")
+        cross = np.cross(l_axis, r_axis)
+        if not np.allclose(cross, 0.0, atol=atol):
+            raise RuntimeError(
+                f"Prismatic joint {joint_idx}: parent/child axes not parallel. "
+                f"l_axis={l_axis}, r_axis={r_axis}, "
+                f"cross={cross}"
+            )
+
+        # Anchors must be collinear along the axis: perpendicular offset ≈ 0
+        offset = r_world_0 - l_world_0
+        perp = offset - np.dot(offset, l_axis) * l_axis
+        if not np.allclose(perp, 0.0, atol=atol):
+            raise RuntimeError(
+                f"Prismatic joint {joint_idx}: parent/child anchors not collinear. "
+                f"l_world={l_world_0}, r_world={r_world_0}, "
+                f"perp_offset={perp}, dist={np.linalg.norm(perp):.6f}"
+            )
+
+    @staticmethod
     def _extract_limits(
         j: int,
         joint_qd_start: wp.array,
@@ -1081,8 +1270,8 @@ class ArticulationBuilder:
             if no limit is defined.
         """
         qd_start = int(joint_qd_start.numpy()[j])
-        lower = float(joint_limit_lower.numpy()[qd_start]) if joint_limit_lower is not None else None
-        upper = float(joint_limit_upper.numpy()[qd_start]) if joint_limit_upper is not None else None
+        lower = np.float64(joint_limit_lower.numpy()[qd_start]) if joint_limit_lower is not None else None
+        upper = np.float64(joint_limit_upper.numpy()[qd_start]) if joint_limit_upper is not None else None
         return lower, upper
 
     # ------------------------------------------------------------------

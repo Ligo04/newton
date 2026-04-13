@@ -69,7 +69,7 @@ def _compute_shape_key(model: Model, body_idx: int) -> tuple[Any, ...] | None:
         geo_type = int(shape_type_np[s])
         if geo_type == int(GeoType.PLANE):
             continue
-        scale = tuple(float(x) for x in shape_scale_np[s])
+        scale = tuple(np.float64(x) for x in shape_scale_np[s])
         tf = shape_transform_np[s].tobytes()
         if geo_type in (int(GeoType.MESH), int(GeoType.CONVEX_MESH)):
             src_id = id(model.shape_source[s])
@@ -225,7 +225,7 @@ class RigidBodyBuilder:
         v0 = verts[faces[:, 0]]
         v1 = verts[faces[:, 1]]
         v2 = verts[faces[:, 2]]
-        return float(abs(np.sum(v0 * np.cross(v1, v2)) / 6.0))
+        return np.float64(abs(np.sum(v0 * np.cross(v1, v2)) / 6.0))
 
     def _resolve_contact_elem(
         self,
@@ -258,7 +258,7 @@ class RigidBodyBuilder:
         if body_mass_np is not None:
             vol = self._mesh_volume(verts, faces)
             if vol > 1e-12:
-                density = float(body_mass_np[b]) / vol
+                density = np.float64(body_mass_np[b]) / vol
         return density
 
     def build_affine_bodies(
@@ -366,7 +366,7 @@ class RigidBodyBuilder:
             mesh_vol = self._mesh_volume(verts, faces)
             for info in group_bodies:
                 if body_mass_np is not None and mesh_vol > 1e-12:
-                    info.mass_density = float(body_mass_np[info.body_idx]) / mesh_vol
+                    info.mass_density = np.float64(body_mass_np[info.body_idx]) / mesh_vol
                 else:
                     info.mass_density = self._default_mass_density
 

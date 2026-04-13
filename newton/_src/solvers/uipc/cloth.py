@@ -5,19 +5,15 @@
 
 from __future__ import annotations
 
-import warnings
 from typing import Any
 
 import numpy as np
-import warp as wp
-
-from ...sim import Model
-from .converter import UIpcMappingInfo
-
-from uipc import view
 from uipc.constitution import DiscreteShellBending, ElasticModuli2D, NeoHookeanShell
 from uipc.geometry import label_surface
 from uipc.geometry import trimesh as uipc_trimesh
+
+from ...sim import Model
+from .converter import UIpcMappingInfo
 
 
 class ClothBuilder:
@@ -166,7 +162,7 @@ class ClothBuilder:
         if model.tri_count > 0 and model.tri_materials is not None:
             tri_materials_np = model.tri_materials.numpy()
             # tri_materials layout: (tri_count, 5) -> [ke, ka, kd, drag, lift]
-            avg_ke = float(np.mean(tri_materials_np[:, 0]))
+            avg_ke = np.float64(np.mean(tri_materials_np[:, 0]))
             if avg_ke > 0:
                 return avg_ke
         return 1000.0  # Default: 1 kPa
@@ -176,23 +172,21 @@ class ClothBuilder:
         if model.edge_count > 0 and model.edge_bending_properties is not None:
             edge_props_np = model.edge_bending_properties.numpy()
             # edge_bending_properties layout: (edge_count, 2) -> [stiffness, damping]
-            avg_ke = float(np.mean(edge_props_np[:, 0]))
+            avg_ke = np.float64(np.mean(edge_props_np[:, 0]))
             if avg_ke > 0:
                 return avg_ke
         return self._default_bending_stiffness
 
-    def _estimate_mass_density(
-        self, model: Model, particle_indices: np.ndarray, thickness: float
-    ) -> float:
+    def _estimate_mass_density(self, model: Model, particle_indices: np.ndarray, thickness: float) -> float:
         """Estimate surface mass density [kg/m^2] from particle masses and areas.
 
         Falls back to a default of 100 kg/m^3 volumetric density if estimation fails.
         """
         if model.particle_mass is not None:
             particle_mass_np = model.particle_mass.numpy()
-            total_mass = float(np.sum(particle_mass_np[particle_indices]))
+            total_mass = np.float64(np.sum(particle_mass_np[particle_indices]))
             if total_mass > 0 and model.tri_count > 0 and model.tri_areas is not None:
-                total_area = float(np.sum(model.tri_areas.numpy()))
+                total_area = np.float64(np.sum(model.tri_areas.numpy()))
                 if total_area > 0:
                     # Surface density = total_mass / total_area
                     # Volume density = surface_density / thickness

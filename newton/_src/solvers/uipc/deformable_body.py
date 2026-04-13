@@ -5,23 +5,21 @@
 
 from __future__ import annotations
 
-import warnings
 from typing import Any
 
 import numpy as np
-import warp as wp
-
-from ...sim import Model
-from .converter import UIpcMappingInfo
-
-from uipc import view
 from uipc.constitution import ElasticModuli, StableNeoHookean
 from uipc.geometry import (
     flip_inward_triangles,
     label_surface,
     label_triangle_orient,
+)
+from uipc.geometry import (
     tetmesh as uipc_tetmesh,
 )
+
+from ...sim import Model
+from .converter import UIpcMappingInfo
 
 
 def _lame_to_youngs_poisson(k_mu: float, k_lambda: float) -> tuple[float, float]:
@@ -165,8 +163,8 @@ class DeformableBodyBuilder:
         if model.tet_count > 0 and model.tet_materials is not None:
             tet_materials_np = model.tet_materials.numpy()
             # tet_materials layout: (tet_count, 3) -> [k_mu, k_lambda, k_damp]
-            avg_k_mu = float(np.mean(tet_materials_np[:, 0]))
-            avg_k_lambda = float(np.mean(tet_materials_np[:, 1]))
+            avg_k_mu = np.float64(np.mean(tet_materials_np[:, 0]))
+            avg_k_lambda = np.float64(np.mean(tet_materials_np[:, 1]))
             if avg_k_mu > 0:
                 return _lame_to_youngs_poisson(avg_k_mu, avg_k_lambda)
         return 1000.0, 0.45  # Default: 1 kPa, Poisson = 0.45
@@ -183,7 +181,7 @@ class DeformableBodyBuilder:
         """
         if model.particle_mass is not None and model.tet_count > 0 and model.tet_indices is not None:
             particle_mass_np = model.particle_mass.numpy()
-            total_mass = float(np.sum(particle_mass_np[particle_indices]))
+            total_mass = np.float64(np.sum(particle_mass_np[particle_indices]))
 
             if total_mass > 0:
                 # Estimate total volume from tetrahedra

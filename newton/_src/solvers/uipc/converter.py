@@ -320,7 +320,7 @@ def _signed_volume(verts: np.ndarray, faces: np.ndarray) -> float:
     v0 = verts[faces[:, 0]]
     v1 = verts[faces[:, 1]]
     v2 = verts[faces[:, 2]]
-    return float(np.einsum("ij,ij->i", v0, np.cross(v1, v2)).sum() / 6.0)
+    return np.float64(np.einsum("ij,ij->i", v0, np.cross(v1, v2)).sum() / 6.0)
 
 
 def _orient_outward(verts: np.ndarray, faces: np.ndarray) -> np.ndarray:
@@ -529,27 +529,37 @@ def build_body_mesh(model: Model, body_idx: int) -> tuple[np.ndarray, np.ndarray
                 continue
         elif geo_type == GeoType.BOX:
             m = Mesh.create_box(
-                float(scale[0]), float(scale[1]), float(scale[2]), duplicate_vertices=False, compute_inertia=False
+                np.float64(scale[0]),
+                np.float64(scale[1]),
+                np.float64(scale[2]),
+                duplicate_vertices=False,
+                compute_inertia=False,
             )
             verts, faces = _mesh_to_vf(m)
             scale_baked = True
         elif geo_type == GeoType.SPHERE:
-            m = Mesh.create_sphere(float(scale[0]), compute_inertia=False)
+            m = Mesh.create_sphere(np.float64(scale[0]), compute_inertia=False)
             verts, faces = _mesh_to_vf(m)
             scale_baked = True
         elif geo_type == GeoType.CAPSULE:
             # Capsule long axis follows ``model.up_axis``.
-            m = Mesh.create_capsule(float(scale[0]), float(scale[1]), up_axis=primitive_up_axis, compute_inertia=False)
+            m = Mesh.create_capsule(
+                np.float64(scale[0]), np.float64(scale[1]), up_axis=primitive_up_axis, compute_inertia=False
+            )
             verts, faces = _mesh_to_vf(m)
             scale_baked = True
         elif geo_type == GeoType.CYLINDER:
             # Cylinder long axis follows ``model.up_axis``.
-            m = Mesh.create_cylinder(float(scale[0]), float(scale[1]), up_axis=primitive_up_axis, compute_inertia=False)
+            m = Mesh.create_cylinder(
+                np.float64(scale[0]), np.float64(scale[1]), up_axis=primitive_up_axis, compute_inertia=False
+            )
             verts, faces = _mesh_to_vf(m)
             scale_baked = True
         elif geo_type == GeoType.CONE:
             # Cone long axis (apex) follows ``model.up_axis``.
-            m = Mesh.create_cone(float(scale[0]), float(scale[1]), up_axis=primitive_up_axis, compute_inertia=False)
+            m = Mesh.create_cone(
+                np.float64(scale[0]), np.float64(scale[1]), up_axis=primitive_up_axis, compute_inertia=False
+            )
             verts, faces = _mesh_to_vf(m)
             scale_baked = True
         elif geo_type == GeoType.PLANE:
@@ -602,7 +612,7 @@ def build_body_mesh(model: Model, body_idx: int) -> tuple[np.ndarray, np.ndarray
                 _orient_outward(bv, bf), dtype=np.int32
             )
         # IMPORTANT: ``uipc.geometry.trimesh`` expects C-contiguous (N, 3)
-        # arrays.  Pybind11 silently mis-reads strided / non-contiguous
+        # arrays.  Pybind11 silently misreads strided / non-contiguous
         # buffers as column-major, which transposes the mesh and produces
         # a (usually negative-volume) garbage geometry.  Force contiguity.
         return np.ascontiguousarray(v, dtype=np.float64), np.ascontiguousarray(f, dtype=np.int32)

@@ -5,15 +5,17 @@
 
 from __future__ import annotations
 
+import os
 import warnings
 from collections.abc import Callable
 from typing import Any
 
+import numpy as np
 import uipc
 import uipc.adapter.warp
 import warp as wp
 from uipc import Logger as ULogger
-from uipc.core import AffineBodyStateAccessorFeature
+from uipc.core import AffineBodyStateAccessorFeature, SceneIO
 from uipc.core import Scene as UScene
 from uipc.unit import GPa, MPa
 
@@ -160,7 +162,11 @@ class SolverUIPC(SolverBase):
         scene_config["newton"]["translation_tol"] = 0.01
         if model.gravity is not None:
             gravity_np = model.gravity.numpy().flatten()
-            scene_config["gravity"] = [[float(gravity_np[0])], [float(gravity_np[1])], [float(gravity_np[2])]]
+            scene_config["gravity"] = [
+                [np.float64(gravity_np[0])],
+                [np.float64(gravity_np[1])],
+                [np.float64(gravity_np[2])],
+            ]
         self._scene_config = scene_config
 
         # User-registered callbacks (set via configure_* methods)
@@ -255,11 +261,11 @@ class SolverUIPC(SolverBase):
             scene_cfg = self.scene.config()
             scene_cfg["contact"]["enable"] = flag  # ty:ignore[not-subscriptable]
             if d_hat is not None:
-                scene_cfg["d_hat"] = float(d_hat)  # ty:ignore[invalid-assignment]
+                scene_cfg["d_hat"] = np.float64(d_hat)  # ty:ignore[invalid-assignment]
         else:
             self._scene_config["contact"]["enable"] = flag
             if d_hat is not None:
-                self._scene_config["d_hat"] = float(d_hat)
+                self._scene_config["d_hat"] = np.float64(d_hat)
 
     def configure_contact_tabular(self, fn: Callable) -> None:
         """Register a callback to configure the UIPC contact tabular before initialization.
@@ -450,12 +456,14 @@ class SolverUIPC(SolverBase):
         scene = self.scene
 
         # Create one builder per type (reused across worlds)
-        rb = RigidBodyBuilder(model, scene, self.mapping, self._kappa, self._default_mass_density)
-        ab = ArticulationBuilder(model, scene, self.mapping, self._dt, kappa=self._kappa)
-        cb = ClothBuilder(model, scene, self.mapping)
-        db = DeformableBodyBuilder(model, scene, self.mapping, default_mass_density=self._default_mass_density)
+        self._rigid_body_builder = RigidBodyBuilder(model, scene, self.mapping, self._kappa, self._default_mass_density)
+        self._articulation_builder = ArticulationBuilder(model, scene, self.mapping, self._dt, kappa=self._kappa)
+        self._cloth_builder = ClothBuilder(model, scene, self.mapping)
+        self._deformable_builder = DeformableBodyBuilder(
+            model, scene, self.mapping, default_mass_density=self._default_mass_density
+        )
 
-        rb.build_ground_planes(ground_elem)
+        self._rigid_body_builder.build_ground_planes(ground_elem)
 
         # Build set of body indices that belong to articulations (robot links),
         # a separate set for bodies attached via free joints, and a set of
@@ -510,8 +518,8 @@ class SolverUIPC(SolverBase):
                 joint_range = (0, model.joint_count)
                 particle_range = (0, model.particle_count)
             se = subscene_elements[world_index] if subscene_elements else None
-            rb.build_body_shape_mapping(body_range)
-            rb.build_affine_bodies(
+            self._rigid_body_builder.build_body_shape_mapping(body_range)
+            self._rigid_body_builder.build_affine_bodies(
                 env_elems[world_index],
                 robo_elems[world_index],
                 actor_elems[world_index],
@@ -522,16 +530,11 @@ class SolverUIPC(SolverBase):
                 body_element_overrides,
                 no_instance_bodies=ball_joint_bodies,
             )
-            ab.build_joints(robo_elems[world_index], joint_range, se)
-            if cb.has_cloth:
-                cb.build(env_elems[world_index], particle_range, se)
-            if db.has_deformable:
-                db.build(env_elems[world_index], particle_range, se)
-
-        self._rigid_body_builder = rb
-        self._articulation_builder = ab
-        self._cloth_builder = cb
-        self._deformable_builder = db
+            self._articulation_builder.build_joints(robo_elems[world_index], joint_range, se)
+            if self._cloth_builder.has_cloth:
+                self._cloth_builder.build(env_elems[world_index], particle_range, se)
+            if self._deformable_builder.has_deformable:
+                self._deformable_builder.build(env_elems[world_index], particle_range, se)
 
         # Initialize UIPC world and set up state accessors
         self.world.init(scene)
@@ -573,7 +576,7 @@ class SolverUIPC(SolverBase):
                     joint_range = (int(joint_ws[world_index]), int(joint_ws[world_index + 1]))  # ty:ignore[not-subscriptable]  # pyright: ignore[reportOptionalSubscript]
                 else:
                     joint_range = (0, model.joint_count)
-                ab.compute_fk(joint_range)
+                self._articulation_builder.compute_fk(joint_range)
         self._push_body_state_to_uipc()
 
         self._initialized = True
@@ -619,9 +622,6 @@ class SolverUIPC(SolverBase):
         # Phase 1: Cache joint control
         self._articulation_builder.cache_joint_control(control)
 
-        # DEBUG: snapshot body_q before advance
-        _body_q_before = state_in.body_q.numpy().copy() if state_in.body_q is not None else None
-
         # Phase 2: Advance UIPC (animator callbacks fire here)
         self.world.advance()
         self.world.retrieve()
@@ -636,6 +636,27 @@ class SolverUIPC(SolverBase):
 
         self._step_count += 1
         self._articulation_builder.increment_step()
+
+    def export_surface_obj(self, path: str) -> None:
+        """Export the current scene surface geometry as a Wavefront OBJ file.
+
+        Writes the surface mesh of all bodies in the scene to a single
+        ``.obj`` file using UIPC's built-in :class:`~uipc.core.SceneIO`.
+
+        Must be called after :meth:`initialize` (or after the first
+        :meth:`step`).
+
+        Args:
+            path: Directory to write the OBJ file into (created if needed).
+        """
+        if not self._initialized:
+            raise RuntimeError(
+                "SolverUIPC.export_surface_obj() requires the solver to be "
+                "initialized. Call step() or initialize() first."
+            )
+        os.makedirs(path, exist_ok=True)
+        sio = SceneIO(self.scene)
+        sio.write_surface(os.path.join(path, f"scene_surface_{self.world.frame():06d}.obj"))
 
     @override
     def notify_model_changed(self, flags: int) -> None:

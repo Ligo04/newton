@@ -1,0 +1,5 @@
+[default.extend-words]
+# Affine Body Dynamics — UIPC domain term used in attribute names
+abd = "abd"
+# Shepperd's method — quaternion extraction algorithm (proper noun)
+Shepperd = "Shepperd"
