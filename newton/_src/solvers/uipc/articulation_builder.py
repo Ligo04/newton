@@ -1229,9 +1229,6 @@ class ArticulationBuilder:
         r_axis = r_world_1 - r_world_0
         l_axis = l_axis / (np.linalg.norm(l_axis) + 1e-12)
         r_axis = r_axis / (np.linalg.norm(r_axis) + 1e-12)
-        print(f"validate prismatic anchors: lp0: {lp0}, lp1: {lp1}, rp0: {rp0}, rp1: {rp1}")
-        print(f"l_world_0: {l_world_0}, l_world_1: {l_world_1}, r_world_0: {r_world_0}, r_world_1: {r_world_1}")
-        print(f"l_axis: {l_axis}, r_axis: {r_axis}")
         cross = np.cross(l_axis, r_axis)
         if not np.allclose(cross, 0.0, atol=atol):
             raise RuntimeError(

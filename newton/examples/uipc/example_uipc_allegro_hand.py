@@ -97,7 +97,6 @@ class Example:
         self.solver = newton.solvers.SolverUIPC(self.model, dt=self.sim_dt, logger_level=uipc.Logger.Warn)
         self.solver.set_contact(True)
         self.solver.configure_contact_tabular(_contact_tabular_fn)
-        self.solver.initialize()
 
         self.state_1 = self.model.state()
         self.control = self.model.control()
@@ -108,6 +107,7 @@ class Example:
         self.joint_limit_upper = self.model.joint_limit_upper.numpy()
         self.joint_qd_start = self.model.joint_qd_start.numpy()
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
+        self.solver.initialize(self.state_0)
         self.viewer.set_model(self.model)
         self.viewer.set_camera(
             pos=wp.vec3(-0.5, 1.0, 0.6),

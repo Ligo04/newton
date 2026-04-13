@@ -113,7 +113,7 @@ class Example:
         b_pri = builder.add_link(
             xform=wp.transform(
                 p=wp.vec3(0.0, y, drop_z - cuboid_hz),
-                q=wp.quat_from_axis_angle(wp.vec3(0.0, 1.0, 0.0), 0.12),  # pyright: ignore[reportArgumentType]
+                q=wp.quat_from_axis_angle(wp.vec3(0.0, 1.0, 0.0), 0.0),  # pyright: ignore[reportArgumentType]
             ),
             label="b_prismatic",
         )
