@@ -16,7 +16,7 @@ elements (suffix `_{world_index}` only when `world_count > 1`):
 
 | Element      | Applied to                                                              | Source (`rigid_body.py:194-211`) |
 |--------------|-------------------------------------------------------------------------|----------------------------------|
-| `ground_elem`| Ground planes. Shared across all worlds.                                | `rb.build_ground_planes`         |
+| `ground_elem`| Ground planes. Shared across all worlds. Belongs to the default subscene element. | `rb.build_ground_planes`         |
 | `env_elem`   | Non-articulated bodies (kinematic tables, static mesh colliders, cloth, deformables). **Default fallback.** | `_resolve_contact_elem` returns this when body is in neither articulation nor free-joint set |
 | `robo_elem`  | Articulated robot links — any body reachable through a non-free joint.  | Set membership in `articulation_bodies` |
 | `actor_elem` | Bodies attached via a **free joint** (dynamic free rigid bodies — cubes, pens, objects to be manipulated). | Set membership in `free_joint_bodies`   |
@@ -204,17 +204,22 @@ def setup(tabular, wi, ground, env, robo, actor):
   `foo`. At least insert `foo ↔ ground` and `foo ↔ env` to get baseline
   behavior.
 
+## Relationship with Subscene Tabular
+
+Contact tabular and subscene tabular are **orthogonal** systems. A contact
+pair must pass both gates: the subscene tabular allows the two worlds to
+interact, AND the contact tabular enables the specific element pair. See the
+`uipc-subscene-tabular` skill for details.
+
+**Execution order in `initialize()`:**
+1. Subscene tabular setup (if `world_count > 1`)
+2. Contact tabular setup (defaults + user callback)
+3. Build geometries
+
 ## File Map
 
-- `newton/_src/solvers/uipc/solver_uipc.py:261-312` —
-  `configure_contact_tabular` public API.
-- `newton/_src/solvers/uipc/solver_uipc.py:385-421` — the default tabular
-  is constructed here. Source of truth for which pairs are on/off.
-- `newton/_src/solvers/uipc/rigid_body.py:194-211` —
-  `_resolve_contact_elem`: the priority rules for per-body element
-  assignment.
-- `newton/_src/solvers/uipc/rigid_body.py:228-305` —
+- `newton/_src/solvers/uipc/solver_uipc.py` —
+  `configure_contact_tabular` public API and default tabular construction.
+- `newton/_src/solvers/uipc/rigid_body.py` —
+  `_resolve_contact_elem`: priority rules for per-body element assignment;
   `build_affine_bodies`: where `body_element_overrides` is consumed.
-- `newton/examples/uipc/example_uipc_panda_hydro.py` — example where the
-  default tabular is sufficient (panda arm is robo, table/cup are env,
-  pen/cube is actor, ground is ground).

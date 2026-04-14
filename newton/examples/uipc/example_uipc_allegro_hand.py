@@ -94,10 +94,11 @@ class Example:
             contact_tabular.insert(cube_elem, cube_elem, 0.5, 1.0 * GPa, False)
             return {cube_body_idx: cube_elem}
 
-        self.solver = newton.solvers.SolverUIPC(self.model, dt=self.sim_dt, logger_level=uipc.Logger.Warn)
+        self.solver = newton.solvers.SolverUIPC(
+            self.model, dt=self.sim_dt, logger_level=uipc.Logger.Warn, require_time_report=True
+        )
         self.solver.set_contact(True)
         self.solver.configure_contact_tabular(_contact_tabular_fn)
-
         self.state_1 = self.model.state()
         self.control = self.model.control()
         self.contacts = self.model.contacts()
@@ -202,3 +203,5 @@ if __name__ == "__main__":
     viewer, args = newton.examples.init(parser)
     example = Example(viewer, args)
     newton.examples.run(example, args)
+    report_path = example.solver.save_performance_report()
+    print(f"Performance report saved to: {report_path}")

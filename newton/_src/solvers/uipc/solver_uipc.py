@@ -10,14 +10,16 @@ import warnings
 from collections.abc import Callable
 from typing import Any
 
-import numpy as np
 import uipc
 import uipc.adapter.warp
 import warp as wp
 from uipc import Logger as ULogger
-from uipc.core import AffineBodyStateAccessorFeature, SceneIO
+from uipc.core import AffineBodyStateAccessorFeature, ContactElement, ContactTabular, SceneIO
 from uipc.core import Scene as UScene
+from uipc.stats import SimulationStats as USimulationStats
 from uipc.unit import GPa, MPa
+
+import newton
 
 from ...core.types import override
 from ...sim import Contacts, Control, Model, State
@@ -121,6 +123,7 @@ class SolverUIPC(SolverBase):
         logger_level=ULogger.Warn,
         dump_enable: bool = False,
         dump_path: str | None = None,
+        require_time_report: bool = False,
     ):
         """Create a UIPC solver instance from a Newton model.
 
@@ -138,6 +141,9 @@ class SolverUIPC(SolverBase):
                 ``uipc.Logger.Error``, ``uipc.Logger.Warn``, ``uipc.Logger.Info``,
                 ``uipc.Logger.Debug``, or ``uipc.Logger.Trace``.
                 Defaults to ``uipc.Logger.Critical`` to suppress UIPC console spam.
+            require_time_report: Enable UIPC timer collection for performance
+                reports. When ``True``, each :meth:`step` records timer data
+                that can later be exported via :meth:`save_performance_report`.
         """
         super().__init__(model=model)
         self.import_uipc()
@@ -167,11 +173,14 @@ class SolverUIPC(SolverBase):
         if model.gravity is not None:
             gravity_np = model.gravity.numpy().flatten()
             scene_config["gravity"] = [
-                [np.float64(gravity_np[0])],
-                [np.float64(gravity_np[1])],
-                [np.float64(gravity_np[2])],
+                [float(gravity_np[0])],
+                [float(gravity_np[1])],
+                [float(gravity_np[2])],
             ]
         self._scene_config = scene_config
+
+        # Performance statistics collector (only when enabled)
+        self._stats: USimulationStats | None = USimulationStats() if require_time_report else None
 
         # User-registered callbacks (set via configure_* methods)
         self._contact_tabular_fn: Callable | None = None
@@ -265,11 +274,11 @@ class SolverUIPC(SolverBase):
             scene_cfg = self.scene.config()
             scene_cfg["contact"]["enable"] = flag  # ty:ignore[not-subscriptable]
             if d_hat is not None:
-                scene_cfg["d_hat"] = np.float64(d_hat)  # ty:ignore[invalid-assignment]
+                scene_cfg["d_hat"] = float(d_hat)  # ty:ignore[invalid-assignment]
         else:
             self._scene_config["contact"]["enable"] = flag
             if d_hat is not None:
-                self._scene_config["d_hat"] = np.float64(d_hat)
+                self._scene_config["d_hat"] = float(d_hat)
 
     def configure_contact_tabular(self, fn: Callable) -> None:
         """Register a callback to configure the UIPC contact tabular before initialization.
@@ -381,7 +390,8 @@ class SolverUIPC(SolverBase):
             state: Optional initial :class:`State` whose ``body_q`` /
                 ``body_qd`` are pushed to UIPC after world init.  Typically
                 the state the user has populated via :func:`newton.eval_fk`.
-                If ``None``, falls back to running FK from ``model.joint_q``.
+                If ``None``, falls back to running IK from ``model.body_q``
+                followed by FK to sync body transforms.
 
         Raises:
             RuntimeError: If already initialized.
@@ -397,20 +407,37 @@ class SolverUIPC(SolverBase):
         self.scene = uipc.Scene(self._scene_config)
         print("scene_config", self._scene_config)
 
+        # Subscene tabular for multi-world contact isolation — set up BEFORE
+        # contact elements so that elements can be created within subscenes.
+        subscene_elements: list[Any] = []
+        if model.world_count > 1:
+            tabular = self.scene.subscene_tabular()
+            default_subscene_elem = tabular.default_element()
+
+            for world_index in range(model.world_count):
+                se = tabular.create(f"world_{world_index}")
+                subscene_elements.append(se)
+
+            # Cross-subscene contact is disabled by default in UIPC;
+            # only enable each world ↔ default (ground).
+            for i in range(model.world_count):
+                tabular.insert(default_subscene_elem, subscene_elements[i], True)
+
+            # Let user override subscene configuration
+            if self._subscene_tabular_fn is not None:
+                self._subscene_tabular_fn(tabular, subscene_elements, default_subscene_elem)
+
         # Contact tabular — shared ground + per-world env / robot element pairs
-        contact_tabular = self.scene.contact_tabular()
-
+        contact_tabular: ContactTabular = self.scene.contact_tabular()
         # Ground element is shared across all worlds
-        ground_elem = contact_tabular.create("ground")
-        contact_tabular.insert(ground_elem, ground_elem, 0.5, 1.0 * GPa, False)
-
+        ground_elem: ContactElement = contact_tabular.default_element()
         env_elems: list[Any] = []
         robo_elems: list[Any] = []
         actor_elems: list[Any] = []
         body_element_overrides: dict[int, Any] = {}
 
         for world_index in range(model.world_count):
-            suffix = f"_{world_index}" if model.world_count > 1 else ""
+            suffix = f"_{world_index}"
             env_elem = contact_tabular.create(f"env{suffix}")
             robo_elem = contact_tabular.create(f"robot{suffix}")
             actor_elem = contact_tabular.create(f"actor{suffix}")
@@ -435,29 +462,8 @@ class SolverUIPC(SolverBase):
             robo_elems.append(robo_elem)
             actor_elems.append(actor_elem)
 
-        # Subscene tabular for multi-world contact isolation
-        subscene_elements: list[Any] = []
-        if model.world_count > 1:
-            tabular = self.scene.subscene_tabular()
-            default_subscene_elem = tabular.default_element()
-
-            for world_index in range(model.world_count):
-                se = tabular.create(f"world_{world_index}")
-                subscene_elements.append(se)
-
-            # Default: no contact between different worlds,
-            # enable contact between each world and default (ground)
-            for i in range(model.world_count):
-                for j in range(i + 1, model.world_count):
-                    tabular.insert(subscene_elements[i], subscene_elements[j], False)
-                tabular.insert(default_subscene_elem, subscene_elements[i], True)
-
-            # Let user override subscene configuration
-            if self._subscene_tabular_fn is not None:
-                self._subscene_tabular_fn(tabular, subscene_elements, default_subscene_elem)
-
         self.mapping = UIpcMappingInfo()
-        scene = self.scene
+        scene: UScene = self.scene
 
         # Create one builder per type (reused across worlds)
         self._rigid_body_builder = RigidBodyBuilder(model, scene, self.mapping, self._kappa, self._default_mass_density)
@@ -507,6 +513,13 @@ class SolverUIPC(SolverBase):
             body_ws = None
             joint_ws = None
             particle_ws = None
+
+        if state is None:
+            state = model.state()
+            newton.eval_fk(model, model.joint_q, model.joint_qd, state)
+        wp.copy(model.body_q, state.body_q)
+        if state.body_qd is not None and model.body_qd is not None:
+            wp.copy(model.body_qd, state.body_qd)
 
         for world_index in range(model.world_count):
             if body_ws is not None:
@@ -566,22 +579,6 @@ class SolverUIPC(SolverBase):
             self._abd_transform_buf = None
             self._abd_velocity_buf = None
 
-        # Push initial body transforms into UIPC.  Prefer the state
-        # provided by the caller (which the user typically populates via
-        # ``newton.eval_fk``) so the initial UIPC pose matches whatever
-        # the downstream simulation will see.  Fall back to running our
-        # own FK from ``model.joint_q`` if no state is supplied.
-        if state is not None and state.body_q is not None and model.body_q is not None:
-            wp.copy(model.body_q, state.body_q)
-            if state.body_qd is not None and model.body_qd is not None:
-                wp.copy(model.body_qd, state.body_qd)
-        else:
-            for world_index in range(model.world_count):
-                if body_ws is not None:
-                    joint_range = (int(joint_ws[world_index]), int(joint_ws[world_index + 1]))  # ty:ignore[not-subscriptable]  # pyright: ignore[reportOptionalSubscript]
-                else:
-                    joint_range = (0, model.joint_count)
-                self._articulation_builder.compute_fk(joint_range)
         self._push_body_state_to_uipc()
 
         self._initialized = True
@@ -634,6 +631,8 @@ class SolverUIPC(SolverBase):
         # Phase 2: Advance UIPC (animator callbacks fire here)
         self.world.advance()
         self.world.retrieve()
+        if self._stats is not None:
+            self._stats.collect()
 
         # Phase 3: Read back results
         self._sync_body_state_from_uipc(state_out)
@@ -666,6 +665,54 @@ class SolverUIPC(SolverBase):
         os.makedirs(path, exist_ok=True)
         sio = SceneIO(self.scene)
         sio.write_surface(os.path.join(path, f"scene_surface_{self.world.frame():06d}.obj"))
+
+    def save_performance_report(
+        self,
+        output_dir: str | None = None,
+        keys: list[str] | None = None,
+    ) -> str | None:
+        """Generate a UIPC performance summary report to disk.
+
+        Produces a folder containing ``report.md``, per-timer SVG charts,
+        a profiler heatmap, and (when available) a system dependency graph.
+        Requires at least one :meth:`step` call so that timer data has been
+        collected.
+
+        Args:
+            output_dir: Directory to write the report into.  Defaults to
+                ``<workspace>/perf_report``.
+            keys: Timer keys (or alias keys) for per-frame panels.
+                Defaults to the UIPC built-in set (Newton iteration,
+                global linear system, line search, DCD, SPMV).
+
+        Returns:
+            Path to the generated ``report.md``, or ``None`` if no frames
+            have been collected.
+        """
+        if self._stats is None:
+            warnings.warn(
+                "Time report not enabled — set require_time_report=True when constructing SolverUIPC.",
+                stacklevel=2,
+            )
+            return None
+
+        if self._stats.num_frames == 0:
+            warnings.warn(
+                "No simulation frames collected yet — call step() first.",
+                stacklevel=2,
+            )
+            return None
+
+        if output_dir is None:
+            output_dir = os.path.join(self._workspace, "perf_report")
+
+        kwargs: dict[str, object] = {"output_dir": output_dir}
+        if keys is not None:
+            kwargs["keys"] = keys
+        kwargs["workspace"] = self._workspace
+
+        result = self._stats.summary_report(**kwargs)
+        return str(result) if result is not None else None
 
     @override
     def notify_model_changed(self, flags: int) -> None:

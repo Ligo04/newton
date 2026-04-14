@@ -679,13 +679,12 @@ class ArticulationBuilder:
         volume = 1e-9
         sc = self._abd.create_proxy(self._kappa, mass, mass_center, inertia, volume)
 
-        # Offset the anchor 0.5 m along the local Y axis to avoid overlap
-        # with the child link geometry sitting at the pivot.
-        anchor_pos = position.copy()
-        anchor_pos[1] += 0.5  # shift along Y
-        mat4 = np.eye(4, dtype=np.float64)
-        mat4[:3, 3] = anchor_pos
-        view(sc.transforms())[:] = mat4
+        # Identity transform — the anchor is a fixed 1-vertex proxy whose
+        # sole purpose is to serve as the parent side of a world-attached
+        # joint constraint.  Joint local anchor points (lp0/lp1) are already
+        # expressed in world coordinates when parent == -1, so the anchor
+        # body must sit at the origin to avoid double-applying the pivot.
+        view(sc.transforms())[:] = np.eye(4, dtype=np.float64)
         # Mark as fixed so it doesn't move
         view(sc.instances().find(uipc_builtin.is_fixed))[:] = 1  # type: ignore  # pyright: ignore[reportArgumentType]
 
@@ -1165,7 +1164,8 @@ class ArticulationBuilder:
         if not np.allclose(l_world_0, r_world_0, atol=atol):
             raise RuntimeError(
                 f"Revolute joint {joint_idx}: parent/child anchor "
-                f"mismatch in world space. "
+                f"mismatch in world space.\n"
+                f"p_tf={p_tf}\n, c_tf={c_tf}\n, lp0={lp0}, rp0={rp0},\n "
                 f"l_world={l_world_0}, r_world={r_world_0}, "
                 f"diff={np.linalg.norm(l_world_0 - r_world_0):.6f}"
             )
@@ -1175,7 +1175,8 @@ class ArticulationBuilder:
         if not np.allclose(l_world_1, r_world_1, atol=atol):
             raise RuntimeError(
                 f"Revolute joint {joint_idx}: parent/child axis "
-                f"endpoint mismatch in world space. "
+                f"endpoint mismatch in world space.\n"
+                f"p_tf={p_tf}\n, c_tf={c_tf}\n, lp1={lp1}, rp1={rp1},\n "
                 f"l_world={l_world_1}, r_world={r_world_1}, "
                 f"diff={np.linalg.norm(l_world_1 - r_world_1):.6f}"
             )

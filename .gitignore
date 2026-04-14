@@ -74,3 +74,4 @@ docs/_static/viser/
 # Notebook checkpoints
 **/*.ipynb_checkpoints/
 .omc/
+output/

@@ -280,11 +280,14 @@ class Example:
         def _contact_tabular_fn(contact_tabular, world_index, ground_elem, env_elem, robo_elem, actor_elem):
             GPa = 1e9
             belt_elem = contact_tabular.create("belt")
-            contact_tabular.insert(belt_elem, actor_elem, 1.2, 1.0 * GPa, True)
+            contact_tabular.insert(belt_elem, actor_elem, 0.5, 1.0 * GPa, True)
             contact_tabular.insert(belt_elem, env_elem, 0.5, 1.0 * GPa, False)
             contact_tabular.insert(belt_elem, ground_elem, 0.5, 1.0 * GPa, False)
             contact_tabular.insert(belt_elem, robo_elem, 0.5, 1.0 * GPa, False)
             contact_tabular.insert(belt_elem, belt_elem, 0.5, 1.0 * GPa, False)
+            # update
+            contact_tabular.insert(actor_elem, actor_elem, 0.5, 1.0 * GPa, False)
+            contact_tabular.insert(actor_elem, env_elem, 0.5, 1.0 * GPa, False)
             return {belt_body_idx: belt_elem}
 
         self.solver = newton.solvers.SolverUIPC(
@@ -292,7 +295,7 @@ class Example:
             dt=self.sim_dt,
             logger_level=uipc.Logger.Info,
         )
-        self.solver.set_contact(True)
+        self.solver.set_contact(True, 0.001)
         self.solver.configure_contact_tabular(_contact_tabular_fn)
         self.solver.initialize()
 
@@ -303,8 +306,6 @@ class Example:
         # Cache belt DOF index for runtime target updates
         qd_starts = self.model.joint_qd_start.numpy()
         self.belt_qd_start = int(qd_starts[self.belt_joint])
-
-        newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
 
         self.viewer.set_model(self.model)
         self.viewer.set_camera(wp.vec3(2.7, -1.3, 5.0), -60.0, -200.0)

@@ -172,9 +172,9 @@ class Example:
         # directly on the table, which fails UIPC's sanity check. We lift
         # everything by ``uipc_gap`` so the initial distances satisfy the
         # solver's minimum-separation constraint.
-        uipc_gap = 0.0012
+        uipc_gap = 0.0001
         box_size = 0.05
-        table_pos = wp.vec3(0.08, -0.5, box_size + uipc_gap)
+        table_pos = wp.vec3(0.08, -0.5, box_size)
         table_body = builder_single.add_body(
             xform=wp.transform(table_pos, wp.quat_identity()),  # ty:ignore[missing-argument]
             label="table",
@@ -215,12 +215,7 @@ class Example:
                 label="cup",
                 is_kinematic=True,
             )
-            cup_shape_idx = builder_single.add_shape_mesh(body=cup_body, mesh=cup_mesh)
-            builder_single.approximate_meshes(
-                "convex_hull",
-                shape_indices=[cup_shape_idx],
-                keep_visual_shapes=True,
-            )
+            builder_single.add_shape_mesh(body=cup_body, mesh=cup_mesh)
 
         # ------------------------------------------------------------------
         # Object to manipulate
@@ -243,7 +238,7 @@ class Example:
             self.place_offset = -0.02
         else:  # CUBE
             size = 0.04
-            self.object_pos = [0.0, -0.5, 2 * box_size + uipc_gap + 0.5 * size]
+            self.object_pos = [0.0, -0.5, 2 * box_size + 0.5 * size + uipc_gap]
             object_xform = wp.transform(wp.vec3(self.object_pos), wp.quat_identity())
             self.object_body_local = builder_single.add_body(xform=object_xform, label="object")
             builder_single.add_shape_box(
@@ -280,12 +275,10 @@ class Example:
             dt=self.sim_dt,
             logger_level=uipc.Logger.Error,
         )
-        self.solver.configure_scene({"line_search": {"report_energy": True}})
-        self.solver.set_contact(True)
+        self.solver.set_contact(True, uipc_gap)
         self.solver.initialize()
-
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
-
+        print("state_0 body_q: ", self.model.joint_q)
         self.viewer.set_model(self.model)
         # Camera matches example_robot_panda_hydro.
         self.viewer.set_camera(
@@ -296,24 +289,17 @@ class Example:
         self.viewer.set_world_offsets((0.0, 0.0, 0.0))
         self.viewer._paused = True
 
-        # IK setup runs on the single-world model.
-        self.state_ik = self.model_single.state()
-        newton.eval_fk(
-            self.model_single,
-            self.model_single.joint_q,
-            self.model_single.joint_qd,
-            self.state_ik,
-        )
-        self._setup_ik()
+        # Initialize state for IK setup
+        self.state = self.model_single.state()
+        newton.eval_fk(self.model_single, self.model.joint_q, self.model.joint_qd, self.state)
 
+        self._setup_ik()
+        self.control = self.model.control()
         self.joint_target_shape = self.control.joint_target_pos.reshape((self.world_count, -1)).shape
         self.joint_targets_2d = wp.zeros(self.joint_target_shape, dtype=wp.float32)
         wp.copy(self.control.joint_target_pos[:9], self.model.joint_q[:9])
 
-        # Track maximum object height per world so ``test_final`` can verify
-        # the object was actually picked up (matches example_robot_panda_hydro).
-        # Only allocated in ``test_mode`` so normal runs skip the per-frame
-        # GPU→host sync that the tracking loop in ``step`` requires.
+        # Track maximum object height for testing (only in test mode)
         self.object_max_z = [self.object_pos[2]] * self.world_count if self.test_mode else None
 
     def _setup_ik(self):
@@ -322,7 +308,7 @@ class Example:
         # here is required for the waypoint sequence to actually reach
         # the cube / pen on the table.
         self.ee_index = self.hand_body_idx
-        body_q_np = self.state_ik.body_q.numpy()
+        body_q_np = self.state.body_q.numpy()
         ee_tf = wp.transform(*body_q_np[self.ee_index])
 
         self.pos_obj = ik.IKObjectivePosition(
@@ -385,13 +371,15 @@ class Example:
                 self.cup_pos[1],
                 self.z_rest - 0.1,
             )
-            self.waypoints.extend([
-                [cup_above_high, 2.0, grasp_pos, rot_hand],
-                [cup_above_high, 2.0, loose_pos, rot_hand],
-                [cup_above_high, 1.0, loose_pos, rot_hand],
-                [cup_above_low, 1.0, loose_pos, rot_hand],
-                [cup_above_low, 1.0, 0.0, rot_hand],
-            ])
+            self.waypoints.extend(
+                [
+                    [cup_above_high, 2.0, grasp_pos, rot_hand],
+                    [cup_above_high, 2.0, loose_pos, rot_hand],
+                    [cup_above_high, 1.0, loose_pos, rot_hand],
+                    [cup_above_low, 1.0, loose_pos, rot_hand],
+                    [cup_above_low, 1.0, 0.0, rot_hand],
+                ]
+            )
 
     def _set_joint_targets(self):
         self.time_in_waypoint += self.frame_dt
@@ -430,6 +418,7 @@ class Example:
         self.state_0.clear_forces()
         self.state_1.clear_forces()
         for _ in range(self.sim_substeps):
+            self.solver.export_surface_obj("/home/ligo/Project/x2robot/Newton-Isaac/newton/output/")
             self.solver.step(
                 self.state_0,
                 self.state_1,
