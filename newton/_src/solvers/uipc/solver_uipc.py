@@ -280,6 +280,29 @@ class SolverUIPC(SolverBase):
             if d_hat is not None:
                 self._scene_config["d_hat"] = float(d_hat)
 
+    def set_animator_substep(self, substep: int) -> None:
+        """Set the number of animator substeps per simulation step.
+
+        Controls how many times the UIPC animator callbacks fire within a
+        single ``world.advance()`` call.  Higher values give smoother
+        kinematic target interpolation at the cost of more callback
+        invocations.
+
+        Must be called **after** :meth:`initialize`.
+
+        Args:
+            substep: Number of animator substeps (must be >= 1).
+
+        Raises:
+            RuntimeError: If the solver has not been initialized yet.
+            ValueError: If *substep* < 1.
+        """
+        if not self._initialized:
+            raise RuntimeError("Cannot set animator substep before initialization. Call initialize() first.")
+        if substep < 1:
+            raise ValueError(f"substep must be >= 1, got {substep}")
+        self.scene.animator().substep(substep)
+
     def configure_contact_tabular(self, fn: Callable) -> None:
         """Register a callback to configure the UIPC contact tabular before initialization.
 
