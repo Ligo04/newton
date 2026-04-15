@@ -162,7 +162,7 @@ class ClothBuilder:
         if model.tri_count > 0 and model.tri_materials is not None:
             tri_materials_np = model.tri_materials.numpy()
             # tri_materials layout: (tri_count, 5) -> [ke, ka, kd, drag, lift]
-            avg_ke = np.float64(np.mean(tri_materials_np[:, 0]))
+            avg_ke = float(np.mean(tri_materials_np[:, 0]))
             if avg_ke > 0:
                 return avg_ke
         return 1000.0  # Default: 1 kPa
@@ -172,7 +172,7 @@ class ClothBuilder:
         if model.edge_count > 0 and model.edge_bending_properties is not None:
             edge_props_np = model.edge_bending_properties.numpy()
             # edge_bending_properties layout: (edge_count, 2) -> [stiffness, damping]
-            avg_ke = np.float64(np.mean(edge_props_np[:, 0]))
+            avg_ke = float(np.mean(edge_props_np[:, 0]))
             if avg_ke > 0:
                 return avg_ke
         return self._default_bending_stiffness
@@ -184,9 +184,9 @@ class ClothBuilder:
         """
         if model.particle_mass is not None:
             particle_mass_np = model.particle_mass.numpy()
-            total_mass = np.float64(np.sum(particle_mass_np[particle_indices]))
+            total_mass = float(np.sum(particle_mass_np[particle_indices]))
             if total_mass > 0 and model.tri_count > 0 and model.tri_areas is not None:
-                total_area = np.float64(np.sum(model.tri_areas.numpy()))
+                total_area = float(np.sum(model.tri_areas.numpy()))
                 if total_area > 0:
                     # Surface density = total_mass / total_area
                     # Volume density = surface_density / thickness

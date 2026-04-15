@@ -135,8 +135,8 @@ class ArticulationBuilder:
         # Per-body world-frame 4x4 transforms (populated by build_joints via FK)
         self._body_transforms: np.ndarray | None = None
 
-        # Cache of anchor body geo slots for world-anchored joints
-        self._anchor_slots: dict[str, SimplicialComplexSlot] = {}
+        # Cache of proxy geo slots (world anchors + shapeless body proxies)
+        self._proxy_slots: dict[str, SimplicialComplexSlot] = {}
 
         # Transient subscene element set per build_joints call
         self._subscene_elem: Any | None = None
@@ -378,69 +378,6 @@ class ArticulationBuilder:
 
         return self._body_transforms
 
-    def _compute_shape_body_anchors(
-        self,
-        joint_type_np: np.ndarray,
-        joint_parent_np: np.ndarray,
-        joint_child_np: np.ndarray,
-    ) -> dict[int, int]:
-        """Map every body to its nearest shape-bearing ancestor via a FIXED chain.
-
-        A shapeless body (one that has no entry in ``body_geo_slots`` because
-        ``RigidBodyBuilder`` skipped it — typically because the URDF declared
-        the link with no ``<collision>``, ``<visual>``, or ``<inertial>``, e.g.
-        ``fr3_link8`` / ``fr3_hand_tcp``) cannot appear on either side of a
-        UIPC constitution. However if the only joints connecting such a body
-        to a shape-bearing ancestor are all of type ``FIXED``, the body's pose
-        is rigidly tied to that ancestor and we can treat it as an alias.
-
-        Returns a dict where:
-
-        * Shape-bearing body ``b`` maps to ``b`` itself.
-        * Shapeless body ``b`` reachable from a shape-bearing ancestor via a
-          chain of fixed joints maps to that ancestor.
-        * Shapeless body ``b`` with no such ancestor maps to ``-1`` (the
-          caller should fall back to the world-anchored code path).
-
-        Args:
-            joint_type_np: ``model.joint_type`` numpy view.
-            joint_parent_np: ``model.joint_parent`` numpy view.
-            joint_child_np: ``model.joint_child`` numpy view.
-
-        Returns:
-            A dict keyed by body index covering every body in the model.
-        """
-        # Build child_body -> parent_body map for FIXED joints only.
-        fixed_parent_of: dict[int, int] = {}
-        for j in range(len(joint_type_np)):
-            if JointType(joint_type_np[j]) != JointType.FIXED:
-                continue
-            c = int(joint_child_np[j])
-            p = int(joint_parent_np[j])
-            if p >= 0:
-                fixed_parent_of[c] = p
-
-        anchors: dict[int, int] = {}
-        for b in range(self._model.body_count):
-            if b in self._mapping.body_geo_slots:
-                anchors[b] = b
-                continue
-            cur = b
-            visited: set[int] = {b}
-            while cur in fixed_parent_of:
-                cur = fixed_parent_of[cur]
-                if cur in visited:
-                    cur = -1
-                    break
-                visited.add(cur)
-                if cur in self._mapping.body_geo_slots:
-                    break
-            if cur >= 0 and cur in self._mapping.body_geo_slots:
-                anchors[b] = cur
-            else:
-                anchors[b] = -1
-        return anchors
-
     def build_joints(
         self,
         contact_elem: Any,
@@ -461,7 +398,7 @@ class ArticulationBuilder:
                 ``None`` for all joints.
             subscene_elem: UIPC subscene element for anchor bodies, or ``None``.
         """
-        # Store for use by _get_or_create_anchor
+        # Store for use by _create_proxy
         self._contact_elem = contact_elem
         self._subscene_elem = subscene_elem
 
@@ -511,18 +448,19 @@ class ArticulationBuilder:
         joint_parent_np = model.joint_parent.numpy()
         joint_child_np = model.joint_child.numpy()
 
-        # Resolve shapeless-body fixed-chain anchors. URDFs with frame-only
-        # links (e.g. ``fr3_link8``, ``fr3_hand_tcp``) inside fixed chains
-        # leave the shapeless link without an ABD body, but its pose is
-        # rigidly tied to the nearest shape-bearing ancestor through the
-        # fixed chain. ``anchors[b]`` returns ``b`` itself for shape-bearing
-        # bodies, the ancestor index for collapsible shapeless bodies, or
-        # ``-1`` if no fixed-chain anchor exists.
-        anchors = self._compute_shape_body_anchors(
-            joint_type_np,
-            joint_parent_np,
-            joint_child_np,
-        )
+        # -- Pre-pass: create proxy meshes for shapeless bodies ----------------
+        # Shapeless bodies (e.g. URDF frame-only links ``fr3_link8``) get
+        # dynamic proxies at their world pose — Newton FIXED joints in the
+        # model naturally constrain them to their neighbour.
+        # Body -1 (world frame) is handled per-joint in the batch builders
+        # and must NOT be registered in body_geo_slots (it has no entry in
+        # model.body_q, so the GPU sync kernels would index out of bounds).
+        for j in range(jstart, jend):
+            if JointType(joint_type_np[j]) == JointType.FREE:
+                continue
+            for b in (int(joint_parent_np[j]), int(joint_child_np[j])):
+                if b >= 0 and b not in self._mapping.body_geo_slots:
+                    self._create_shapeless_proxy(b)
 
         # -- Classify joints by type and collect per-joint data ----------------
         revolute_joints: list[dict] = []
@@ -536,37 +474,39 @@ class ArticulationBuilder:
             parent_body = int(joint_parent_np[j])
             child_body = int(joint_child_np[j])
 
-            # A shapeless child has no ABD body. For FIXED joints this is
-            # expected — the chain is re-attached when a downstream joint
-            # references this shapeless link as its parent (handled by
-            # ``anchors`` below). For movable joints we cannot represent it
-            # at all and warn.
-            if child_body not in self._mapping.body_geo_slots:
-                if joint_type != JointType.FIXED:
-                    warnings.warn(
-                        f"Joint {j}: child body {child_body} has no ABD "
-                        f"geometry but joint type is {joint_type.name}; "
-                        f"SolverUIPC cannot simulate a movable shapeless "
-                        f"link and is dropping this joint.",
-                        stacklevel=2,
-                    )
-                continue
+            # Check that both parent and child bodies have ABD geometry.
+            # Body -1 (world frame) is exempt. FREE joints are exempt
+            # (they represent floating root bodies managed separately).
+            joint_name = model.joint_label[j] if j < len(model.joint_label) else "?"
+            missing_geo = False
 
-            # Remap shapeless parent to its shape-bearing fixed-chain
-            # ancestor. ``effective_parent_body`` is what UIPC sees on the
-            # parent side of the constraint; ``parent_body`` stays as the
-            # original Newton index so that pivot/axis computations using
-            # ``body_transforms[parent_body]`` (which is in the original
-            # parent's local frame) remain correct.
-            if parent_body >= 0 and parent_body not in self._mapping.body_geo_slots:
-                effective_parent_body = anchors.get(parent_body, -1)
-            else:
-                effective_parent_body = parent_body
+            if joint_type != JointType.FREE and child_body not in self._mapping.body_geo_slots:
+                child_name = model.body_label[child_body] if child_body < len(model.body_label) else "?"
+                warnings.warn(
+                    f"Joint {j} ({joint_name}): child body {child_body} ({child_name}) has no ABD "
+                    f"geometry (joint type {joint_type.name}); "
+                    f"SolverUIPC is dropping this joint.",
+                    stacklevel=2,
+                )
+                missing_geo = True
+
+            if joint_type != JointType.FREE and parent_body >= 0 and parent_body not in self._mapping.body_geo_slots:
+                parent_name = model.body_label[parent_body] if parent_body < len(model.body_label) else "?"
+                warnings.warn(
+                    f"Joint {j} ({joint_name}): parent body {parent_body} ({parent_name}) has no ABD "
+                    f"geometry (joint type {joint_type.name}); "
+                    f"SolverUIPC is dropping this joint.",
+                    stacklevel=2,
+                )
+                missing_geo = True
+
+            if missing_geo:
+                continue
 
             child_slot = self._mapping.body_geo_slots[child_body]
             child_instance_id = self._mapping.body_instance_ids.get(child_body, 0)
-            parent_slot = self._mapping.body_geo_slots.get(effective_parent_body)
-            parent_instance_id = self._mapping.body_instance_ids.get(effective_parent_body, 0)
+            parent_slot = self._mapping.body_geo_slots.get(parent_body)
+            parent_instance_id = self._mapping.body_instance_ids.get(parent_body, 0)
 
             # Joint anchor and rotation in parent-local and child-local frames
             jp = joint_X_p_np[j]
@@ -631,11 +571,11 @@ class ArticulationBuilder:
             )
         if fixed_joints:
             self._build_fixed_joints_batch(fixed_joints)
+        if ball_joints:
+            self._build_ball_joints_batch(ball_joints, model)
         for jdata in free_joints:
             stc = SoftTransformConstraint()
             stc.apply_to(jdata["child_slot"].geometry())
-        if ball_joints:
-            self._build_ball_joints_batch(ball_joints, model)
 
         # Finalise all articulations that have active joints
         for art in self.articulations.values():
@@ -646,51 +586,68 @@ class ArticulationBuilder:
     # Joint building helpers
     # ------------------------------------------------------------------
 
-    def _get_or_create_anchor(
+    def _create_proxy(
         self,
         name: str,
-        position: np.ndarray,
+        transform: np.ndarray,
+        *,
+        is_fixed: bool = False,
     ) -> SimplicialComplexSlot:
-        """Get or create a fixed anchor body at *position*.
+        """Create a 1-vertex ABD proxy body.
 
-        Used when a revolute or prismatic joint is attached to the world
-        (parent == -1).  Creates a 1-vertex ABD proxy body at the given
-        position via :meth:`AffineBodyConstitution.create_proxy` and returns
-        its geometry slot.  The proxy is much cheaper than a full tetrahedron
-        and already carries ABD attributes, so the constitution does not need
-        to be re-applied.
+        Used for two purposes:
+
+        * **World anchors** (``is_fixed=True``): fixed proxy at the origin
+          serving as the parent side of a world-attached joint constraint.
+        * **Shapeless link proxies** (``is_fixed=False``): dynamic proxy at
+          a shapeless body's pose, constrained to its neighbour by the
+          model's own FIXED joints.
 
         Args:
-            name: Unique name for the anchor object.
-            position: World-frame 3-D position of the anchor [m].
+            name: Unique name for the UIPC object.
+            transform: 4x4 world-frame transform for the proxy.
+            is_fixed: If ``True`` the proxy is marked kinematic.
 
         Returns:
-            The UIPC geometry slot for the anchor body.
+            The UIPC geometry slot for the proxy body.
         """
-        if name in self._anchor_slots:
-            return self._anchor_slots[name]
+        if name in self._proxy_slots:
+            return self._proxy_slots[name]
 
-        # Create a 1-vertex ABD proxy.  Mass / inertia / volume are small but
-        # non-zero; the anchor is marked fixed below so these values only
-        # need to be well-defined, not physically meaningful.
         mass = 1.0
         mass_center = np.zeros(3, dtype=np.float64)
         inertia = np.eye(3, dtype=np.float64) * 1e-6
         volume = 1e-9
         sc = self._abd.create_proxy(self._kappa, mass, mass_center, inertia, volume)
 
-        # Identity transform — the anchor is a fixed 1-vertex proxy whose
-        # sole purpose is to serve as the parent side of a world-attached
-        # joint constraint.  Joint local anchor points (lp0/lp1) are already
-        # expressed in world coordinates when parent == -1, so the anchor
-        # body must sit at the origin to avoid double-applying the pivot.
-        view(sc.transforms())[:] = np.eye(4, dtype=np.float64)
-        # Mark as fixed so it doesn't move
-        view(sc.instances().find(uipc_builtin.is_fixed))[:] = 1  # type: ignore  # pyright: ignore[reportArgumentType]
+        view(sc.transforms())[:] = transform
+
+        if is_fixed:
+            view(sc.instances().find(uipc_builtin.is_fixed))[:] = 1  # type: ignore  # pyright: ignore[reportArgumentType]
+
+        # Apply contact / subscene so the proxy participates in the same
+        # contact group and subscene as other robot bodies.
+        self._contact_elem.apply_to(sc)
+        if self._subscene_elem is not None:
+            self._subscene_elem.apply_to(sc)
 
         obj: Object = self._scene.objects().create(name)
         geo_slot: SimplicialComplexSlot = obj.geometries().create(sc)[0]
-        self._anchor_slots[name] = geo_slot
+        self._proxy_slots[name] = geo_slot
+        return geo_slot
+
+    def _create_shapeless_proxy(self, body_idx: int) -> SimplicialComplexSlot:
+        """Create a proxy for a shapeless body and register it in the mapping."""
+        model = self._model
+        if model.body_q is not None:
+            bq = model.body_q.numpy()[body_idx]
+            tf = newton_transform_to_mat4(wp.transform(bq[:3], bq[3:]))
+        else:
+            tf = np.eye(4, dtype=np.float64)
+
+        geo_slot = self._create_proxy(f"shapeless_proxy_{body_idx}", tf)
+        self._mapping.body_geo_slots[body_idx] = geo_slot
+        self._mapping.body_instance_ids[body_idx] = 0
         return geo_slot
 
     def _build_revolute_joints_batch(
@@ -733,7 +690,7 @@ class ArticulationBuilder:
             c_id: int = jdata["child_instance_id"]
 
             if p_slot is None:
-                p_slot = self._get_or_create_anchor(f"anchor_joint_{j}", parent_pivot)
+                p_slot = self._create_proxy("world_anchor", np.eye(4, dtype=np.float64), is_fixed=True)
                 p_id = 0
 
             qd_start = int(joint_qd_start_np[j])
@@ -888,7 +845,7 @@ class ArticulationBuilder:
             c_id: int = jdata["child_instance_id"]
 
             if p_slot is None:
-                p_slot = self._get_or_create_anchor(f"anchor_joint_{j}", parent_pivot)
+                p_slot = self._create_proxy("world_anchor", np.eye(4, dtype=np.float64), is_fixed=True)
                 p_id = 0
 
             qd_start = int(joint_qd_start_np[j])
@@ -1016,6 +973,7 @@ class ArticulationBuilder:
 
         for jdata in joints:
             j: int = jdata["j"]
+            parent_body: int = jdata["parent_body"]
             parent_pivot: np.ndarray = jdata["parent_pivot"]
             child_pivot: np.ndarray = jdata["child_pivot"]
             p_slot: SimplicialComplexSlot | None = jdata["parent_slot"]
@@ -1023,9 +981,9 @@ class ArticulationBuilder:
             c_slot: SimplicialComplexSlot = jdata["child_slot"]
             c_id: int = jdata["child_instance_id"]
 
-            if p_slot is None:
-                # No parent → mark child instance as fixed directly
-                view(c_slot.geometry().instances().find(uipc_builtin.is_fixed))[c_id] = 1  # pyright: ignore[reportArgumentType]
+            if parent_body == -1:
+                # World-attached FIXED joint → just pin the child directly.
+                view(c_slot.geometry().instances().find(uipc_builtin.is_fixed))[c_id] = 1  # pyright: ignore[reportArgumentType, reportCallIssue]
                 continue
 
             l_positions.append(parent_pivot)
@@ -1078,12 +1036,11 @@ class ArticulationBuilder:
             j: int = jdata["j"]
             p_slot: SimplicialComplexSlot | None = jdata["parent_slot"]
             p_id: int = jdata["parent_instance_id"]
-            parent_pivot: np.ndarray = jdata["parent_pivot"]
             c_slot: SimplicialComplexSlot = jdata["child_slot"]
             c_id: int = jdata["child_instance_id"]
 
             if p_slot is None:
-                p_slot = self._get_or_create_anchor(f"anchor_joint_{j}", parent_pivot)
+                p_slot = self._create_proxy("world_anchor", np.eye(4, dtype=np.float64), is_fixed=True)
                 p_id = 0
 
             # Parent-side local anchor (joint_X_p translation)
@@ -1095,6 +1052,8 @@ class ArticulationBuilder:
             else:
                 r_pos = np.zeros(3, dtype=np.float64)
 
+            self._validate_ball_anchors(j, p_slot, p_id, c_slot, c_id, l_pos, r_pos)
+
             parent_slots.append(p_slot)
             parent_ids.append(p_id)
             child_slots.append(c_slot)
@@ -1103,9 +1062,6 @@ class ArticulationBuilder:
             r_positions.append(r_pos)
             strengths.append(100.0)
             joint_indices.append(j)
-
-        if not child_slots:
-            return
 
         jm = AffineBodySphericalJoint().create_geometry(
             np.array(l_positions, dtype=np.float64),
@@ -1249,6 +1205,50 @@ class ArticulationBuilder:
             )
 
     @staticmethod
+    def _validate_ball_anchors(
+        joint_idx: int,
+        p_slot: SimplicialComplexSlot,
+        p_id: int,
+        c_slot: SimplicialComplexSlot,
+        c_id: int,
+        l_pos: np.ndarray,
+        r_pos: np.ndarray,
+        atol: float = 1e-4,
+    ) -> None:
+        """Validate ball joint: anchor points must coincide in world space.
+
+        Args:
+            joint_idx: Newton joint index (for error messages).
+            p_slot: Parent geometry slot.
+            p_id: Parent instance index.
+            c_slot: Child geometry slot.
+            c_id: Child instance index.
+            l_pos: Parent-local anchor position.
+            r_pos: Child-local anchor position.
+            atol: Absolute tolerance for the comparison.
+
+        Raises:
+            RuntimeError: If the world-space positions do not match.
+        """
+        p_tf = np.array(view(p_slot.geometry().transforms())[p_id], dtype=np.float64)
+        c_tf = np.array(view(c_slot.geometry().transforms())[c_id], dtype=np.float64)
+
+        def to_world(tf: np.ndarray, p: np.ndarray) -> np.ndarray:
+            return (tf @ np.append(p, 1.0))[:3]
+
+        l_world = to_world(p_tf, l_pos)
+        r_world = to_world(c_tf, r_pos)
+        if not np.allclose(l_world, r_world, atol=atol):
+            raise RuntimeError(
+                f"Ball joint {joint_idx}: parent/child anchor "
+                f"mismatch in world space.\n"
+                f"p_tf={p_tf}\n, c_tf={c_tf}\n, "
+                f"l_pos={l_pos}, r_pos={r_pos},\n"
+                f"l_world={l_world}, r_world={r_world}, "
+                f"diff={np.linalg.norm(l_world - r_world):.6f}"
+            )
+
+    @staticmethod
     def _extract_limits(
         j: int,
         joint_qd_start: wp.array,
@@ -1268,8 +1268,8 @@ class ArticulationBuilder:
             if no limit is defined.
         """
         qd_start = int(joint_qd_start.numpy()[j])
-        lower = np.float64(joint_limit_lower.numpy()[qd_start]) if joint_limit_lower is not None else None
-        upper = np.float64(joint_limit_upper.numpy()[qd_start]) if joint_limit_upper is not None else None
+        lower = float(joint_limit_lower.numpy()[qd_start]) if joint_limit_lower is not None else None
+        upper = float(joint_limit_upper.numpy()[qd_start]) if joint_limit_upper is not None else None
         return lower, upper
 
     # ------------------------------------------------------------------

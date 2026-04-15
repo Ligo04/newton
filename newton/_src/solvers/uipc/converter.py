@@ -14,7 +14,8 @@ import numpy as np
 import uipc.builtin as uipc_builtin
 import warp as wp
 from uipc import Quaternion, Transform
-from uipc.geometry import SimplicialComplexSlot
+from uipc.geometry import SimplicialComplex, SimplicialComplexSlot, is_trimesh_closed
+from uipc.geometry import trimesh as uipc_trimesh
 
 from ...core.types import Axis
 from ...geometry import GeoType, Mesh
@@ -320,7 +321,7 @@ def _signed_volume(verts: np.ndarray, faces: np.ndarray) -> float:
     v0 = verts[faces[:, 0]]
     v1 = verts[faces[:, 1]]
     v2 = verts[faces[:, 2]]
-    return np.float64(np.einsum("ij,ij->i", v0, np.cross(v1, v2)).sum() / 6.0)
+    return float(np.einsum("ij,ij->i", v0, np.cross(v1, v2)).sum() / 6.0)
 
 
 def _orient_outward(verts: np.ndarray, faces: np.ndarray) -> np.ndarray:
@@ -332,27 +333,6 @@ def _orient_outward(verts: np.ndarray, faces: np.ndarray) -> np.ndarray:
     if _signed_volume(verts, faces) < 0.0:
         faces = faces[:, [0, 2, 1]].copy()
     return faces
-
-
-def _is_trimesh_closed(faces: np.ndarray) -> bool:
-    """Return True iff every edge of the triangle mesh is shared by exactly two faces.
-
-    UIPC's ABD constitution computes per-body volume via the divergence
-    theorem, which requires a closed (watertight) manifold.  USD-loaded
-    visual/collision meshes are frequently open, so we check before handing
-    them to UIPC and fall back to a convex hull when necessary.
-    """
-    if len(faces) == 0:
-        return False
-    e0 = faces[:, [0, 1]]
-    e1 = faces[:, [1, 2]]
-    e2 = faces[:, [2, 0]]
-    edges = np.vstack([e0, e1, e2])
-    # Canonicalise edge orientation so (a, b) and (b, a) hash identically
-    edges = np.sort(edges, axis=1)
-    view = np.ascontiguousarray(edges).view(np.dtype([("", edges.dtype)] * 2))
-    _, counts = np.unique(view, return_counts=True)
-    return bool(np.all(counts == 2))
 
 
 def _aabb_box_mesh(verts: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -470,7 +450,7 @@ def _weld_vertices(
     return verts[unique_idx], new_faces[valid]
 
 
-def build_body_mesh(model: Model, body_idx: int) -> tuple[np.ndarray, np.ndarray] | None:
+def build_body_mesh(model: Model, body_idx: int) -> tuple[SimplicialComplex, float] | None:
     """Build a merged triangle mesh for a Newton body from its shapes.
 
     Uses Newton's :class:`~newton.Mesh` ``create_*`` factory methods for primitive
@@ -479,7 +459,8 @@ def build_body_mesh(model: Model, body_idx: int) -> tuple[np.ndarray, np.ndarray
     is always a closed manifold suitable for UIPC.
 
     Returns:
-        (vertices, faces) arrays for a closed trimesh, or None if body has no mesh shapes.
+        ``(sc, volume)`` — a :class:`~uipc.geometry.SimplicialComplex` and its
+        absolute mesh volume, or ``None`` if body has no mesh shapes.
     """
     if (
         model.shape_body is None
@@ -529,37 +510,31 @@ def build_body_mesh(model: Model, body_idx: int) -> tuple[np.ndarray, np.ndarray
                 continue
         elif geo_type == GeoType.BOX:
             m = Mesh.create_box(
-                np.float64(scale[0]),
-                np.float64(scale[1]),
-                np.float64(scale[2]),
+                float(scale[0]),
+                float(scale[1]),
+                float(scale[2]),
                 duplicate_vertices=False,
                 compute_inertia=False,
             )
             verts, faces = _mesh_to_vf(m)
             scale_baked = True
         elif geo_type == GeoType.SPHERE:
-            m = Mesh.create_sphere(np.float64(scale[0]), compute_inertia=False)
+            m = Mesh.create_sphere(float(scale[0]), compute_inertia=False)
             verts, faces = _mesh_to_vf(m)
             scale_baked = True
         elif geo_type == GeoType.CAPSULE:
             # Capsule long axis follows ``model.up_axis``.
-            m = Mesh.create_capsule(
-                np.float64(scale[0]), np.float64(scale[1]), up_axis=primitive_up_axis, compute_inertia=False
-            )
+            m = Mesh.create_capsule(float(scale[0]), float(scale[1]), up_axis=primitive_up_axis, compute_inertia=False)
             verts, faces = _mesh_to_vf(m)
             scale_baked = True
         elif geo_type == GeoType.CYLINDER:
             # Cylinder long axis follows ``model.up_axis``.
-            m = Mesh.create_cylinder(
-                np.float64(scale[0]), np.float64(scale[1]), up_axis=primitive_up_axis, compute_inertia=False
-            )
+            m = Mesh.create_cylinder(float(scale[0]), float(scale[1]), up_axis=primitive_up_axis, compute_inertia=False)
             verts, faces = _mesh_to_vf(m)
             scale_baked = True
         elif geo_type == GeoType.CONE:
             # Cone long axis (apex) follows ``model.up_axis``.
-            m = Mesh.create_cone(
-                np.float64(scale[0]), np.float64(scale[1]), up_axis=primitive_up_axis, compute_inertia=False
-            )
+            m = Mesh.create_cone(float(scale[0]), float(scale[1]), up_axis=primitive_up_axis, compute_inertia=False)
             verts, faces = _mesh_to_vf(m)
             scale_baked = True
         elif geo_type == GeoType.PLANE:
@@ -598,30 +573,43 @@ def build_body_mesh(model: Model, body_idx: int) -> tuple[np.ndarray, np.ndarray
     # In both cases we need a positive-volume substitute or UIPC aborts.
     # Minimum absolute volume accepted before we fall back to an AABB box.
     _vol_eps = 1e-12
+    body_name = model.body_label[body_idx] if body_idx < len(model.body_label) else "?"
 
-    def _finalize(v: np.ndarray, f: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    def _make_sc(v: np.ndarray, f: np.ndarray) -> tuple[SimplicialComplex, float]:
+        """Create a :class:`SimplicialComplex` and compute its absolute volume.
+
+        Falls back to an AABB box when the mesh has near-zero volume.
+
+        IMPORTANT: ``uipc.geometry.trimesh`` expects C-contiguous (N, 3)
+        arrays.  Pybind11 silently misreads strided / non-contiguous
+        buffers as column-major, which transposes the mesh and produces
+        a (usually negative-volume) garbage geometry.  Force contiguity.
+        """
         f = _orient_outward(v, f)
-        if abs(_signed_volume(v, f)) < _vol_eps:
+        vol = abs(_signed_volume(v, f))
+        if vol < _vol_eps:
             # Degenerate / coplanar — last-resort AABB box.
             warnings.warn(
-                f"Body {body_idx}: collapsed to AABB box (near-zero volume mesh).",
+                f"Body {body_idx} ({body_name}): collapsed to AABB box (near-zero volume mesh).",
                 stacklevel=3,
             )
             bv, bf = _aabb_box_mesh(v)
-            return np.ascontiguousarray(bv, dtype=np.float64), np.ascontiguousarray(
-                _orient_outward(bv, bf), dtype=np.int32
-            )
-        # IMPORTANT: ``uipc.geometry.trimesh`` expects C-contiguous (N, 3)
-        # arrays.  Pybind11 silently misreads strided / non-contiguous
-        # buffers as column-major, which transposes the mesh and produces
-        # a (usually negative-volume) garbage geometry.  Force contiguity.
-        return np.ascontiguousarray(v, dtype=np.float64), np.ascontiguousarray(f, dtype=np.int32)
+            bf = _orient_outward(bv, bf)
+            vol = abs(_signed_volume(bv, bf))
+            v, f = bv, bf
+        sc = uipc_trimesh(
+            np.ascontiguousarray(v, dtype=np.float64),
+            np.ascontiguousarray(f, dtype=np.int32),
+        )
+        return sc, vol
 
-    if _is_trimesh_closed(welded_faces):
-        return _finalize(welded_verts, welded_faces)
+    # Build SC from the welded mesh and use UIPC's native watertight check.
+    sc, vol = _make_sc(welded_verts, welded_faces)
+    if is_trimesh_closed(sc):
+        return sc, vol
 
     warnings.warn(
-        f"Body {body_idx}: merged mesh is not closed; falling back to convex hull "
+        f"Body {body_idx} ({body_name}): merged mesh is not closed; falling back to convex hull "
         "for UIPC ABD volume computation. Collision fidelity may be reduced.",
         stacklevel=2,
     )
@@ -629,8 +617,8 @@ def build_body_mesh(model: Model, body_idx: int) -> tuple[np.ndarray, np.ndarray
     if hull is None:
         # Qhull rejected the point set (colinear/coplanar) — use AABB box.
         bv, bf = _aabb_box_mesh(welded_verts)
-        return _finalize(bv, _orient_outward(bv, bf))
-    return _finalize(hull[0], hull[1])
+        return _make_sc(bv, _orient_outward(bv, bf))
+    return _make_sc(hull[0], hull[1])
 
 
 def populate_backend_offsets(mapping: UIpcMappingInfo, device: wp.Device) -> None:

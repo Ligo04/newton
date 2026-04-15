@@ -570,12 +570,12 @@ class SolverUIPC(SolverBase):
                 body_element_overrides,
                 no_instance_bodies=ball_joint_bodies,
             )
+            self._rigid_body_builder.build_static_colliders(env_elems[world_index], se)
             self._articulation_builder.build_joints(robo_elems[world_index], joint_range, se)
             if self._cloth_builder.has_cloth:
                 self._cloth_builder.build(env_elems[world_index], particle_range, se)
             if self._deformable_builder.has_deformable:
                 self._deformable_builder.build(env_elems[world_index], particle_range, se)
-            self._rigid_body_builder.build_static_colliders(env_elems[world_index], se)
 
         # Initialize UIPC world and set up state accessors
         self.world.init(scene)
@@ -734,7 +734,7 @@ class SolverUIPC(SolverBase):
             kwargs["keys"] = keys
         kwargs["workspace"] = self._workspace
 
-        result = self._stats.summary_report(**kwargs)
+        result = self._stats.summary_report(**kwargs)  # ty:ignore[invalid-argument-type]  # pyright: ignore[reportArgumentType]
         return str(result) if result is not None else None
 
     @override

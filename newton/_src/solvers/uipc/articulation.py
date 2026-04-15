@@ -334,7 +334,7 @@ class Articulation:
         local = self._joint_to_local[newton_joint_idx]
         pos_np = self.joint_position.numpy()
         vel_np = self.joint_velocity.numpy()
-        curr_angle: np.float64 = view(geo.edges().find("angle"))[edge_idx]
+        curr_angle: float = float(view(geo.edges().find("angle"))[edge_idx])
 
         # Update readback (numpy view writes through to wp.array on CPU)
         if self._step_count > 0:
@@ -357,7 +357,7 @@ class Articulation:
         # space thanks to the ``init_angle`` edge offset, so write the
         # Newton target directly.
         if driving:
-            aim = np.float64(self.target_position.numpy()[local])
+            aim = float(self.target_position.numpy()[local])
             view(geo.edges().find("aim_angle"))[edge_idx] = aim
 
     def prismatic_joint_anim(
@@ -388,7 +388,7 @@ class Articulation:
         local = self._joint_to_local[newton_joint_idx]
         pos_np = self.joint_position.numpy()
         vel_np = self.joint_velocity.numpy()
-        curr_dist = np.float64(view(geo.edges().find("distance"))[edge_idx])
+        curr_dist: float = float(view(geo.edges().find("distance"))[edge_idx])
 
         # Update readback (numpy view writes through to wp.array on CPU)
         if self._step_count > 0:
@@ -407,7 +407,7 @@ class Articulation:
             view(geo.edges().find("external_force"))[edge_idx] = self.target_force.numpy()[local]
 
         if driving:
-            aim = np.float64(self.target_position.numpy()[local])
+            aim = float(self.target_position.numpy()[local])
             view(geo.edges().find("aim_distance"))[edge_idx] = aim
 
     # ------------------------------------------------------------------
@@ -551,9 +551,9 @@ class Articulation:
             geo: SimplicialComplex = self.joint_geo_slots[newton_j].geometry()
 
             if self._joint_is_revolute[newton_j]:
-                curr_val: np.float64 = np.float64(view(geo.edges().find("angle"))[edge_idx])
+                curr_val: float = float(view(geo.edges().find("angle"))[edge_idx])
             else:
-                curr_val = np.float64(view(geo.edges().find("distance"))[edge_idx])
+                curr_val = float(view(geo.edges().find("distance"))[edge_idx])
 
             old_val = pos_np[local]
             if self._step_count > 0:

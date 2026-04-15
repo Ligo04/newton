@@ -223,7 +223,13 @@ class Example:
         self.model = builder.finalize()
         self.state_0 = self.model.state()
 
-        self.solver = newton.solvers.SolverUIPC(self.model, dt=self.sim_dt, logger_level=uipc.Logger.Error)
+        self.solver = newton.solvers.SolverUIPC(
+            self.model,
+            dt=self.sim_dt,
+            logger_level=uipc.Logger.Error,
+            dump_enable=True,
+            dump_path="/tmp/newton_uipc/joints",
+        )
         self.state_1 = self.model.state()
         self.control = self.model.control()
         self.contacts = self.model.contacts()

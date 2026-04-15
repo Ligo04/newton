@@ -14,7 +14,6 @@ import warp as wp
 from uipc import view
 from uipc.constitution import AffineBodyConstitution, Empty
 from uipc.geometry import halfplane, label_surface
-from uipc.geometry import trimesh as uipc_trimesh
 
 from ...geometry import GeoType
 from ...sim import BodyFlags, Model
@@ -69,7 +68,7 @@ def _compute_shape_key(model: Model, body_idx: int) -> tuple[Any, ...] | None:
         geo_type = int(shape_type_np[s])
         if geo_type == int(GeoType.PLANE):
             continue
-        scale = tuple(np.float64(x) for x in shape_scale_np[s])
+        scale = tuple(float(x) for x in shape_scale_np[s])
         tf = shape_transform_np[s].tobytes()
         if geo_type in (int(GeoType.MESH), int(GeoType.CONVEX_MESH)):
             src_id = id(model.shape_source[s])
@@ -208,12 +207,10 @@ class RigidBodyBuilder:
             subscene_elem: Optional UIPC subscene element for multi-world isolation.
         """
         model = self._model
-        mesh_data = build_body_mesh(model, -1)
-        if mesh_data is None:
+        result = build_body_mesh(model, -1)
+        if result is None:
             return
-        verts, faces = mesh_data
-
-        sc = uipc_trimesh(verts, faces)
+        sc, _ = result
         contact_elem.apply_to(sc)
         if subscene_elem is not None:
             subscene_elem.apply_to(sc)
@@ -250,24 +247,6 @@ class RigidBodyBuilder:
             if bstart <= b < bend:
                 self._mapping.body_shapes[b].append(s)
 
-    @staticmethod
-    def _mesh_volume(verts: np.ndarray, faces: np.ndarray) -> float:
-        """Compute the signed volume of a closed triangle mesh.
-
-        Uses the divergence theorem: V = sum_i (v0 · (v1 \\times v2)) / 6.
-
-        Args:
-            verts: Vertex positions, shape ``(N, 3)``.
-            faces: Triangle indices, shape ``(M, 3)``.
-
-        Returns:
-            Absolute volume of the mesh.
-        """
-        v0 = verts[faces[:, 0]]
-        v1 = verts[faces[:, 1]]
-        v2 = verts[faces[:, 2]]
-        return np.float64(abs(np.sum(v0 * np.cross(v1, v2)) / 6.0))
-
     def _resolve_contact_elem(
         self,
         b: int,
@@ -286,21 +265,6 @@ class RigidBodyBuilder:
         if b in free_joint_bodies:
             return actor_elem
         return env_elem
-
-    def _compute_mass_density(
-        self,
-        b: int,
-        verts: np.ndarray,
-        faces: np.ndarray,
-        body_mass_np: np.ndarray | None,
-    ) -> float:
-        """Return the effective mass density for body *b*."""
-        density = self._default_mass_density
-        if body_mass_np is not None:
-            vol = self._mesh_volume(verts, faces)
-            if vol > 1e-12:
-                density = np.float64(body_mass_np[b]) / vol
-        return density
 
     def build_affine_bodies(
         self,
@@ -398,20 +362,17 @@ class RigidBodyBuilder:
             ref = group_bodies[0]
 
             # Build mesh once per group using the representative body
-            mesh_data = build_body_mesh(model, ref.body_idx)
-            if mesh_data is None:
+            result = build_body_mesh(model, ref.body_idx)
+            if result is None:
                 continue
-            verts, faces = mesh_data
+            sc, mesh_vol = result
 
             # Compute per-body mass density (needs mesh volume)
-            mesh_vol = self._mesh_volume(verts, faces)
             for info in group_bodies:
                 if body_mass_np is not None and mesh_vol > 1e-12:
-                    info.mass_density = np.float64(body_mass_np[info.body_idx]) / mesh_vol
+                    info.mass_density = float(body_mass_np[info.body_idx]) / mesh_vol
                 else:
                     info.mass_density = self._default_mass_density
-
-            sc = uipc_trimesh(verts, faces)
             if n > 1:
                 sc.instances().resize(n)
 
