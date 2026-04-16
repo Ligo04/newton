@@ -741,17 +741,27 @@ class SolverUIPC(SolverBase):
     def notify_model_changed(self, flags: int) -> None:
         """Notify the solver that parts of the model were modified.
 
+        Dispatches supported flag bits to dedicated ``_notify_*`` handlers.
+        Unsupported flags trigger a single aggregated warning -- the UIPC
+        backend bakes those properties into scene objects at build time,
+        so the user must recreate the solver to apply them.
+
         Supported flags:
             - :attr:`~newton.SolverNotifyFlags.BODY_PROPERTIES`: push
               ``model.body_q`` and ``model.body_qd`` into the UIPC backend
               for the mapped affine bodies (state reset).
             - :attr:`~newton.SolverNotifyFlags.JOINT_PROPERTIES`: recompute
-              forward kinematics from ``model.joint_q`` and push the
-              resulting body state into UIPC.
+              forward kinematics from ``model.joint_q`` / ``joint_qd`` via
+              :func:`newton.eval_fk` and push the resulting ``body_q`` /
+              ``body_qd`` into UIPC.
+            - :attr:`~newton.SolverNotifyFlags.MODEL_PROPERTIES`: propagate
+              ``model.gravity`` into the live UIPC ``scene.config()``; the
+              new gravity takes effect on the next ``world.advance()``.
 
-        Other flags (``BODY_INERTIAL_PROPERTIES``, ``SHAPE_PROPERTIES``,
-        etc.) are not currently supported and trigger a warning; recreating
-        the solver is the recommended workaround for those.
+        Unsupported flags (aggregated into a single warning):
+            ``JOINT_DOF_PROPERTIES``, ``BODY_INERTIAL_PROPERTIES``,
+            ``SHAPE_PROPERTIES``, ``CONSTRAINT_PROPERTIES``,
+            ``TENDON_PROPERTIES``, ``ACTUATOR_PROPERTIES``.
 
         .. note::
 
@@ -772,31 +782,97 @@ class SolverUIPC(SolverBase):
             # model's current state when it runs.
             return
 
-        state_mask = SolverNotifyFlags.BODY_PROPERTIES | SolverNotifyFlags.JOINT_PROPERTIES
+        # Unsupported flags: emit one aggregated warning. UIPC bakes these
+        # properties into scene objects at build time (or has no
+        # equivalent concept), so a runtime update is not possible -- the
+        # user must recreate the solver.
         unsupported_mask = (
-            SolverNotifyFlags.BODY_INERTIAL_PROPERTIES
+            SolverNotifyFlags.JOINT_DOF_PROPERTIES
+            | SolverNotifyFlags.BODY_INERTIAL_PROPERTIES
             | SolverNotifyFlags.SHAPE_PROPERTIES
-            | SolverNotifyFlags.JOINT_DOF_PROPERTIES
+            | SolverNotifyFlags.CONSTRAINT_PROPERTIES
+            | SolverNotifyFlags.TENDON_PROPERTIES
+            | SolverNotifyFlags.ACTUATOR_PROPERTIES
         )
-
         if flags & unsupported_mask:
             warnings.warn(
-                "SolverUIPC.notify_model_changed: inertial / shape / joint_dof updates are "
-                "not supported. Recreate the solver if these properties have changed.",
+                "SolverUIPC.notify_model_changed: joint-DOF, body-inertial, shape, "
+                "constraint, tendon, and actuator property updates are not supported "
+                "by the UIPC backend. Recreate the solver if these properties changed.",
                 stacklevel=2,
             )
 
-        if flags & state_mask == 0:
+        # Supported flags: dispatch each to its dedicated handler.
+        # JOINT_PROPERTIES and BODY_PROPERTIES cooperate via
+        # ``_state_dirty`` so only a single _push_body_state_to_uipc()
+        # runs even when both flags are set together.
+        self._state_dirty = False
+
+        if flags & SolverNotifyFlags.JOINT_PROPERTIES:
+            self._notify_joint_properties()
+        if flags & SolverNotifyFlags.BODY_PROPERTIES:
+            self._notify_body_properties()
+        if flags & SolverNotifyFlags.MODEL_PROPERTIES:
+            self._notify_model_properties()
+
+        if self._state_dirty:
+            self._push_body_state_to_uipc()
+        self._state_dirty = False
+
+    # ------------------------------------------------------------------
+    # Per-flag notify_model_changed handlers (supported flags only)
+    # ------------------------------------------------------------------
+
+    def _notify_joint_properties(self) -> None:
+        """Handle :attr:`~newton.SolverNotifyFlags.JOINT_PROPERTIES`.
+
+        Recomputes forward kinematics with :func:`newton.eval_fk` so that
+        ``model.body_q`` / ``model.body_qd`` reflect the updated
+        ``model.joint_q`` / ``joint_qd`` / ``joint_X_p`` / ``joint_X_c``,
+        then flags the rigid-body state buffers for a push into UIPC.
+
+        Uses a single on-device Warp launch over all articulations, which
+        refreshes ``body_q`` and ``body_qd`` together from the new joint
+        coordinates and velocities.
+        """
+        model = self.model
+        state = self.model.state()
+        if model.joint_q is not None and model.joint_qd is not None:
+            newton.eval_fk(model, model.joint_q, model.joint_qd, state)
+        self._state_dirty = True
+
+    def _notify_body_properties(self) -> None:
+        """Handle :attr:`~newton.SolverNotifyFlags.BODY_PROPERTIES`.
+
+        Flags the rigid-body state buffers for a push into UIPC so that
+        ``model.body_q`` / ``model.body_qd`` are mirrored by the backend.
+        """
+        self._state_dirty = True
+
+    def _notify_model_properties(self) -> None:
+        """Handle :attr:`~newton.SolverNotifyFlags.MODEL_PROPERTIES`.
+
+        Propagates ``model.gravity`` into the live UIPC ``scene.config()``.
+        UIPC expects gravity as a ``3x1`` column-vector-of-lists, matching
+        the format used during :meth:`initialize`. The update takes effect
+        on the next ``world.advance()``.
+
+        Other global model properties (e.g. time step, solver tolerances)
+        are deliberately not forwarded here -- changing ``dt`` mid-run is
+        unsafe for IPC line-search tuning, and UIPC tolerances are exposed
+        through :meth:`configure_scene` at construction time.
+        """
+        model = self.model
+        if model.gravity is None:
             return
 
-        # Recompute FK so that model.body_q / self._articulation_builder._body_transforms
-        # reflect the new model.joint_q before we push state into UIPC.
-        if flags & SolverNotifyFlags.JOINT_PROPERTIES:
-            # Full-model FK sweep (joint_range=None) updates all child body
-            # transforms and flushes them back to model.body_q.
-            self._articulation_builder.compute_fk()
-
-        self._push_body_state_to_uipc()
+        gravity_np = model.gravity.numpy().flatten()
+        scene_cfg = self.scene.config()
+        scene_cfg["gravity"] = [  # ty:ignore[invalid-assignment]
+            [float(gravity_np[0])],
+            [float(gravity_np[1])],
+            [float(gravity_np[2])],
+        ]
 
     def _push_body_state_to_uipc(self) -> None:
         """Push ``model.body_q`` / ``model.body_qd`` into the UIPC backend.

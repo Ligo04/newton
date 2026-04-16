@@ -97,6 +97,11 @@
 - Export `ViewerBase` from `newton.viewer` public API
 - Add `custom_attributes` argument to `ModelBuilder.add_shape_convex_hull()`
 - Add RJ45 plug-socket insertion example with SDF contacts, latch joint, and interactive gizmo
+- Add `TRIANGLE_PRISM` support-function type for heightfield triangles, extruding 1 m along the heightfield's local -Z so GJK/MPR naturally resolves shapes on the back side
+- Add `ViewerGL.log_scalar()` for live scalar time-series plots in the viewer
+- Add `deterministic` flag to `CollisionPipeline` and `NarrowPhase` for GPU-thread-scheduling-independent contact ordering via radix sort and deterministic fingerprint tiebreaking in contact reduction
+- Add `ViewerBase.log_arrows()` for arrow rendering (wide line + arrowhead) in the GL viewer with a dedicated geometry shader
+- Add `MODEL_PROPERTIES` support to `SolverUIPC.notify_model_changed()` -- runtime `model.gravity` changes are now propagated into the live UIPC `scene.config()`. `JOINT_PROPERTIES` / `BODY_PROPERTIES` / `MODEL_PROPERTIES` are routed through dedicated `_notify_*` handlers; `JOINT_PROPERTIES` now runs FK via `newton.eval_fk` (single on-device Warp launch) so `body_qd` is refreshed alongside `body_q`. All other flags (joint-DOF, body-inertial, shape, constraint, tendon, actuator) remain unsupported and share a single aggregated warning
 
 ### Changed
 
@@ -148,6 +153,7 @@
 
 - Remove `Heightfield.finalize()` and stop storing raw pointers for heightfields in `Model.shape_source_ptr`; heightfield collision data is accessed via `Model.shape_heightfield_index` / `Model.heightfield_data` / `Model.heightfield_elevations`
 - Remove `robot_humanoid` example in favor of `basic_plotting` which uses the same humanoid model with diagnostics visualization
+- Remove unused `ArticulationBuilder.compute_fk()` and its private helpers (`_apply_fk_for_joint`, `_compute_joint_transform`, `_body_transforms`, `_mat4_to_transform`) from the UIPC backend. `SolverUIPC.notify_model_changed` now uses `newton.eval_fk` directly; UIPC `build_joints` already reads joint pivots from `model.joint_X_p` / `joint_X_c` without this numpy FK pass
 
 ### Fixed
 
