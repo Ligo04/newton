@@ -95,7 +95,7 @@ class Example:
             return {cube_body_idx: cube_elem}
 
         self.solver = newton.solvers.SolverUIPC(
-            self.model, dt=self.sim_dt, logger_level=uipc.Logger.Warn, require_time_report=True
+            self.model, dt=self.sim_dt, logger_level=uipc.Logger.Warn, require_profile=True
         )
         self.solver.set_contact(True)
         self.solver.configure_contact_tabular(_contact_tabular_fn)

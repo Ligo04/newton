@@ -225,10 +225,10 @@ class Example:
 
         self.solver = newton.solvers.SolverUIPC(
             self.model,
+            workspace="/tmp/newton_uipc/joints",
             dt=self.sim_dt,
             logger_level=uipc.Logger.Error,
             dump_enable=True,
-            dump_path="/tmp/newton_uipc/joints",
         )
         self.state_1 = self.model.state()
         self.control = self.model.control()

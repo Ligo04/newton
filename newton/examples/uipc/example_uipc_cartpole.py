@@ -52,10 +52,10 @@ class Example:
 
         self.solver = newton.solvers.SolverUIPC(
             self.model,
+            workspace="/tmp/newton_uipc/cartpole",
             dt=self.sim_dt,
             logger_level=uipc.Logger.Info,
             dump_enable=True,
-            dump_path="/tmp/newton_uipc/cartpole",
         )
 
         self.state_1 = self.model.state()

@@ -5,8 +5,10 @@
 
 from __future__ import annotations
 
+import atexit
 import os
 import warnings
+import weakref
 from collections.abc import Callable
 from typing import Any
 
@@ -122,15 +124,17 @@ class SolverUIPC(SolverBase):
         default_mass_density: float = 1000.0,
         logger_level=ULogger.Warn,
         dump_enable: bool = False,
-        dump_path: str | None = None,
-        require_time_report: bool = False,
+        require_profile: bool = False,
     ):
         """Create a UIPC solver instance from a Newton model.
 
         Args:
             model: The Newton model to simulate.
             backend: UIPC backend name (default: ``"cuda"``).
-            workspace: Working directory for UIPC engine output.
+            workspace: Working directory for UIPC engine output. Also used
+                as the destination for surface-mesh dumps when
+                ``dump_enable=True`` and for performance reports written by
+                :meth:`save_performance_report`.
             dt: Time step [s]. UIPC uses a fixed time step configured here.
             scene_config: Optional UIPC scene configuration dict passed directly
                 to ``uipc.Scene()``. If ``None``, uses ``Scene.default_config()``
@@ -141,9 +145,13 @@ class SolverUIPC(SolverBase):
                 ``uipc.Logger.Error``, ``uipc.Logger.Warn``, ``uipc.Logger.Info``,
                 ``uipc.Logger.Debug``, or ``uipc.Logger.Trace``.
                 Defaults to ``uipc.Logger.Critical`` to suppress UIPC console spam.
-            require_time_report: Enable UIPC timer collection for performance
+            require_profile: Enable UIPC timer collection for performance
                 reports. When ``True``, each :meth:`step` records timer data
                 that can later be exported via :meth:`save_performance_report`.
+                Additionally, an ``atexit`` hook is registered that invokes
+                :meth:`save_performance_report` once on normal interpreter
+                shutdown, so users do not need to call it explicitly. The
+                hook is a no-op if the report was already saved manually.
         """
         super().__init__(model=model)
         self.import_uipc()
@@ -160,7 +168,6 @@ class SolverUIPC(SolverBase):
         self._kappa = kappa
         self._default_mass_density = default_mass_density
         self._dump_enable = dump_enable
-        self._dump_path = dump_path if dump_path is not None else workspace
 
         # Scene config: start from UIPC defaults, apply Newton model overrides.
         if scene_config is None:
@@ -180,7 +187,35 @@ class SolverUIPC(SolverBase):
         self._scene_config = scene_config
 
         # Performance statistics collector (only when enabled)
-        self._stats: USimulationStats | None = USimulationStats() if require_time_report else None
+        self._stats: USimulationStats | None = USimulationStats() if require_profile else None
+        self._auto_report_saved: bool = False
+
+        # Register an atexit hook so the performance report is written on
+        # normal interpreter shutdown even if the user forgets to call
+        # save_performance_report() explicitly. A weakref avoids keeping the
+        # solver (and its CUDA resources) alive solely for the hook.
+        if require_profile:
+            self_ref = weakref.ref(self)
+
+            def _auto_save_performance_report() -> None:
+                solver = self_ref()
+                if solver is None:
+                    return
+                if solver._auto_report_saved:
+                    return
+                if solver._stats is None or solver._stats.num_frames == 0:
+                    return
+                try:
+                    solver.save_performance_report()
+                except Exception as exc:
+                    warnings.warn(
+                        f"SolverUIPC atexit: save_performance_report() failed: {exc}",
+                        stacklevel=1,
+                    )
+                finally:
+                    solver._auto_report_saved = True
+
+            atexit.register(_auto_save_performance_report)
 
         # User-registered callbacks (set via configure_* methods)
         self._contact_tabular_fn: Callable | None = None
@@ -649,7 +684,7 @@ class SolverUIPC(SolverBase):
 
         # Dump surface geometry before physics advance
         if self._dump_enable:
-            self.export_surface_obj(self._dump_path)
+            self.export_surface_obj(self._workspace)
 
         # Phase 2: Advance UIPC (animator callbacks fire here)
         self.world.advance()
@@ -714,7 +749,7 @@ class SolverUIPC(SolverBase):
         """
         if self._stats is None:
             warnings.warn(
-                "Time report not enabled — set require_time_report=True when constructing SolverUIPC.",
+                "Time report not enabled — set require_profile=True when constructing SolverUIPC.",
                 stacklevel=2,
             )
             return None
@@ -735,7 +770,15 @@ class SolverUIPC(SolverBase):
         kwargs["workspace"] = self._workspace
 
         result = self._stats.summary_report(**kwargs)  # ty:ignore[invalid-argument-type]  # pyright: ignore[reportArgumentType]
-        return str(result) if result is not None else None
+        self._auto_report_saved = True
+        result_str = str(result) if result is not None else None
+        if result_str is not None:
+            # Print to stdout so users can see where the report landed even
+            # when this method is invoked implicitly (e.g. from atexit hooks
+            # or NewtonManager.clear() teardown). flush=True guards against
+            # buffering when called late in interpreter shutdown.
+            print(f"[SolverUIPC] Performance report saved to: {result_str}", flush=True)
+        return result_str
 
     @override
     def notify_model_changed(self, flags: int) -> None:
