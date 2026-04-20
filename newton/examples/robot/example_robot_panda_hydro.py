@@ -352,6 +352,28 @@ class Example:
         )
         wp.copy(self.control.joint_target_pos, self.joint_targets_2d.flatten())
 
+        # Debug: print per-joint curr / target (world 0 only, one joint per line).
+        # Revolute → degrees; prismatic → meters. Non-1-DoF joints are skipped.
+        targets_np = self.joint_targets_2d.numpy()[0]
+        curr_np = self.state_0.joint_q.numpy().reshape(self.world_count, -1)[0]
+        joint_type_np = self.model.joint_type.numpy()
+        q_start_np = self.model.joint_q_start.numpy()
+        print(f"[panda_hydro t={self.sim_time:.3f}] wp={self.current_waypoint}")
+        for j, lbl in enumerate(self.model.joint_label):
+            jtype = int(joint_type_np[j])
+            q_idx = int(q_start_np[j])
+            if q_idx >= targets_np.shape[0]:
+                break
+            short = lbl.split("/")[-1]
+            if jtype == int(newton.JointType.REVOLUTE):
+                curr = np.degrees(float(curr_np[q_idx]))
+                tgt = np.degrees(float(targets_np[q_idx]))
+                print(f"  {short}: curr={curr:+8.3f} deg  target={tgt:+8.3f} deg  diff={tgt - curr:+7.3f}")
+            elif jtype == int(newton.JointType.PRISMATIC):
+                curr = float(curr_np[q_idx])
+                tgt = float(targets_np[q_idx])
+                print(f"  {short}: curr={curr:+8.4f} m    target={tgt:+8.4f} m    diff={tgt - curr:+7.4f}")
+
         if self.time_in_waypoint >= self.waypoints[self.current_waypoint][1]:
             self.current_waypoint = (self.current_waypoint + 1) % len(self.waypoints)
             self.time_in_waypoint = 0.0
@@ -504,13 +526,15 @@ class Example:
             wps = []
             cup_pos_higher = wp.vec3([self.cup_pos[0] + self.place_offset, self.cup_pos[1], self.z_rest])
             cup_pos_lower = wp.vec3([self.cup_pos[0] + self.place_offset, self.cup_pos[1], self.z_rest - 0.1])
-            wps.extend([
-                [cup_pos_higher, 2.0, grasp_pos, rot_hand],
-                [cup_pos_higher, 2.0, loose_pos, rot_hand],
-                [cup_pos_higher, 1.0, loose_pos, rot_hand],
-                [cup_pos_lower, 1.0, loose_pos, rot_hand],
-                [cup_pos_lower, 1.0, 0.0, rot_hand],
-            ])
+            wps.extend(
+                [
+                    [cup_pos_higher, 2.0, grasp_pos, rot_hand],
+                    [cup_pos_higher, 2.0, loose_pos, rot_hand],
+                    [cup_pos_higher, 1.0, loose_pos, rot_hand],
+                    [cup_pos_lower, 1.0, loose_pos, rot_hand],
+                    [cup_pos_lower, 1.0, 0.0, rot_hand],
+                ]
+            )
             self.waypoints.extend(wps)
 
     @staticmethod

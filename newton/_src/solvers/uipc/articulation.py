@@ -15,6 +15,7 @@ from typing import Any
 import numpy as np
 import warp as wp
 from uipc import view
+from uipc.core import Animation
 from uipc.geometry import SimplicialComplex, SimplicialComplexSlot
 
 from ...sim import JointTargetMode, JointType
@@ -254,7 +255,7 @@ class Articulation:
         Must be called after all joints are registered via
         :meth:`register_joint`.
         """
-        J = self.num_active_joints
+        num_activate_joints = self.num_active_joints
         device = self._device
 
         # -- Mapping arrays (on solver device) -----------------------------
@@ -272,22 +273,44 @@ class Articulation:
         self._local_qd_start_wp = wp.array(qd_starts, dtype=wp.int32, device=device)
 
         # -- Animator-facing CPU arrays ------------------------------------
-        self.joint_position = wp.zeros(J, dtype=wp.float64, device="cpu")
-        self.joint_velocity = wp.zeros(J, dtype=wp.float64, device="cpu")
-        self.target_position = wp.zeros(J, dtype=wp.float64, device="cpu")
-        self.target_velocity = wp.zeros(J, dtype=wp.float64, device="cpu")
-        self.target_force = wp.zeros(J, dtype=wp.float64, device="cpu")
-        self.is_constrained = wp.zeros(J, dtype=wp.int32, device="cpu")
-        self.is_force_constrained = wp.zeros(J, dtype=wp.int32, device="cpu")
+        self.joint_position = wp.zeros(num_activate_joints, dtype=wp.float64, device="cpu")
+        self.joint_velocity = wp.zeros(num_activate_joints, dtype=wp.float64, device="cpu")
+        self.target_position = wp.zeros(num_activate_joints, dtype=wp.float64, device="cpu")
+        self.target_velocity = wp.zeros(num_activate_joints, dtype=wp.float64, device="cpu")
+        self.target_force = wp.zeros(num_activate_joints, dtype=wp.float64, device="cpu")
+        self.is_constrained = wp.zeros(num_activate_joints, dtype=wp.int32, device="cpu")
+        self.is_force_constrained = wp.zeros(num_activate_joints, dtype=wp.int32, device="cpu")
 
         # -- Device-side mirrors for kernel I/O ----------------------------
-        self._joint_position_dev = wp.zeros(J, dtype=wp.float64, device=device)
-        self._joint_velocity_dev = wp.zeros(J, dtype=wp.float64, device=device)
-        self._target_position_dev = wp.zeros(J, dtype=wp.float64, device=device)
-        self._target_velocity_dev = wp.zeros(J, dtype=wp.float64, device=device)
-        self._target_force_dev = wp.zeros(J, dtype=wp.float64, device=device)
-        self._is_constrained_dev = wp.zeros(J, dtype=wp.int32, device=device)
-        self._is_force_constrained_dev = wp.zeros(J, dtype=wp.int32, device=device)
+        self._joint_position_dev = wp.zeros(num_activate_joints, dtype=wp.float64, device=device)
+        self._joint_velocity_dev = wp.zeros(num_activate_joints, dtype=wp.float64, device=device)
+        self._target_position_dev = wp.zeros(num_activate_joints, dtype=wp.float64, device=device)
+        self._target_velocity_dev = wp.zeros(num_activate_joints, dtype=wp.float64, device=device)
+        self._target_force_dev = wp.zeros(num_activate_joints, dtype=wp.float64, device=device)
+        self._is_constrained_dev = wp.zeros(num_activate_joints, dtype=wp.int32, device=device)
+        self._is_force_constrained_dev = wp.zeros(num_activate_joints, dtype=wp.int32, device=device)
+
+    def seed_initial_targets(self, joint_q_np: np.ndarray) -> None:
+        """Seed ``target_position`` from ``model.joint_q`` at build time.
+
+        UIPC's animator may fire once during ``world.init(scene)`` before
+        :meth:`~SolverUIPC.step` has a chance to call ``cache_control``.
+        Without seeding, ``target_position`` reads as zero on that first
+        callback and UIPC drives the joint toward ``aim = 0`` (with the
+        ``-init_q`` edge offset, that collapses prismatic gripper fingers
+        to their fully-closed state before step 0).
+
+        Args:
+            joint_q_np: Host-side view of ``model.joint_q`` indexed by
+                ``q_start`` that was recorded during ``register_joint``.
+        """
+        if self.target_position is None:
+            return
+        target_np = self.target_position.numpy()
+        for newton_idx in self.active_joint_indices:
+            local = self._joint_to_local[newton_idx]
+            q_start = self._joint_q_start[newton_idx]
+            target_np[local] = float(joint_q_np[q_start])
 
     def increment_step(self) -> None:
         """Increment internal step counter (call once per simulation step)."""
@@ -307,6 +330,7 @@ class Articulation:
 
     def revolute_joint_anim(
         self,
+        info: Animation.UpdateInfo,
         geo: SimplicialComplex,
         newton_joint_idx: int,
         edge_idx: int = 0,
@@ -318,6 +342,10 @@ class Articulation:
         back into the geometry based on the cached control mode.
 
         Args:
+            info: UIPC animation update info for this dispatch (frame
+                number, substep, etc.). The per-callback ``geo`` is
+                extracted once in the caller and passed in separately
+                to avoid re-querying the geometry slot per joint.
             geo: UIPC geometry object (from ``info.geo_slots()[0].geometry()``).
             newton_joint_idx: Newton joint index.
             edge_idx: Edge index within the batched linemesh.
@@ -334,7 +362,12 @@ class Articulation:
         local = self._joint_to_local[newton_joint_idx]
         pos_np = self.joint_position.numpy()
         vel_np = self.joint_velocity.numpy()
-        curr_angle: float = float(view(geo.edges().find("angle"))[edge_idx])
+
+        # UIPC's ``angle`` edge attribute reports rotation with the opposite
+        # sign to Newton's joint-angle convention. Driving works correctly
+        # (UIPC physically moves the joint to Newton's target), but the
+        # readback is sign-flipped, so negate on read-back.
+        curr_angle: float = float(view(geo.edges().find("angle"))[edge_idx])  # ty:ignore[no-matching-overload]  # pyright: ignore[reportArgumentType]
 
         # Update readback (numpy view writes through to wp.array on CPU)
         if self._step_count > 0:
@@ -345,23 +378,33 @@ class Articulation:
         driving = bool(self.is_constrained.numpy()[local])
         is_force_constrained = bool(self.is_force_constrained.numpy()[local])
         force_only = is_force_constrained and not driving
+        external_torque = self.target_force.numpy()[local]
+        aim_angle = self.target_position.numpy()[local]
 
-        view(geo.edges().find("driving/is_constrained"))[edge_idx] = int(driving)
-        view(geo.edges().find("external_torque/is_constrained"))[edge_idx] = int(force_only)
+        view(geo.edges().find("driving/is_constrained"))[edge_idx] = int(driving)  # ty:ignore[no-matching-overload]  # pyright: ignore[reportArgumentType]
+        view(geo.edges().find("external_torque/is_constrained"))[edge_idx] = int(force_only)  # ty:ignore[no-matching-overload]  # pyright: ignore[reportArgumentType]
 
         # Force/torque control
         if force_only:
-            view(geo.edges().find("external_torque"))[edge_idx] = self.target_force.numpy()[local]
+            view(geo.edges().find("external_torque"))[edge_idx] = external_torque  # ty:ignore[no-matching-overload]  # pyright: ignore[reportArgumentType]
 
         # Position/velocity driving — ``aim_angle`` is in Newton absolute
         # space thanks to the ``init_angle`` edge offset, so write the
         # Newton target directly.
         if driving:
-            aim = float(self.target_position.numpy()[local])
-            view(geo.edges().find("aim_angle"))[edge_idx] = aim
+            view(geo.edges().find("aim_angle"))[edge_idx] = aim_angle  # ty:ignore[no-matching-overload]  # pyright: ignore[reportArgumentType]
+
+        # curr_deg = math.degrees(curr_angle)
+        # tgt_deg = math.degrees(aim_angle)
+        # print(
+        #     f"[uipc_debug][{self.name}] frame={info.frame()}  "
+        #     f"revolute[{newton_joint_idx}]: "
+        #     f"curr={curr_deg:+8.3f} deg  target={tgt_deg:+8.3f} deg  diff={tgt_deg - curr_deg:+7.3f}"
+        # )
 
     def prismatic_joint_anim(
         self,
+        info: Animation.UpdateInfo,
         geo: SimplicialComplex,
         newton_joint_idx: int,
         edge_idx: int = 0,
@@ -372,6 +415,8 @@ class Articulation:
         distance / aim_distance attributes.
 
         Args:
+            info: UIPC animation update info for this dispatch (frame
+                number, substep, etc.).
             geo: UIPC geometry object (from ``info.geo_slots()[0].geometry()``).
             newton_joint_idx: Newton joint index.
             edge_idx: Edge index within the batched linemesh.
@@ -388,7 +433,7 @@ class Articulation:
         local = self._joint_to_local[newton_joint_idx]
         pos_np = self.joint_position.numpy()
         vel_np = self.joint_velocity.numpy()
-        curr_dist: float = float(view(geo.edges().find("distance"))[edge_idx])
+        curr_dist: float = float(view(geo.edges().find("distance"))[edge_idx])  # ty:ignore[no-matching-overload]  # pyright: ignore[reportArgumentType]
 
         # Update readback (numpy view writes through to wp.array on CPU)
         if self._step_count > 0:
@@ -399,16 +444,23 @@ class Articulation:
         driving = bool(self.is_constrained.numpy()[local])
         is_force_constrained = bool(self.is_force_constrained.numpy()[local])
         force_only = is_force_constrained and not driving
+        external_force = self.target_force.numpy()[local]
+        aim_distance = self.target_position.numpy()[local]
 
-        view(geo.edges().find("driving/is_constrained"))[edge_idx] = int(driving)
-        view(geo.edges().find("external_force/is_constrained"))[edge_idx] = int(force_only)
+        view(geo.edges().find("driving/is_constrained"))[edge_idx] = int(driving)  # ty:ignore[no-matching-overload]  # pyright: ignore[reportArgumentType]
+        view(geo.edges().find("external_force/is_constrained"))[edge_idx] = int(force_only)  # ty:ignore[no-matching-overload]  # pyright: ignore[reportArgumentType]
 
         if force_only:
-            view(geo.edges().find("external_force"))[edge_idx] = self.target_force.numpy()[local]
+            view(geo.edges().find("external_force"))[edge_idx] = external_force  # ty:ignore[no-matching-overload]  # pyright: ignore[reportArgumentType]
 
         if driving:
-            aim = float(self.target_position.numpy()[local])
-            view(geo.edges().find("aim_distance"))[edge_idx] = aim
+            view(geo.edges().find("aim_distance"))[edge_idx] = aim_distance  # ty:ignore[no-matching-overload]  # pyright: ignore[reportArgumentType]
+
+        # print(
+        #     f"[uipc_debug][{self.name}] frame={info.frame()}  "
+        #     f"prismatic[{newton_joint_idx}]: "
+        #     f"curr={curr_dist:+8.4f} m    target={aim_distance:+8.4f} m    diff={aim_distance - curr_dist:+7.4f}"
+        # )
 
     # ------------------------------------------------------------------
     # Per-step control caching & state readback
@@ -551,6 +603,8 @@ class Articulation:
             geo: SimplicialComplex = self.joint_geo_slots[newton_j].geometry()
 
             if self._joint_is_revolute[newton_j]:
+                # Negate to compensate for UIPC's opposite-sign angle convention
+                # (see ``revolute_joint_anim`` for details).
                 curr_val: float = float(view(geo.edges().find("angle"))[edge_idx])
             else:
                 curr_val = float(view(geo.edges().find("distance"))[edge_idx])

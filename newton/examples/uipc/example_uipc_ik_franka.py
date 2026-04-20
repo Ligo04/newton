@@ -62,32 +62,16 @@ class Example:
         # ------------------------------------------------------------------
         # Build the Franka FR3 arm.
         # ------------------------------------------------------------------
-        builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
-        builder.default_shape_cfg.ke = 2.0e3
-        builder.default_shape_cfg.kd = 1.0e2
-        builder.default_shape_cfg.mu = 0.75
-        builder.default_shape_cfg.margin = 0.005
-        builder.default_shape_cfg.gap = 0.01
+        franka = newton.ModelBuilder(up_axis=newton.Axis.Z)
 
-        panda_first_body = builder.body_count
-        builder.add_urdf(
+        franka.add_urdf(
             str(newton.utils.download_asset("franka_emika_panda") / "urdf/fr3_franka_hand.urdf"),
             xform=wp.transform((0.0, 0.0, 0.05), wp.quat_identity()),
             floating=False,
-            enable_self_collisions=False,
-            parse_visuals_as_colliders=False,
         )
 
-        # Bond the ``manipulation_objects/pad`` mesh onto each finger BEFORE
-        # the convex-hull pass. The bare URDF fingertip collision meshes are
-        # very thin — after convex-hull approximation they still produce
-        # well-formed ABD bodies now that SolverUIPC correctly ties the
-        # wrist chain together (see ``_compute_shape_body_anchors`` in
-        # ``articulation_builder.py``), but the pad mesh gives grasps a much
-        # larger contact patch, which is what this example actually wants.
-        # This matches what ``example_uipc_panda_hydro`` does.
         def find_body(name: str) -> int:
-            return next(i for i, lbl in enumerate(builder.body_label) if lbl.endswith(f"/{name}"))
+            return next(i for i, lbl in enumerate(franka.body_label) if lbl.endswith(f"/{name}"))
 
         left_finger_idx = find_body("fr3_leftfinger")
         right_finger_idx = find_body("fr3_rightfinger")
@@ -106,12 +90,8 @@ class Example:
             wp.vec3(0.0, 0.005, 0.045),
             wp.quat_from_axis_angle(wp.vec3(1.0, 0.0, 0.0), -np.pi),
         )
-        builder.add_shape_mesh(body=left_finger_idx, mesh=pad_mesh, xform=pad_xform)
-        builder.add_shape_mesh(body=right_finger_idx, mesh=pad_mesh, xform=pad_xform)
-
-        # Convex-hull every panda body so UIPC ABD gets closed manifolds.
-        panda_shape_indices = [s for s, b in enumerate(builder.shape_body) if b >= panda_first_body]
-        builder.approximate_meshes("convex_hull", shape_indices=panda_shape_indices, keep_visual_shapes=True)
+        franka.add_shape_mesh(body=left_finger_idx, mesh=pad_mesh, xform=pad_xform)
+        franka.add_shape_mesh(body=right_finger_idx, mesh=pad_mesh, xform=pad_xform)
 
         # Initial joint configuration (matches example_uipc_panda_hydro).
         init_q = [
@@ -123,21 +103,21 @@ class Example:
             2.3922248e00,
             7.8549200e-01,
         ]
-        builder.joint_q[:9] = [*init_q, 0.04, 0.04]
+        franka.joint_q[:9] = [*init_q, 0.04, 0.04]
 
         for d in range(9):
-            builder.joint_target_pos[d] = builder.joint_q[d]
-            builder.joint_target_ke[d] = 650.0
-            builder.joint_target_kd[d] = 100.0
-            builder.joint_target_mode[d] = int(JointTargetMode.POSITION)
-            builder.joint_armature[d] = 1e-2 if d < 7 else 5e-2
+            franka.joint_target_pos[d] = franka.joint_q[d]
+            franka.joint_target_ke[d] = 650.0
+            franka.joint_target_kd[d] = 100.0
+            franka.joint_target_mode[d] = int(JointTargetMode.POSITION)
+            franka.joint_armature[d] = 1e-2 if d < 7 else 5e-2
 
-        builder.add_ground_plane()
+        franka.add_ground_plane()
 
         # ------------------------------------------------------------------
         # Finalize model and UIPC solver.
         # ------------------------------------------------------------------
-        self.model = builder.finalize()
+        self.model = franka.finalize()
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
         self.control = self.model.control()
@@ -146,7 +126,7 @@ class Example:
         self.solver = newton.solvers.SolverUIPC(
             self.model,
             dt=self.sim_dt,
-            logger_level=uipc.Logger.Info,
+            logger_level=uipc.Logger.Warn,
         )
         self.solver.set_contact(True)
         self.solver.initialize()
@@ -177,7 +157,7 @@ class Example:
         # IK setup — single-problem solver targeting ``fr3_hand``, which
         # matches the convention used by ``example_uipc_panda_hydro``. The
         # wrist chain (``link7 → link8 → fr3_hand``) now behaves correctly
-        # under UIPC because ``articulation_builder._compute_shape_body_anchors``
+        # under UIPC because ``articulation_franka._compute_shape_body_anchors``
         # collapses the shapeless ``fr3_link8`` into its nearest ABD-bearing
         # ancestor, so the gizmo-driven IK solution is actually tracked by
         # the physics.
@@ -193,7 +173,7 @@ class Example:
         )
         self.rot_obj = ik.IKObjectiveRotation(
             link_index=self.ee_index,
-            link_offset_rotation=wp.quat_identity(),
+            link_offset_rotation=wp.quat_identity(dtype=wp.float32),
             target_rotations=wp.array([quat_to_vec4(wp.transform_get_rotation(self.ee_tf))], dtype=wp.vec4),
         )
         self.joint_limit_obj = ik.IKObjectiveJointLimit(
@@ -270,7 +250,7 @@ class Example:
         # example references their ``body_q`` (no visuals, no IK targets on
         # them) so the stale values are harmless. ``fr3_hand`` itself is
         # now correctly simulated thanks to the shapeless-anchor collapse
-        # in ``articulation_builder._compute_shape_body_anchors``.
+        # in ``articulation_franka._compute_shape_body_anchors``.
 
     def render(self):
         self.viewer.begin_frame(self.sim_time)

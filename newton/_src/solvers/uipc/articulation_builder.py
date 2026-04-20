@@ -36,6 +36,7 @@ from uipc.core import Animation, Object
 from uipc.geometry import SimplicialComplex, SimplicialComplexSlot
 from uipc.unit import MPa
 
+from ...math import normalize_with_norm
 from ...sim import Control, JointType, Model, State
 from .articulation import Articulation
 from .converter import UIpcMappingInfo, newton_transform_to_mat4
@@ -294,6 +295,19 @@ class ArticulationBuilder:
             if art.num_active_joints > 0:
                 art.setup_state()
 
+        # Seed initial ``target_position`` from ``model.joint_q`` so the
+        # first animator callback (which may fire inside ``world.init``
+        # before :meth:`SolverUIPC.step` runs ``cache_control``) sees the
+        # intended rest pose. Without this the prismatic gripper fingers
+        # (or any joint with non-zero initial ``joint_q``) race toward
+        # ``aim = 0`` and, combined with the ``-init_q`` edge offset,
+        # snap to the fully-closed/zero configuration on step 0.
+        if model.joint_q is not None:
+            joint_q_np = model.joint_q.numpy()
+            for art in self.articulations.values():
+                if art.num_active_joints > 0:
+                    art.seed_initial_targets(joint_q_np)
+
     # ------------------------------------------------------------------
     # Joint building helpers
     # ------------------------------------------------------------------
@@ -380,11 +394,23 @@ class ArticulationBuilder:
         lowers: list[float] = []
         uppers: list[float] = []
         limit_strengths: list[float] = []
+        init_angles: list[float] = []
         has_any_limit = False
 
         joint_axis_np = model.joint_axis.numpy()
         joint_qd_start_np = model.joint_qd_start.numpy()
         joint_q_start_np = model.joint_q_start.numpy()
+        # Revolute-only: UIPC's ``angle`` edge attribute measures rotation
+        # *relative to the build-time body configuration*, so we shift it
+        # into Newton's absolute joint-q space via ``init_angle``. UIPC
+        # computes internally:
+        #     current_angle = raw_angle - init_angle
+        #     effective_target = aim_angle + init_angle
+        # Writing ``-joint_q[q_start]`` makes both read and drive operate
+        # in Newton's absolute convention.
+        # NOTE: the prismatic counterpart (``distance``) is already in
+        # Newton absolute units — do NOT write ``init_distance``.
+        joint_q_np = model.joint_q.numpy() if model.joint_q is not None else None
 
         # Dispatch list for animator callback: (art, newton_joint_idx, edge_idx)
         anim_dispatch: list[tuple[Articulation, int, int]] = []
@@ -458,6 +484,7 @@ class ArticulationBuilder:
                 uppers.append(1e18)
                 limit_strengths.append(100.0)
 
+            init_angles.append(float(joint_q_np[q_start]) if joint_q_np is not None else 0.0)
             art.register_joint(j, q_start, qd_start)
             anim_dispatch.append((art, j, edge_idx))
 
@@ -493,6 +520,16 @@ class ArticulationBuilder:
                 np.array(limit_strengths, dtype=np.float64),
             )
 
+        # Shift UIPC's delta-from-rest ``angle`` into Newton's absolute
+        # joint-q space. Only applied when model.joint_q is populated;
+        # otherwise UIPC's default (init_angle = 0) preserves the raw
+        # delta-from-rest semantics. NOT applied to prismatic — its
+        # ``distance`` is already absolute.
+        if joint_q_np is not None:
+            init_angles_np = np.array(init_angles, dtype=np.float64)
+            init_angle_view: np.ndarray = view(jm.edges().find("init_angle"))  # ty:ignore[no-matching-overload]  # pyright: ignore[reportArgumentType]
+            init_angle_view[:] = init_angles_np
+
         jobj: Object = self._scene.objects().create("joints_revolute")
         jslot: SimplicialComplexSlot = jobj.geometries().create(jm)[0]
 
@@ -514,7 +551,7 @@ class ArticulationBuilder:
             except (TypeError, IndexError):
                 return
             for art, newton_j, edge_idx in anim_dispatch:
-                art.revolute_joint_anim(geo, newton_j, edge_idx)
+                art.revolute_joint_anim(info, geo, newton_j, edge_idx)
 
         self._scene.animator().insert(jobj, _revolute_batch_anim)
 
@@ -664,7 +701,7 @@ class ArticulationBuilder:
             except (TypeError, IndexError):
                 return
             for art, newton_j, edge_idx in anim_dispatch:
-                art.prismatic_joint_anim(geo, newton_j, edge_idx)
+                art.prismatic_joint_anim(info, geo, newton_j, edge_idx)
 
         self._scene.animator().insert(jobj, _prismatic_batch_anim)
 
@@ -702,7 +739,7 @@ class ArticulationBuilder:
             r_positions.append(child_pivot)
             child_slots.append(c_slot)
             child_ids.append(c_id)
-            parent_slots.append(p_slot)
+            parent_slots.append(p_slot)  # pyright: ignore[reportArgumentType]
             parent_ids.append(p_id)
             strengths.append(100.0)
             joint_indices.append(j)
@@ -821,32 +858,32 @@ class ArticulationBuilder:
         Raises:
             RuntimeError: If the world-space positions do not match.
         """
-        p_tf = np.array(view(p_slot.geometry().transforms())[p_id], dtype=np.float64)
-        c_tf = np.array(view(c_slot.geometry().transforms())[c_id], dtype=np.float64)
+        p_tf: np.ndarray = view(p_slot.geometry().transforms())[p_id]
+        c_tf: np.ndarray = view(c_slot.geometry().transforms())[c_id]
 
         def to_world(tf: np.ndarray, p: np.ndarray) -> np.ndarray:
             return (tf @ np.append(p, 1.0))[:3]
 
-        l_world_0 = to_world(p_tf, lp0)
-        r_world_0 = to_world(c_tf, rp0)
+        l_world_0: np.ndarray = to_world(p_tf, lp0)
+        r_world_0: np.ndarray = to_world(c_tf, rp0)
         if not np.allclose(l_world_0, r_world_0, atol=atol):
             raise RuntimeError(
                 f"Revolute joint {joint_idx}: parent/child anchor "
                 f"mismatch in world space.\n"
                 f"p_tf={p_tf}\n, c_tf={c_tf}\n, lp0={lp0}, rp0={rp0},\n "
                 f"l_world={l_world_0}, r_world={r_world_0}, "
-                f"diff={np.linalg.norm(l_world_0 - r_world_0):.6f}"
+                f"diff={l_world_0 - r_world_0}"
             )
 
-        l_world_1 = to_world(p_tf, lp1)
-        r_world_1 = to_world(c_tf, rp1)
+        l_world_1: np.ndarray = to_world(p_tf, lp1)
+        r_world_1: np.ndarray = to_world(c_tf, rp1)
         if not np.allclose(l_world_1, r_world_1, atol=atol):
             raise RuntimeError(
                 f"Revolute joint {joint_idx}: parent/child axis "
                 f"endpoint mismatch in world space.\n"
                 f"p_tf={p_tf}\n, c_tf={c_tf}\n, lp1={lp1}, rp1={rp1},\n "
                 f"l_world={l_world_1}, r_world={r_world_1}, "
-                f"diff={np.linalg.norm(l_world_1 - r_world_1):.6f}"
+                f"diff={l_world_1 - r_world_1:6}"
             )
 
     @staticmethod
@@ -882,22 +919,22 @@ class ArticulationBuilder:
         Raises:
             RuntimeError: If axes are not parallel or anchors not collinear.
         """
-        p_tf = np.array(view(p_slot.geometry().transforms())[p_id], dtype=np.float64)
-        c_tf = np.array(view(c_slot.geometry().transforms())[c_id], dtype=np.float64)
+        p_tf: np.ndarray = view(p_slot.geometry().transforms())[p_id]
+        c_tf: np.ndarray = view(c_slot.geometry().transforms())[c_id]
 
         def to_world(tf: np.ndarray, p: np.ndarray) -> np.ndarray:
             return (tf @ np.append(p, 1.0))[:3]
 
-        l_world_0 = to_world(p_tf, lp0)
-        l_world_1 = to_world(p_tf, lp1)
-        r_world_0 = to_world(c_tf, rp0)
-        r_world_1 = to_world(c_tf, rp1)
+        l_world_0: np.ndarray = to_world(p_tf, lp0)
+        l_world_1: np.ndarray = to_world(p_tf, lp1)
+        r_world_0: np.ndarray = to_world(c_tf, rp0)
+        r_world_1: np.ndarray = to_world(c_tf, rp1)
 
         # Axes must be parallel: cross product ≈ 0
-        l_axis = l_world_1 - l_world_0
-        r_axis = r_world_1 - r_world_0
-        l_axis = l_axis / (np.linalg.norm(l_axis) + 1e-12)
-        r_axis = r_axis / (np.linalg.norm(r_axis) + 1e-12)
+        l_axis_u, _ = normalize_with_norm(wp.vec3d(*(l_world_1 - l_world_0)))
+        r_axis_u, _ = normalize_with_norm(wp.vec3d(*(r_world_1 - r_world_0)))
+        l_axis = np.asarray(l_axis_u, dtype=np.float64)
+        r_axis = np.asarray(r_axis_u, dtype=np.float64)
         cross = np.cross(l_axis, r_axis)
         if not np.allclose(cross, 0.0, atol=atol):
             raise RuntimeError(
@@ -942,14 +979,14 @@ class ArticulationBuilder:
         Raises:
             RuntimeError: If the world-space positions do not match.
         """
-        p_tf = np.array(view(p_slot.geometry().transforms())[p_id], dtype=np.float64)
-        c_tf = np.array(view(c_slot.geometry().transforms())[c_id], dtype=np.float64)
+        p_tf: np.ndarray = view(p_slot.geometry().transforms())[p_id]
+        c_tf: np.ndarray = view(c_slot.geometry().transforms())[c_id]
 
         def to_world(tf: np.ndarray, p: np.ndarray) -> np.ndarray:
             return (tf @ np.append(p, 1.0))[:3]
 
-        l_world = to_world(p_tf, l_pos)
-        r_world = to_world(c_tf, r_pos)
+        l_world: np.ndarray = to_world(p_tf, l_pos)
+        r_world: np.ndarray = to_world(c_tf, r_pos)
         if not np.allclose(l_world, r_world, atol=atol):
             raise RuntimeError(
                 f"Ball joint {joint_idx}: parent/child anchor "

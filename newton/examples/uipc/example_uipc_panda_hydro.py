@@ -67,7 +67,7 @@ def broadcast_ik_solution_kernel(
 class Example:
     def __init__(self, viewer, args):
         self.scene = SceneType(args.scene)
-        self.fps = 60
+        self.fps = 120
         self.frame_dt = 1.0 / self.fps
         self.sim_time = 0.0
         self.sim_substeps = 1
@@ -77,16 +77,7 @@ class Example:
         self.test_mode = bool(getattr(args, "test", False))
         self.viewer = viewer
 
-        builder_single = newton.ModelBuilder(up_axis=newton.Axis.Z)
-        builder_single.default_shape_cfg.ke = 2.0e3
-        builder_single.default_shape_cfg.kd = 1.0e2
-        # Note: per-shape ``mu`` is intentionally omitted here. The UIPC
-        # backend ignores Newton's per-shape friction and reads friction
-        # from its own ``ContactTabular`` (default μ=0.5 for every pair —
-        # see the ``uipc-contact-tabular`` skill). Setting it here would be
-        # a silent no-op and mislead readers about the real friction.
-        builder_single.default_shape_cfg.margin = 0.005
-        builder_single.default_shape_cfg.gap = 0.01
+        builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
 
         # ------------------------------------------------------------------
         # Franka Panda arm
@@ -94,8 +85,7 @@ class Example:
         # Scene layout matches example_robot_panda_hydro so both examples
         # can be visually compared side-by-side.
         panda_xform = wp.transform((-0.5, -0.5, 0.05), wp.quat_identity())
-        panda_first_body = builder_single.body_count
-        builder_single.add_urdf(
+        builder.add_urdf(
             str(newton.utils.download_asset("franka_emika_panda") / "urdf/fr3_franka_hand.urdf"),
             xform=panda_xform,
             enable_self_collisions=False,
@@ -103,14 +93,10 @@ class Example:
         )
 
         def find_body(name: str) -> int:
-            return next(i for i, lbl in enumerate(builder_single.body_label) if lbl.endswith(f"/{name}"))
+            return next(i for i, lbl in enumerate(builder.body_label) if lbl.endswith(f"/{name}"))
 
         left_finger_idx = find_body("fr3_leftfinger")
         right_finger_idx = find_body("fr3_rightfinger")
-        # fr3_hand is the IK end-effector frame. Store it here while the
-        # ``find_body`` closure is in scope — the hand body index depends
-        # on the URDF traversal order, so hardcoding (``10`` in the
-        # original example) is brittle once extra bodies are added.
         self.hand_body_idx = find_body("fr3_hand")
 
         # Add gripper pads (mesh) before convex-hull approximation so they
@@ -129,13 +115,26 @@ class Example:
             wp.vec3(0.0, 0.005, 0.045),
             wp.quat_from_axis_angle(wp.vec3(1.0, 0.0, 0.0), -np.pi),
         )
-        builder_single.add_shape_mesh(body=left_finger_idx, mesh=pad_mesh, xform=pad_xform)
-        builder_single.add_shape_mesh(body=right_finger_idx, mesh=pad_mesh, xform=pad_xform)
+        builder.add_shape_mesh(body=left_finger_idx, mesh=pad_mesh, xform=pad_xform)
+        builder.add_shape_mesh(body=right_finger_idx, mesh=pad_mesh, xform=pad_xform)
+
+        # Set SDF collisions on panda hand and fingers for hydroelastic contact
+        finger_body_indices = {
+            find_body("fr3_leftfinger"),
+            find_body("fr3_rightfinger"),
+            find_body("fr3_hand"),
+        }
+        non_finger_shape_indices = []
+        for shape_idx, body_idx in enumerate(builder.shape_body):
+            if body_idx not in finger_body_indices:
+                non_finger_shape_indices.append(shape_idx)
+
+        # Convert non-finger shapes to convex hulls
+        builder.approximate_meshes(
+            method="convex_hull", shape_indices=non_finger_shape_indices, keep_visual_shapes=True
+        )
 
         # Convex-hull every panda body so UIPC ABD gets closed manifolds.
-        panda_shape_indices = [s for s, b in enumerate(builder_single.shape_body) if b >= panda_first_body]
-        builder_single.approximate_meshes("convex_hull", shape_indices=panda_shape_indices, keep_visual_shapes=True)
-
         # Initial joint configuration (matches example_robot_panda_hydro).
         init_q = [
             -3.6802115e-03,
@@ -150,37 +149,38 @@ class Example:
         # exactly (joint_q, target_pos, armature, effort_limit). The arm armature
         # in particular must stay at 0.1 / 0.5 or the arm will visibly sag under
         # gravity and the rest pose will not match the original.
-        builder_single.joint_q[:9] = [*init_q, 0.05, 0.05]
-        builder_single.joint_target_pos[:9] = [*init_q, 1.0, 1.0]
+        builder.joint_q[:9] = [*init_q, 0.00, 0.00]
+        builder.joint_target_pos[:9] = [*init_q, 1.0, 1.0]
 
-        builder_single.joint_target_ke[:9] = [650.0] * 9
-        builder_single.joint_target_kd[:9] = [100.0] * 9
-        builder_single.joint_effort_limit[:7] = [80.0] * 7
-        builder_single.joint_effort_limit[7:9] = [20.0] * 2
-        builder_single.joint_armature[:7] = [0.1] * 7
-        builder_single.joint_armature[7:9] = [0.5] * 2
+        builder.joint_target_ke[:9] = [650.0] * 9
+        builder.joint_target_kd[:9] = [100.0] * 9
+        builder.joint_effort_limit[:7] = [80.0] * 7
+        builder.joint_effort_limit[7:9] = [20.0] * 2
+        builder.joint_armature[:7] = [0.1] * 7
+        builder.joint_armature[7:9] = [0.5] * 2
 
         for d in range(9):
-            builder_single.joint_target_mode[d] = int(JointTargetMode.POSITION)
+            builder.joint_target_mode[d] = int(JointTargetMode.POSITION)
 
         # ------------------------------------------------------------------
         # Static table — kinematic body so UIPC sees it.
         # ------------------------------------------------------------------
-        # UIPC IPC requires a strictly positive gap (>= default_shape_cfg.gap
-        # = 0.01m) between every pair of bodies. The original panda_hydro
-        # layout places the table directly on the ground and the object
-        # directly on the table, which fails UIPC's sanity check. We lift
-        # everything by ``uipc_gap`` so the initial distances satisfy the
-        # solver's minimum-separation constraint.
-        uipc_gap = 0.0001
+        # Positions otherwise match example_robot_panda_hydro.py so the two
+        # examples can be compared side-by-side. UIPC's sanity check fires
+        # whenever any two geometries (including body ↔ ground halfplane)
+        # have initial distance ≤ 0 — this runs regardless of whether the
+        # contact_tabular entry is disabled — so both the table (bottom vs
+        # ground) and the manipulated object (bottom vs table top) are
+        # lifted by ``uipc_gap`` to guarantee a strictly positive gap.
+        uipc_gap = 0.0012
         box_size = 0.05
-        table_pos = wp.vec3(0.08, -0.5, box_size)
-        table_body = builder_single.add_body(
+        table_pos = wp.vec3(0.08, -0.5, box_size + uipc_gap)
+        table_body = builder.add_body(
             xform=wp.transform(table_pos, wp.quat_identity()),  # ty:ignore[missing-argument]
             label="table",
             is_kinematic=True,
         )
-        builder_single.add_shape_box(
+        builder.add_shape_box(
             body=table_body,
             hx=box_size * 2.0,
             hy=box_size * 2.0,
@@ -196,7 +196,7 @@ class Example:
         # ``put_in_cup`` is enabled, matching the original panda_hydro.
         # ------------------------------------------------------------------
         if self.put_in_cup:
-            self.cup_pos = [0.13, -0.5, box_size + 0.1 + uipc_gap]
+            self.cup_pos = [0.13, -0.5, box_size + 0.1]
             cup_xform = wp.transform(wp.vec3(self.cup_pos), wp.quat_identity())
 
             cup_asset_path = newton.utils.download_asset("manipulation_objects/cup")
@@ -210,12 +210,12 @@ class Example:
             if not np.allclose(cup_scale_np, 1.0):
                 cup_mesh = cup_mesh.copy(vertices=cup_mesh.vertices * cup_scale_np, recompute_inertia=True)
 
-            cup_body = builder_single.add_body(
+            cup_body = builder.add_body(
                 xform=cup_xform,
                 label="cup",
                 is_kinematic=True,
             )
-            builder_single.add_shape_mesh(body=cup_body, mesh=cup_mesh)
+            builder.add_shape_mesh(body=cup_body, mesh=cup_mesh)
 
         # ------------------------------------------------------------------
         # Object to manipulate
@@ -223,44 +223,50 @@ class Example:
         if self.scene == SceneType.PEN:
             radius = 0.005
             length = 0.14
-            self.object_pos = [0.0, -0.5, 2 * box_size + radius + 0.001 + uipc_gap]
+            # Table top sits at ``2*box_size + uipc_gap`` after the table
+            # lift. Place the pen so its bottom has exactly ``uipc_gap`` of
+            # clearance above the table top — i.e. ``2 * uipc_gap`` above
+            # robot_panda_hydro's raw formula.
+            self.object_pos = [0.0, -0.5, 2 * box_size + radius + 2 * uipc_gap]
             object_xform = wp.transform(
                 wp.vec3(self.object_pos),
                 wp.quat_from_axis_angle(wp.vec3(0.0, 1.0, 0.0), np.pi / 2),
             )
-            self.object_body_local = builder_single.add_body(xform=object_xform, label="object")
-            builder_single.add_shape_capsule(
+            self.object_body_local = builder.add_body(xform=object_xform, label="object")
+            builder.add_shape_capsule(
                 body=self.object_body_local,
                 radius=radius,
                 half_height=length / 2,
             )
-            self.grasping_offset = [-0.03, 0.0, 0.1]
+            self.grasping_offset = [-0.03, 0.0, 0.13]
             self.place_offset = -0.02
         else:  # CUBE
             size = 0.04
-            self.object_pos = [0.0, -0.5, 2 * box_size + 0.5 * size + uipc_gap]
+            # Same rationale as the pen branch — robot's formula has the
+            # cube bottom flush with the table top, so we need ``2 *
+            # uipc_gap`` (one for the table lift, one for the cube/table
+            # minimum-separation margin) to satisfy UIPC's sanity check.
+            self.object_pos = [0.0, -0.5, 2 * box_size + 0.5 * size + 2 * uipc_gap]
             object_xform = wp.transform(wp.vec3(self.object_pos), wp.quat_identity())
-            self.object_body_local = builder_single.add_body(xform=object_xform, label="object")
-            builder_single.add_shape_box(
+            self.object_body_local = builder.add_body(xform=object_xform, label="object")
+            builder.add_shape_box(
                 body=self.object_body_local,
                 hx=size / 2,
                 hy=size / 2,
                 hz=size / 2,
             )
-            self.grasping_offset = [0.0, 0.0, 0.1]
+            self.grasping_offset = [0.03, 0.0, 0.14]
             self.place_offset = 0.0
 
         # ------------------------------------------------------------------
         # Build single-world model for IK before replication.
         # ------------------------------------------------------------------
-        self.model_single = copy.deepcopy(builder_single).finalize()
-        self.bodies_per_world = builder_single.body_count
+        self.model_single = copy.deepcopy(builder).finalize()
+        self.bodies_per_world = builder.body_count
 
         if self.world_count > 1:
             builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
-            builder.replicate(builder_single, self.world_count, spacing=(2.0, 2.0, 0.0))
-        else:
-            builder = builder_single
+            builder.replicate(builder, self.world_count, spacing=(2.0, 2.0, 0.0))
 
         builder.add_ground_plane()
 
@@ -271,22 +277,19 @@ class Example:
         self.contacts = self.model.contacts()
 
         self.solver = newton.solvers.SolverUIPC(
-            self.model,
+            workspace="/tmp/newton_uipc/panda_hydro",
+            model=self.model,
             dt=self.sim_dt,
-            logger_level=uipc.Logger.Error,
+            logger_level=uipc.Logger.Warn,
+            dump_enable=True,
         )
+        # self.solver.configure_scene({"extras": {"debug": {"dump_surface": True}}})
         self.solver.set_contact(True, uipc_gap)
-        self.solver.initialize()
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
-        print("state_0 body_q: ", self.model.joint_q)
+        self.solver.initialize(self.state_0)
         self.viewer.set_model(self.model)
-        # Camera matches example_robot_panda_hydro.
-        self.viewer.set_camera(
-            pos=wp.vec3(0.5, 0.0, 0.5),
-            pitch=-15.0,
-            yaw=-140.0,
-        )
-        self.viewer.set_world_offsets((0.0, 0.0, 0.0))
+        self.viewer.set_camera(wp.vec3(0.5, 0.0, 0.5), -15, -140)
+        self.viewer.set_world_offsets(wp.vec3(1.0, 1.0, 0.0))
         self.viewer._paused = True
 
         # Initialize state for IK setup
@@ -308,6 +311,7 @@ class Example:
         # here is required for the waypoint sequence to actually reach
         # the cube / pen on the table.
         self.ee_index = self.hand_body_idx
+        print("self.ee_index", self.ee_index)
         body_q_np = self.state.body_q.numpy()
         ee_tf = wp.transform(*body_q_np[self.ee_index])
 
@@ -402,7 +406,7 @@ class Example:
         t_gripper = self.waypoints[wp_idx][2] * (1.0 - t) + self.waypoints[next_idx][2] * t
         # Match example_robot_panda_hydro.py: open commands 0.06 (saturates at
         # the finger joint limit ≈0.04m), closed commands 0.0.
-        gripper_value = 0.06 * (1.0 - t_gripper)
+        gripper_value = 0.04 * (1.0 - t_gripper)
         wp.launch(
             broadcast_ik_solution_kernel,
             dim=self.world_count,
@@ -418,7 +422,6 @@ class Example:
         self.state_0.clear_forces()
         self.state_1.clear_forces()
         for _ in range(self.sim_substeps):
-            self.solver.export_surface_obj("/home/ligo/Project/x2robot/Newton-Isaac/newton/output/")
             self.solver.step(
                 self.state_0,
                 self.state_1,

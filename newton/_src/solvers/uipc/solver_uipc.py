@@ -12,6 +12,7 @@ import weakref
 from collections.abc import Callable
 from typing import Any
 
+import numpy as np
 import uipc
 import uipc.adapter.warp
 import warp as wp
@@ -173,7 +174,7 @@ class SolverUIPC(SolverBase):
         if scene_config is None:
             scene_config: dict[str, Any] = UScene.default_config()
         scene_config["dt"] = dt
-        scene_config["d_hat"] = 0.001
+        scene_config["contact"]["d_hat"] = 0.001
         scene_config["contact"]["enable"] = False
         scene_config["newton"]["velocity_tol"] = 0.001
         scene_config["newton"]["translation_tol"] = 0.01
@@ -309,11 +310,11 @@ class SolverUIPC(SolverBase):
             scene_cfg = self.scene.config()
             scene_cfg["contact"]["enable"] = flag  # ty:ignore[not-subscriptable]
             if d_hat is not None:
-                scene_cfg["d_hat"] = float(d_hat)  # ty:ignore[invalid-assignment]
+                scene_cfg["contact"]["d_hat"] = float(d_hat)  # ty:ignore[not-subscriptable]
         else:
             self._scene_config["contact"]["enable"] = flag
             if d_hat is not None:
-                self._scene_config["d_hat"] = float(d_hat)
+                self._scene_config["contact"]["d_hat"] = float(d_hat)
 
     def set_animator_substep(self, substep: int) -> None:
         """Set the number of animator substeps per simulation step.
@@ -573,7 +574,7 @@ class SolverUIPC(SolverBase):
             particle_ws = None
 
         if state is None:
-            state = model.state()
+            state: State = model.state()
             newton.eval_fk(model, model.joint_q, model.joint_qd, state)
         wp.copy(model.body_q, state.body_q)
         if state.body_qd is not None and model.body_qd is not None:
@@ -636,8 +637,6 @@ class SolverUIPC(SolverBase):
         else:
             self._abd_transform_buf = None
             self._abd_velocity_buf = None
-
-        self._push_body_state_to_uipc()
 
         self._initialized = True
 
@@ -859,7 +858,7 @@ class SolverUIPC(SolverBase):
             self._notify_model_properties()
 
         if self._state_dirty:
-            self._push_body_state_to_uipc()
+            self._sync_body_state_to_uipc()
         self._state_dirty = False
 
     # ------------------------------------------------------------------
@@ -917,21 +916,23 @@ class SolverUIPC(SolverBase):
             [float(gravity_np[2])],
         ]
 
-    def _push_body_state_to_uipc(self) -> None:
+    def _sync_body_state_to_uipc(self) -> None:
         """Push ``model.body_q`` / ``model.body_qd`` into the UIPC backend.
 
         Uses Warp kernels to build the 4x4 transform / velocity matrices
-        on-device in one batched launch, then performs a single
-        device→host copy and scatters the rows into each geometry slot's
-        per-instance ``transform`` / ``velocity`` attributes before calling
-        ``AffineBodyStateAccessorFeature.copy_from`` to synchronise the
-        UIPC backend.
+        on-device in one batched launch, then scatters them into a *single*
+        master state geometry that covers every ABD body in the scene
+        (``backend_abd_body_offset=0``, ``instances.size()=body_count()``).
+        A single ``AffineBodyStateAccessorFeature.copy_from`` then pushes
+        the full state back — which triggers exactly **one**
+        ``update_dof_attributes`` resync on the UIPC side instead of one
+        per geometry slot.
 
-        UIPC's Python API only exposes ``copy_from(SimplicialComplex)``
-        for the write direction, so a single host copy is unavoidable —
-        but the math and the 128-bit element construction are done on
-        GPU instead of per-body Python, which is a large speedup for
-        models with many affine bodies.
+        The master geometry is cached lazily on the first call.  Bodies
+        not mapped by Newton (e.g. ground planes, static colliders) are
+        preserved exactly: ``copy_to`` seeds the master geo with the
+        current UIPC state, and those rows are left untouched before the
+        push.
         """
         mapping = self.mapping
         if mapping.num_mapped_bodies == 0 or not mapping.body_geo_slots:
@@ -941,6 +942,7 @@ class SolverUIPC(SolverBase):
         if model.body_q is None:
             return
         assert mapping.body_indices_wp is not None
+        assert mapping.backend_offsets_wp is not None
         assert self._abd_transform_buf is not None
         assert self._abd_velocity_buf is not None
 
@@ -968,60 +970,53 @@ class SolverUIPC(SolverBase):
         else:
             self._abd_velocity_buf.warp().zero_()
 
-        # Single device→host sync: both buffers now hold per-mapped-body
-        # mat44d rows aligned with ``mapping.body_indices_wp``.
-        transforms_host = self._abd_transform_buf.warp().numpy()
-        velocities_host = self._abd_velocity_buf.warp().numpy()
+        # Single device→host sync: the kernels above write rows [0, n) of
+        # the shared buffer (dim=n, indexed by tid), so slice to drop the
+        # stale tail used by the non-contiguous read-back path.
+        transforms_host = self._abd_transform_buf.warp().numpy()[:n]
+        velocities_host = self._abd_velocity_buf.warp().numpy()[:n]
 
-        # Build / reuse a body_idx → row-in-host-array lookup. This is a
-        # function of ``body_indices_wp``, which is immutable after
-        # ``populate_backend_offsets``, so cache it on the solver.
-        if getattr(self, "_mapped_body_row", None) is None:
-            body_indices_np = mapping.body_indices_wp.numpy()
-            self._mapped_body_row = {int(b): i for i, b in enumerate(body_indices_np)}
-        body_row = self._mapped_body_row
+        # Lazily build the master state geometry. It spans every ABD body
+        # in UIPC, so row ``q_idx`` of its ``transform`` / ``velocity``
+        # instance attributes maps directly onto UIPC's flat q array slot
+        # ``q_idx``. The geo topology is immutable after scene init, so
+        # one allocation suffices for the solver lifetime.
+        state_geo = getattr(self, "_master_state_geo", None)
+        if state_geo is None:
+            state_geo = self._abd_accessor.create_geometry()
+            state_geo.instances().create("transform", np.eye(4, dtype=np.float64))
+            state_geo.instances().create("velocity", np.zeros((4, 4), dtype=np.float64))
+            self._master_state_geo = state_geo
 
-        # Group mapped bodies by the geometry slot they share (instanced
-        # bodies share a slot with distinct instance ids).
-        slot_bodies: dict[int, list[int]] = {}
-        slot_objs: dict[int, Any] = {}
-        for body_idx, slot in mapping.body_geo_slots.items():
-            sid = slot.id()
-            slot_bodies.setdefault(sid, []).append(body_idx)
-            slot_objs[sid] = slot
+        # Cache host-side backend offsets (= UIPC q indices per mapped
+        # body). ``mapping.backend_offsets_wp`` is populated once by
+        # ``populate_backend_offsets`` and immutable thereafter.
+        if getattr(self, "_backend_offsets_host", None) is None:
+            self._backend_offsets_host = mapping.backend_offsets_wp.numpy().astype(np.int64, copy=False)
+        offsets_np = self._backend_offsets_host
 
-        for sid, body_list in slot_bodies.items():
-            slot = slot_objs[sid]
-            geo = slot.geometry()
+        # Seed the master geo with the current UIPC state so unmapped
+        # bodies round-trip unchanged, then overwrite the rows Newton owns.
+        self._abd_accessor.copy_to(state_geo)
 
-            # ``copy_to`` ensures ``transform`` and ``velocity`` instance
-            # attributes exist and are sized to the slot's instance
-            # count; we then selectively overwrite the rows we own.
-            self._abd_accessor.copy_to(geo)
+        transform_attr = state_geo.instances().find("transform")
+        velocity_attr = state_geo.instances().find("velocity")
+        assert transform_attr is not None
+        transform_view = transform_attr.view()
+        velocity_view = velocity_attr.view() if velocity_attr is not None else None
 
-            transform_attr = geo.instances().find("transform")
-            velocity_attr = geo.instances().find("velocity")
-            if transform_attr is None:
-                warnings.warn(
-                    f"SolverUIPC.notify_model_changed: geometry slot {sid} has no 'transform' "
-                    "instance attribute after copy_to; skipping.",
-                    stacklevel=3,
-                )
-                continue
-            transform_view = transform_attr.view()
-            velocity_view = velocity_attr.view() if velocity_attr is not None else None
+        # Vectorised scatter: write all mapped rows in one shot.
+        transform_view[offsets_np] = transforms_host
+        if velocity_view is not None:
+            velocity_view[offsets_np] = velocities_host
 
-            for body_idx in body_list:
-                row = body_row.get(body_idx)
-                if row is None:
-                    continue  # unmapped body (e.g. shapeless kinematic)
-                inst_id = mapping.body_instance_ids.get(body_idx, 0)
-                transform_view[inst_id] = transforms_host[row]
-                if velocity_view is not None:
-                    velocity_view[inst_id] = velocities_host[row]
-
-            # Push the (now-updated) per-instance attributes into UIPC.
-            self._abd_accessor.copy_from(geo)
+        # Single push into UIPC — triggers one `update_dof_attributes`.
+        self._abd_accessor.copy_from(state_geo)
+        self.world.retrieve()
+        if self.world.sanity_checker().check():
+            print("Sanity check passed")
+        else:
+            print("Sanity check failed")
 
     @override
     def update_contacts(self, contacts: Contacts) -> None:  # ty:ignore[invalid-method-override]  # pyright: ignore[reportIncompatibleMethodOverride]
