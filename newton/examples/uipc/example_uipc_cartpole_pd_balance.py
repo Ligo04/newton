@@ -50,13 +50,33 @@
 # the EFFORT target mode, so the same balancing controller drives each of
 # them; only the constructor kwargs and contact setup differ.
 #
+# --stable-pd switches the pole2 joint-lock from a hand-rolled scalar PD
+# to ``ActuatorStablePD`` (Tan et al. 2011).  Tan's implicit-in-position
+# rewrite
+#
+#     (M + Kd·Δt)·θ̈ = Kp·(0 - θ - θ̇·Δt) + Kd·(0 - θ̇) - C
+#     τ = Kp·(0 - θ - θ̇·Δt) + Kd·(0 - θ̇) - Kd·θ̈·Δt
+#
+# cancels the high-frequency numerical oscillation that plain explicit PD
+# exhibits at the stiff ``k_lock = 400 N·m/rad`` used here.  The cart
+# controller is *not* touched — its state feedback is cross-DOF (F_cart
+# depends on pole1 state) and ActuatorStablePD only handles per-DOF PD.
+# For the StablePD actuator we wire:
+#
+#     act_state.mass_matrix = H[pole2, pole2]   # eval_mass_matrix slice
+#     act_state.bias_forces = J_lin^T · (m·g)   # pole2 column, gravity
+#
+# Coriolis is neglected (balance task, velocities remain small).
+#
 # Command: python -m newton.examples uipc_cartpole_pd_balance --world-count 1
+#          python -m newton.examples uipc_cartpole_pd_balance --stable-pd
 #          python -m newton.examples uipc_cartpole_pd_balance --solver mujoco
 #
 ###########################################################################
 
 import numpy as np
 import warp as wp
+from newton_actuators import ActuatorStablePD
 
 import newton
 import newton.examples
@@ -77,7 +97,16 @@ class Example:
 
         self.world_count = args.world_count
         self.solver_name = args.solver
+        self.stable_pd = bool(args.stable_pd)
         self.viewer = viewer
+
+        if self.stable_pd and self.world_count != 1:
+            raise ValueError(
+                "--stable-pd currently requires --world-count 1: the batched builder "
+                "would merge all worlds' pole2 DOFs into one ActuatorStablePD instance "
+                "whose on-device Cholesky scales as O(Nw³) with zero off-diagonal mass "
+                "coupling. Block-diagonal batched solves are a follow-up."
+            )
 
         # --- Cart state-feedback gains (all positive) -------------------------
         # These are the magnitudes of the four classical LQR gains; see the
@@ -128,6 +157,25 @@ class Example:
         cartpole.joint_target_mode[cart_dof + 1] = int(JointTargetMode.NONE)
         cartpole.joint_target_mode[cart_dof + 2] = int(JointTargetMode.EFFORT)
 
+        # Register an ActuatorStablePD on pole2 so ``--stable-pd`` can drive
+        # the joint-lock via Tan 2011 instead of the hand-rolled scalar PD in
+        # ``_apply_feedback``.  The actuator accumulates into ``control.joint_f``
+        # with ``+=`` — we zero joint_f before writing cart force + running the
+        # actuator so no residual leaks across substeps.  ``target_pos`` /
+        # ``target_vel`` both default to 0 (``Model.control()`` zero-inits
+        # them), which is the pole2 lock's set-point, so no per-step target
+        # update is needed.
+        if self.stable_pd:
+            cartpole.add_actuator(
+                ActuatorStablePD,
+                input_indices=[cart_dof + 2],
+                kp=self.k_lock,
+                kd=self.k_lock_d,
+                max_force=self.max_torque_lock,
+                gear=1.0,
+                constant_force=0.0,
+            )
+
         if self.world_count > 1:
             builder = newton.ModelBuilder(newton.Axis.Z)
             builder.replicate(cartpole, self.world_count, spacing=(1.0, 2.0, 0.0))
@@ -157,6 +205,29 @@ class Example:
         self.cart_dof = 0
         self.pole1_dof = 1
         self.pole2_dof = 2
+
+        # ActuatorStablePD state + scratch for the per-substep Tan 2011 solve.
+        # ``eval_mass_matrix`` and ``eval_jacobian`` want reusable output
+        # buffers so we don't re-allocate every substep.
+        self._pole2_actuator: ActuatorStablePD | None = None
+        self._act_state: ActuatorStablePD.State | None = None
+        self._H_buf: wp.array | None = None
+        self._J_buf: wp.array | None = None
+        self._gravity_np: np.ndarray | None = None
+        self._body_mass_np: np.ndarray | None = None
+        self._bodies_per_world: int = 0
+        if self.stable_pd:
+            pole2_actuator = next((a for a in self.model.actuators if isinstance(a, ActuatorStablePD)), None)
+            if pole2_actuator is None:
+                raise RuntimeError("--stable-pd set but ActuatorStablePD missing from model.actuators")
+            assert len(pole2_actuator.kp) == self.world_count, (
+                f"ActuatorStablePD kp length {len(pole2_actuator.kp)} != world_count {self.world_count}"
+            )
+            self._pole2_actuator = pole2_actuator
+            self._act_state = pole2_actuator.state()
+            self._gravity_np = self.model.gravity.numpy()  # (world_count, 3)
+            self._body_mass_np = self.model.body_mass.numpy()  # (body_count,)
+            self._bodies_per_world = self.model.body_count // self.world_count
 
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
         self.viewer.set_model(self.model)
@@ -203,6 +274,38 @@ class Example:
             )
         raise ValueError(f"unsupported --solver: {name!r}")
 
+    def _compute_pole2_bias(self) -> np.ndarray:
+        """Jacobian-transpose gravity torque on the pole2 DOF.
+
+        Returns the ``(world_count,)`` bias-force vector consumed by the
+        Tan 2011 ``ActuatorStablePD`` — namely ``C = g(q) = Σ J_lin[:, pole2]^T · (m · g)``,
+        i.e. the torque gravity *imposes* on the pole2 joint.  Coriolis /
+        centrifugal terms are omitted (velocities stay small in the
+        balance task — for trajectory tracking a full RNEA would be
+        needed).
+
+        ``eval_fk`` is called first because most solvers leave the
+        maximal-coordinate ``body_q`` stale after ``step`` and
+        ``eval_jacobian`` samples ``body_q``.
+        """
+        newton.eval_fk(self.model, self.state_0.joint_q, self.state_0.joint_qd, self.state_0)
+        self._J_buf = newton.eval_jacobian(self.model, self.state_0, self._J_buf)
+        J_np = self._J_buf.numpy()  # (A, max_links*6, max_dofs)
+
+        bias = np.zeros(self.world_count, dtype=np.float32)
+        for w in range(self.world_count):
+            g = self._gravity_np[w]
+            for b in range(self._bodies_per_world):
+                body_global = w * self._bodies_per_world + b
+                m = float(self._body_mass_np[body_global])
+                if m <= 0.0:
+                    continue
+                # Rows [6b:6b+3] of J are the linear (COM) Jacobian of body b;
+                # the pole2 column maps joint velocity to that body's linear velocity.
+                J_lin_col = J_np[w, 6 * b : 6 * b + 3, self.pole2_dof]  # (3,)
+                bias[w] += float(J_lin_col @ (m * g))
+        return bias
+
     def _apply_feedback(self):
         """Cross-DOF state feedback -> ``control.joint_f``.
 
@@ -215,6 +318,10 @@ class Example:
         implicitly zeros the DOFs we don't touch — the same pattern the
         other cartpole examples use to avoid the ``+=`` accumulation
         behaviour of the per-DOF ``ActuatorPD`` kernel.
+
+        When ``--stable-pd`` is set, the pole2 slot is left at zero and
+        the Tan 2011 ``ActuatorStablePD`` then accumulates its implicit
+        torque on top of the freshly written cart force.
         """
         # Shape: (world_count, 1, dofs_per_arti)
         q = self.cartpoles.get_attribute("joint_q", self.state_0).numpy()
@@ -239,14 +346,34 @@ class Example:
         f_cart = self.k_pole * th1 + self.k_poled * thd1 + self.k_cart * x + self.k_cartd * xd
         np.clip(f_cart, -self.max_force, self.max_force, out=f_cart)
 
-        # Stiff PD driving pole2 to stay aligned with pole1.
-        tau2 = -self.k_lock * th2 - self.k_lock_d * thd2
-        np.clip(tau2, -self.max_torque_lock, self.max_torque_lock, out=tau2)
-
         f = np.zeros((self.world_count, 1, self.dofs_per_world), dtype=np.float32)
         f[:, 0, self.cart_dof] = f_cart
-        f[:, 0, self.pole2_dof] = tau2
+        if not self.stable_pd:
+            # Hand-rolled scalar PD locking pole2 to pole1. Same torque law
+            # ActuatorStablePD would produce with C=0 under explicit integration.
+            tau2 = -self.k_lock * th2 - self.k_lock_d * thd2
+            np.clip(tau2, -self.max_torque_lock, self.max_torque_lock, out=tau2)
+            f[:, 0, self.pole2_dof] = tau2
         self.cartpoles.set_attribute("joint_f", self.control, f)
+
+        if self.stable_pd:
+            # Feed the Tan 2011 State: pole2 inertia + gravity bias.
+            # eval_mass_matrix returns H of shape (articulation_count=1, 3, 3);
+            # the pole2 actuator only sees the scalar H[0, pole2, pole2] block,
+            # reshaped to (1, 1) to match act_state.mass_matrix.
+            self._H_buf = newton.eval_mass_matrix(self.model, self.state_0, H=self._H_buf)
+            p2 = self.pole2_dof
+            pole2_m = self._H_buf.numpy()[0, p2 : p2 + 1, p2 : p2 + 1].astype(np.float32)
+            self._act_state.mass_matrix.assign(pole2_m)
+            self._act_state.bias_forces.assign(self._compute_pole2_bias())
+
+            self._pole2_actuator.step(
+                sim_state=self.state_0,
+                sim_control=self.control,
+                current_act_state=self._act_state,
+                next_act_state=None,
+                dt=self.sim_dt,
+            )
 
     def simulate(self):
         # The pole's unstable mode is fast (tau ~ 0.32 s); running the
@@ -317,6 +444,18 @@ class Example:
             choices=("uipc", "mujoco", "featherstone", "semi_implicit"),
             default="uipc",
             help="Newton solver to drive the balance controller.",
+        )
+        parser.add_argument(
+            "--stable-pd",
+            action="store_true",
+            help=(
+                "Drive the stiff pole2 joint-lock with ActuatorStablePD "
+                "(Tan et al. 2011) instead of the hand-rolled scalar PD. "
+                "The per-substep State is populated with pole2's diagonal "
+                "entry from newton.eval_mass_matrix and the Jacobian-T "
+                "gravity bias (Coriolis neglected). Cart state feedback "
+                "is untouched. Requires --world-count 1."
+            ),
         )
         parser.set_defaults(world_count=1)
         return parser

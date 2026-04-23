@@ -44,6 +44,23 @@
 #   - ``semi_implicit`` runs but tends to absorb ``joint_f`` into its
 #     joint attachment constraints and barely moves the arm here.
 #
+# --stable-pd swaps every actuator to Tan 2011 stable PD.  The implicit
+# rewrite
+#
+#     (M + diag(Kd)·Δt)·qddot = Kp·(q* - q - q̇·Δt) + Kd·(q̇* - q̇) - C
+#     τ = const + Kp·(q* - q - q̇·Δt) + Kd·(q̇* - q̇) - Kd·qddot·Δt
+#
+# needs the articulation mass matrix ``M(q)`` and bias forces
+# ``C(q, q̇)`` fed into the actuator state each substep.  Here we wire:
+#
+#     act_state.mass_matrix = newton.eval_mass_matrix(model, state)
+#     act_state.bias_forces = -τ_g               # Jacobian-T gravity
+#
+# Coriolis / centrifugal terms are dropped (UR10 velocities are small in
+# a static-hold demo); a full-fidelity controller would run RNEA.  Since
+# gravity is already baked into ``bias_forces``, --stable-pd is
+# mutually exclusive with --gravity-comp.
+#
 # Command:
 #   python -m newton.examples uipc_ur10_force --world-count 1
 #   python -m newton.examples uipc_ur10_force --gravity-comp
@@ -229,6 +246,32 @@ class Example:
             "builder/replicate did not merge the per-DOF actuators as expected"
         )
 
+        # ``ActuatorStablePD`` is stateful: every step needs ``mass_matrix``
+        # and ``bias_forces`` written into its ``State`` for the Tan 2011
+        # implicit solve (see class docstring). The batched builder would
+        # merge all worlds' DOFs into one (6·Nw)-actuator instance, and the
+        # per-step on-device Cholesky scales as O((6·Nw)³) — fine for Nw=1
+        # but quickly defeats the "stable" motivation. Keep this demo to
+        # the single-world case; batched block-diagonal solves are a
+        # follow-up.
+        self._act_state: ActuatorStablePD.State | None = None
+        self._H_buf: wp.array | None = None
+        if self.stable_pd:
+            if self.world_count != 1:
+                raise ValueError(
+                    "--stable-pd currently requires --world-count 1: the builder merges "
+                    "all worlds into a single num_actuators=6·world_count instance whose "
+                    "on-device Cholesky would scale as O((6·Nw)³) with zero off-diagonal "
+                    "mass coupling. Block-diagonal batched solves are a follow-up."
+                )
+            if self.gravity_comp:
+                raise ValueError(
+                    "--stable-pd integrates gravity via its bias_forces input, so "
+                    "--gravity-comp would double-compensate through constant_force. "
+                    "Pass only one of the two flags."
+                )
+            self._act_state = self.pd_actuator.state()
+
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
         self.viewer.set_model(self.model)
         self.viewer.set_camera(
@@ -326,10 +369,27 @@ class Example:
             # actuators (6 DOFs x N worlds). Flatten accordingly.
             self.pd_actuator.constant_force.assign(tau_g.reshape(-1).astype(np.float32))
 
+        if self.stable_pd:
+            # Populate the Tan 2011 State each substep.  ``eval_mass_matrix``
+            # returns H of shape (articulation_count, max_dofs, max_dofs) —
+            # for world_count=1 this is (1, 6, 6) and H[0] is the UR10 6x6
+            # joint-space inertia that goes into the (M + diag(Kd)·Δt) solve.
+            self._H_buf = newton.eval_mass_matrix(self.model, self.state_0, H=self._H_buf)
+            self._act_state.mass_matrix.assign(self._H_buf.numpy()[0])
+
+            # ``_compute_gravity_comp`` returns τ_g = -Σ Jᵀ(m·g), i.e. the
+            # torque that *cancels* gravity (what ActuatorPD.constant_force
+            # wants).  Tan 2011's ``C`` in the rhs ``b = p + d - C`` is the
+            # torque gravity *imposes* on the joints, so C = -τ_g.  Coriolis
+            # is dropped — acceptable for UR10 static-hold but not for a
+            # trajectory tracker.
+            tau_g = self._compute_gravity_comp().reshape(-1).astype(np.float32)
+            self._act_state.bias_forces.assign(-tau_g)
+
         self.pd_actuator.step(
             sim_state=self.state_0,
             sim_control=self.control,
-            current_act_state=None,
+            current_act_state=self._act_state,
             next_act_state=None,
             dt=self.sim_dt,
         )
@@ -405,8 +465,12 @@ class Example:
             action="store_true",
             help=(
                 "Use ActuatorStablePD (Tan et al. 2011) instead of ActuatorPD. "
-                "The implicit-in-position PD prediction damps the high-gain "
-                "oscillation the plain PD shows under UIPC's implicit integrator."
+                "The controller runs an on-device (M + diag(Kd)·Δt)·qddot = b "
+                "solve each substep, so the example populates its State with "
+                "M = newton.eval_mass_matrix and bias_forces = Jacobian-T "
+                "gravity every substep. Coriolis is neglected (static-hold "
+                "demo). Mutually exclusive with --gravity-comp (bias_forces "
+                "already contains gravity). Requires --world-count 1."
             ),
         )
         parser.set_defaults(world_count=1)
