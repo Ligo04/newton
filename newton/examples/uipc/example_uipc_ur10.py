@@ -74,8 +74,10 @@ class Example:
         self.solver = newton.solvers.SolverUIPC(
             self.model,
             dt=self.sim_dt,
-            logger_level=uipc.Logger.Info,
+            logger_level=uipc.Logger.Warn,
         )
+        newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
+        self.solver.initialize(self.state_0)
 
         self.state_1 = self.model.state()
         self.control = self.model.control()
@@ -89,7 +91,6 @@ class Example:
         # Prepare sinusoidal trajectory parameters
         self.dof_per_world = self.model.joint_dof_count // self.world_count if self.world_count > 0 else 0
 
-        newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
         self.viewer.set_model(self.model)
         self.viewer.set_camera(
             pos=wp.vec3(5.0, 5.0, 3.0),
@@ -150,7 +151,7 @@ class Example:
     def create_parser():
         parser = newton.examples.create_parser()
         newton.examples.add_world_count_arg(parser)
-        parser.set_defaults(world_count=4)
+        parser.set_defaults(world_count=1)
         return parser
 
 
