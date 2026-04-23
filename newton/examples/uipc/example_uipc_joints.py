@@ -228,7 +228,6 @@ class Example:
             workspace="/tmp/newton_uipc/joints",
             dt=self.sim_dt,
             logger_level=uipc.Logger.Error,
-            dump_enable=True,
         )
         self.state_1 = self.model.state()
         self.control = self.model.control()
