@@ -13,6 +13,7 @@ import uipc.builtin as uipc_builtin
 import warp as wp
 from uipc import view
 from uipc.constitution import AffineBodyConstitution, Empty
+from uipc.geometry import affine_body as uipc_affine_body
 from uipc.geometry import halfplane, label_surface
 
 from ...geometry import GeoType
@@ -280,6 +281,7 @@ class RigidBodyBuilder:
         subscene_elem: Any,
         body_element_overrides: dict[int, Any] | None = None,
         no_instance_bodies: set[int] | None = None,
+        custom_inertia_bodies: set[int] | None = None,
     ) -> None:
         """Convert Newton rigid bodies to UIPC AffineBody geometries.
 
@@ -314,6 +316,15 @@ class RigidBodyBuilder:
                 bodies.
             no_instance_bodies: Set of body indices that must NOT be grouped
                 into instanced geometries (e.g. children of ball joints).
+            custom_inertia_bodies: Set of body indices whose ABD mass matrix
+                must be taken from Newton's authored
+                ``body_mass`` / ``body_com`` / ``body_inertia`` rather than
+                re-derived by UIPC from ``mass_density * mesh_volume``.
+                These bodies are always forced into single-instance geometries
+                (a ``SimplicialComplex`` carries one shared set of ABD meta
+                attributes), and the geometry is built through the explicit
+                :meth:`AffineBodyConstitution.apply_to` overload that takes a
+                12x12 mass matrix plus a volume override.
         """
         model = self._model
         if model.body_count == 0:
@@ -325,7 +336,14 @@ class RigidBodyBuilder:
 
         body_flags_np = model.body_flags.numpy()
         body_mass_np = model.body_mass.numpy() if model.body_mass is not None else None
-        no_inst = no_instance_bodies or set()
+        body_com_np = model.body_com.numpy() if model.body_com is not None else None
+        body_inertia_np = model.body_inertia.numpy() if model.body_inertia is not None else None
+        no_inst = set(no_instance_bodies) if no_instance_bodies else set()
+        custom_inertia = set(custom_inertia_bodies) if custom_inertia_bodies else set()
+        # Custom-inertia bodies must each live in their own SimplicialComplex
+        # so ABD meta (per-geometry, not per-instance) reflects the unique
+        # (mass, COM, inertia) triplet of that body.
+        no_inst |= custom_inertia
 
         # --- Phase A: Collect per-body data ---------------------------------
         body_infos: list[_BodyInfo] = []
@@ -389,16 +407,48 @@ class RigidBodyBuilder:
             if subscene_elem is not None:
                 subscene_elem.apply_to(sc)
 
-            # Constitution with first body's mass density as default
-            AffineBodyConstitution().apply_to(
-                sc=sc,
-                kappa=self._kappa,
-                mass_density=ref.mass_density,
+            # Branch: does this (single-body) group need a Newton-authored
+            # mass matrix, or the default density-driven ABD recomputation?
+            use_custom_inertia = (
+                n == 1
+                and ref.body_idx in custom_inertia
+                and body_mass_np is not None
+                and body_com_np is not None
+                and body_inertia_np is not None
+                and mesh_vol > 1e-12
             )
 
-            # Override per-instance mass density where different from reference
-            density_view: np.ndarray = view(sc.meta().find(uipc_builtin.mass_density))  # ty:ignore[no-matching-overload]  # pyright: ignore[reportArgumentType]
-            density_view[:] = ref.mass_density
+            if use_custom_inertia:
+                assert body_mass_np is not None
+                assert body_com_np is not None
+                assert body_inertia_np is not None
+                mass = float(body_mass_np[ref.body_idx])
+                com = np.asarray(body_com_np[ref.body_idx], dtype=np.float64).reshape(3)
+                inertia_cm = np.asarray(body_inertia_np[ref.body_idx], dtype=np.float64).reshape(3, 3)
+                # UIPC expects a symmetric inertia tensor; symmetrise to guard
+                # against float-roundoff drift in Newton's stored matrix.
+                inertia_cm = 0.5 * (inertia_cm + inertia_cm.T)
+                mass_matrix = uipc_affine_body.from_rigid_body(mass, com, inertia_cm)
+                # ``volume`` feeds UIPC's energy scaling; the mesh-derived
+                # volume is the natural choice (matches the default density
+                # path when mass/com/inertia coincide).
+                AffineBodyConstitution().apply_to(
+                    sc,
+                    self._kappa,
+                    mass_matrix,
+                    float(mesh_vol),
+                )
+            else:
+                # Constitution with first body's mass density as default
+                AffineBodyConstitution().apply_to(
+                    sc=sc,
+                    kappa=self._kappa,
+                    mass_density=ref.mass_density,
+                )
+
+                # Override per-instance mass density where different from reference
+                density_view: np.ndarray = view(sc.meta().find(uipc_builtin.mass_density))  # ty:ignore[no-matching-overload]  # pyright: ignore[reportArgumentType]
+                density_view[:] = ref.mass_density
 
             label_surface(sc)
 

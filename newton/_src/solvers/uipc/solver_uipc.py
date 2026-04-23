@@ -17,6 +17,7 @@ import uipc
 import uipc.adapter.warp
 import warp as wp
 from uipc import Logger as ULogger
+from uipc import view
 from uipc.core import AffineBodyStateAccessorFeature, ContactElement, ContactTabular, SceneIO
 from uipc.core import Scene as UScene
 from uipc.stats import SimulationStats as USimulationStats
@@ -40,6 +41,30 @@ from .converter import (
 )
 from .deformable_body import DeformableBodyBuilder
 from .rigid_body import RigidBodyBuilder
+
+# ---------------------------------------------------------------------------
+# UIPC ABD meta-attribute names (see libuipc AffineBodyConstitution).
+# Every AffineBody geometry carries six per-group meta attributes that
+# together describe its rigid-body mass properties:
+#
+#   "mass"                 Float   - scalar mass m                [kg]
+#   "mass_center"          Vec3    - COM c in body frame           [m]
+#   "inertia"              Mat3x3  - standard inertia at COM       [kg*m^2]
+#                                    (= integral rho*(|r|^2*E - r*r^T) dV)
+#   "abd_mass"             Float   - same m (cached)
+#   "abd_mass_x_bar"       Vec3    - integral rho*x dV      = m*c
+#   "abd_mass_x_bar_x_bar" Mat3x3  - integral rho*x*x^T dV  (about body-frame origin)
+#
+# The "friendly" triplet matches Newton's ``body_mass`` / ``body_com`` /
+# ``body_inertia`` conventions directly (inertia is about the COM, in
+# body-local axes, units kg*m^2), so reading back is a plain copy.
+# ---------------------------------------------------------------------------
+_UIPC_MASS_ATTR: str = "mass"
+_UIPC_COM_ATTR: str = "mass_center"
+_UIPC_INERTIA_ATTR: str = "inertia"
+_UIPC_ABD_MASS_ATTR: str = "abd_mass"
+_UIPC_ABD_MX_ATTR: str = "abd_mass_x_bar"
+_UIPC_ABD_MXX_ATTR: str = "abd_mass_x_bar_x_bar"
 
 
 class SolverUIPC(SolverBase):
@@ -126,6 +151,7 @@ class SolverUIPC(SolverBase):
         logger_level=ULogger.Warn,
         dump_enable: bool = False,
         require_profile: bool = False,
+        auto_sync_inertia: bool = True,
     ):
         """Create a UIPC solver instance from a Newton model.
 
@@ -153,6 +179,17 @@ class SolverUIPC(SolverBase):
                 :meth:`save_performance_report` once on normal interpreter
                 shutdown, so users do not need to call it explicitly. The
                 hook is a no-op if the report was already saved manually.
+            auto_sync_inertia: If ``True`` (default), :meth:`initialize`
+                finishes by calling :meth:`override_model_inertia_from_uipc`
+                so the Newton model's ``body_mass`` / ``body_com`` /
+                ``body_inertia`` (and their inverses) mirror the finalised
+                UIPC ABD values.  Set to ``False`` to preserve the exact
+                authored values from ``ModelBuilder`` — useful when a
+                downstream consumer (e.g. Featherstone-derived mass matrix
+                for stable PD) has already been tuned against those values
+                and must not see UIPC's mesh-volume-derived drift.  Bodies
+                flagged via :meth:`override_uipc_inertia_from_model` are
+                always pushed into UIPC regardless of this flag.
         """
         super().__init__(model=model)
         self.import_uipc()
@@ -221,6 +258,18 @@ class SolverUIPC(SolverBase):
         # User-registered callbacks (set via configure_* methods)
         self._contact_tabular_fn: Callable | None = None
         self._subscene_tabular_fn: Callable | None = None
+
+        # Bodies whose Newton-authored (mass, com, inertia) must be pushed
+        # into the UIPC ABD geometry instead of letting UIPC re-derive them
+        # from ``mass_density * mesh_volume``.  Populated via
+        # :meth:`override_uipc_inertia_from_model` before :meth:`initialize`.
+        self._custom_inertia_bodies: set[int] = set()
+
+        # Whether :meth:`initialize` should auto-call
+        # :meth:`override_model_inertia_from_uipc` at the end so the Newton
+        # model mirrors UIPC's ABD-finalised mass properties.  Disable to
+        # keep the authored ``ModelBuilder`` values untouched.
+        self._auto_sync_inertia: bool = auto_sync_inertia
 
         # Builders (populated during initialize)
         self._rigid_body_builder: RigidBodyBuilder
@@ -430,10 +479,218 @@ class SolverUIPC(SolverBase):
         self._subscene_tabular_fn = fn
 
     # ------------------------------------------------------------------
+    # Mass / inertia bridge: read ABD-derived values back into Newton
+    # ------------------------------------------------------------------
+
+    def override_uipc_inertia_from_model(
+        self,
+        body_indices: list[int] | None = None,
+    ) -> list[int]:
+        """Mark bodies whose UIPC ABD mass properties must follow Newton.
+
+        By default :class:`~uipc.constitution.AffineBodyConstitution` recomputes
+        each body's mass, COM, and inertia from ``mass_density * mesh_volume``
+        and the mesh's spatial moments — ignoring any hand-authored values in
+        ``ModelBuilder`` (e.g. :attr:`Model.body_com`, :attr:`Model.body_inertia`
+        set from URDF ``<inertial>`` or direct assignment).
+
+        Calling this before :meth:`initialize` flags a set of body indices
+        whose geometry should instead be built through the explicit
+        ``apply_to(sc, kappa, mass_matrix, volume)`` overload, with the 12x12
+        ABD mass matrix produced by
+        :func:`uipc.geometry.affine_body.from_rigid_body` from Newton's
+        :attr:`Model.body_mass` / :attr:`Model.body_com` /
+        :attr:`Model.body_inertia`.
+
+        Because a single UIPC ``SimplicialComplex`` carries one shared set of
+        ABD meta attributes, each flagged body is removed from the per-shape
+        instance grouping in :meth:`RigidBodyBuilder.build_affine_bodies` and
+        placed into its own geometry.
+
+        Must be called **before** :meth:`initialize`.
+
+        Args:
+            body_indices: Bodies whose authored mass properties should be
+                pushed into UIPC.  ``None`` = every body in the model.
+
+        Returns:
+            The full list of body indices currently flagged (cumulative
+            across calls).
+
+        Raises:
+            RuntimeError: If the solver has already been initialized.
+            IndexError: If any entry in ``body_indices`` is out of range.
+        """
+        if self._initialized:
+            raise RuntimeError(
+                "override_uipc_inertia_from_model must be called before "
+                "initialize() — the UIPC ABD geometry is built there and "
+                "cannot be rewritten after world.init()."
+            )
+        model = self.model
+        if body_indices is None:
+            indices: list[int] = list(range(model.body_count))
+        else:
+            indices = [int(b) for b in body_indices]
+            for b in indices:
+                if not (0 <= b < model.body_count):
+                    raise IndexError(f"body index {b} out of range [0, {model.body_count})")
+        self._custom_inertia_bodies.update(indices)
+        return sorted(self._custom_inertia_bodies)
+
+    def read_uipc_body_inertia(self, body_idx: int) -> dict[str, Any]:
+        """Read UIPC's ABD mass properties for a mapped Newton body.
+
+        Must be called **after** :meth:`initialize` (which runs
+        ``AffineBodyConstitution.apply_to`` and ``world.init(scene)``;
+        the latter is when UIPC finalises the ABD integrals on each
+        geometry).
+
+        The six ``SimplicialComplex.meta()`` attributes of the body's
+        UIPC geometry are returned:
+
+        - ``mass``                 — ``float``, scalar mass [kg]
+        - ``mass_center``          — ``(3,) float64``, COM in body frame [m]
+        - ``inertia``              — ``(3, 3) float64``, standard inertia at COM [kg·m²]
+        - ``abd_mass``             — ``float``, same value as ``mass``
+        - ``abd_mass_x_bar``       — ``(3,) float64``, ``m·c``
+        - ``abd_mass_x_bar_x_bar`` — ``(3, 3) float64``, second moment integral at origin  # noqa: RUF002
+
+        Missing attributes map to ``None`` (happens e.g. for proxy
+        bodies that were not built via ``AffineBodyConstitution``).
+
+        Args:
+            body_idx: Newton body index.
+
+        Raises:
+            RuntimeError: If the solver has not been initialized.
+            KeyError: If ``body_idx`` has no mapped UIPC geometry.
+        """
+        if not self._initialized:
+            raise RuntimeError(
+                "read_uipc_body_inertia requires the solver to be initialized; "
+                "call initialize() (or let step() do it) first."
+            )
+        geo_slot = self.mapping.body_geo_slots.get(body_idx)
+        if geo_slot is None:
+            raise KeyError(f"body {body_idx} has no mapped UIPC geometry")
+
+        meta = geo_slot.geometry().meta()
+        # Mirror the C++ pattern from the reference test:
+        #   auto mass_attr = mesh1.meta().find<Float>("mass");
+        #   Float mass_val = mass_attr->view()[0];
+        # Python binding: meta.find(name) -> Attribute | None, then view(attr)[0].
+        out: dict[str, Any] = {}
+        for name, shape in (
+            (_UIPC_MASS_ATTR, None),
+            (_UIPC_ABD_MASS_ATTR, None),
+            (_UIPC_COM_ATTR, (3,)),
+            (_UIPC_ABD_MX_ATTR, (3,)),
+            (_UIPC_INERTIA_ATTR, (3, 3)),
+            (_UIPC_ABD_MXX_ATTR, (3, 3)),
+        ):
+            attr = meta.find(name)
+            if attr is None:
+                out[name] = None
+                continue
+            v = np.asarray(view(attr)[0], dtype=np.float64)
+            out[name] = float(v) if shape is None else v.reshape(shape).copy()
+        return out
+
+    def override_model_inertia_from_uipc(
+        self,
+        body_indices: list[int] | None = None,
+    ) -> list[int]:
+        """Overwrite Newton ``model.body_{mass,com,inertia}`` with UIPC ABD values.
+
+        UIPC's :class:`AffineBodyConstitution` derives each body's mass,
+        center-of-mass, and inertia from ``mass_density * mesh_volume``
+        and the mesh's spatial moments, which can diverge from the
+        URDF / USD-authored values stored in the Newton model when the
+        collision geometry is simplified (hulls, boxes, etc.).
+
+        This method reads the finalised UIPC meta attributes
+        (``mass`` / ``mass_center`` / ``inertia``) and writes them back
+        into ``model.body_mass`` / ``model.body_com`` /
+        ``model.body_inertia``.  ``model.body_inv_mass`` and
+        ``model.body_inv_inertia`` are refreshed to stay consistent.
+
+        Must be called **after** ``world.init(scene)`` has run (i.e.
+        after :meth:`initialize`); otherwise the ABD meta has not been
+        finalised yet.
+
+        Args:
+            body_indices: Bodies to synchronise.  ``None`` = every body
+                that has a UIPC geometry slot.
+
+        Returns:
+            The list of body indices that were actually written
+            (skips unmapped bodies, bodies whose geometry lacks ABD
+            attributes such as proxy bodies, and zero-mass bodies).
+        """
+        if not self._initialized:
+            raise RuntimeError(
+                "override_model_inertia_from_uipc must be called after "
+                "initialize()/world.init(); UIPC has not finalised the ABD "
+                "meta attributes yet."
+            )
+        model = self.model
+        if model.body_mass is None or model.body_com is None or model.body_inertia is None:
+            return []
+
+        if body_indices is None:
+            body_indices = sorted(self.mapping.body_geo_slots.keys())
+
+        # Pull once, mutate host arrays, push back in one shot — avoids
+        # body_count round-trips to the device.
+        body_mass_np = model.body_mass.numpy().copy()
+        body_com_np = model.body_com.numpy().copy()
+        body_inertia_np = model.body_inertia.numpy().copy()
+
+        inv_mass_np = model.body_inv_mass.numpy().copy() if model.body_inv_mass is not None else None
+        inv_inertia_np = model.body_inv_inertia.numpy().copy() if model.body_inv_inertia is not None else None
+
+        written: list[int] = []
+        for b in body_indices:
+            props = self.read_uipc_body_inertia(b)
+            m = props[_UIPC_MASS_ATTR]
+            c = props[_UIPC_COM_ATTR]
+            i_cm = props[_UIPC_INERTIA_ATTR]
+            if m is None or c is None or i_cm is None:
+                continue  # proxy or otherwise missing ABD metadata
+            if m <= 0.0:
+                continue
+
+            body_mass_np[b] = np.float32(m)
+            body_com_np[b] = np.asarray(c, dtype=np.float32)
+            body_inertia_np[b] = np.asarray(i_cm, dtype=np.float32).reshape(3, 3)
+            if inv_mass_np is not None:
+                inv_mass_np[b] = np.float32(1.0 / m)
+            if inv_inertia_np is not None:
+                # Symmetric 3x3 invert via numpy; falls back to pseudo-inverse
+                # if inertia is singular (e.g. a degenerate ABD proxy).
+                try:
+                    inv_i = np.linalg.inv(i_cm)
+                except np.linalg.LinAlgError:
+                    inv_i = np.linalg.pinv(i_cm)
+                inv_inertia_np[b] = inv_i.astype(np.float32).reshape(3, 3)
+            written.append(b)
+
+        if written:
+            model.body_mass.assign(body_mass_np)
+            model.body_com.assign(body_com_np)
+            model.body_inertia.assign(body_inertia_np)
+            if inv_mass_np is not None and model.body_inv_mass is not None:
+                model.body_inv_mass.assign(inv_mass_np)
+            if inv_inertia_np is not None and model.body_inv_inertia is not None:
+                model.body_inv_inertia.assign(inv_inertia_np)
+        return written
+
+    # ------------------------------------------------------------------
     # Initialization
     # ------------------------------------------------------------------
 
-    def initialize(self, state: State | None = None) -> None:
+    def initialize(self, state: State | None = None) -> None:  # pyright: ignore[reportRedeclaration]
         """Build UIPC scene objects from the Newton model and initialize the world.
 
         Creates a single UIPC Engine, World, and Scene. For multi-world models,
@@ -442,8 +699,22 @@ class SolverUIPC(SolverBase):
         calls ``world.init(scene)``.
 
         Call this explicitly after any :meth:`configure_scene`,
-        :meth:`configure_contact_tabular`, and
-        :meth:`configure_subscene_tabular` calls.
+        :meth:`configure_contact_tabular`,
+        :meth:`configure_subscene_tabular`, and
+        :meth:`override_uipc_inertia_from_model` calls.
+
+        After ``world.init(scene)`` returns, the Newton model's
+        :attr:`Model.body_mass` / :attr:`Model.body_com` /
+        :attr:`Model.body_inertia` (and their inverses) are **auto-synced** to
+        the finalised UIPC ABD values via
+        :meth:`override_model_inertia_from_uipc` so both sides agree on rigid
+        body dynamics.  Bodies flagged through
+        :meth:`override_uipc_inertia_from_model` round-trip their authored
+        values unchanged; all other bodies adopt UIPC's mesh-volume-derived
+        triplet.  Shapeless articulation proxies (which carry sentinel ABD
+        meta) are excluded from the sync.  Pass
+        ``auto_sync_inertia=False`` to the solver constructor to skip this
+        final sync and keep the authored ``ModelBuilder`` values verbatim.
 
         Args:
             state: Optional initial :class:`State` whose ``body_q`` /
@@ -605,6 +876,7 @@ class SolverUIPC(SolverBase):
                 se,
                 body_element_overrides,
                 no_instance_bodies=ball_joint_bodies,
+                custom_inertia_bodies=self._custom_inertia_bodies,
             )
             self._rigid_body_builder.build_static_colliders(env_elems[world_index], se)
             self._articulation_builder.build_joints(robo_elems[world_index], joint_range, se)
@@ -639,6 +911,29 @@ class SolverUIPC(SolverBase):
             self._abd_velocity_buf = None
 
         self._initialized = True
+
+        # Auto-sync Newton model mass properties with UIPC's ABD values.
+        #
+        # After ``world.init(scene)``, every AffineBody geometry carries a
+        # finalised set of ABD meta attributes (``mass`` / ``mass_center`` /
+        # ``inertia``) that UIPC will use for dynamics.  For the default
+        # density path these are mesh-volume integrals that can diverge from
+        # Newton's authored values (e.g. box tessellation anisotropy); for
+        # bodies flagged through :meth:`override_uipc_inertia_from_model`
+        # they round-trip Newton's own values back exactly.
+        #
+        # Shapeless articulation proxies are excluded: their ABD meta is
+        # populated with sentinel values (``mass=1``, ``inertia=1e-6*I``)
+        # by :meth:`ArticulationBuilder._create_proxy` and must NOT clobber
+        # the authored mass of the real body they stand in for.
+        #
+        # Callers that have tuned downstream consumers (e.g. stable-PD mass
+        # matrix) against the authored values can opt out via
+        # ``auto_sync_inertia=False`` on the constructor.
+        if self._auto_sync_inertia:
+            shape_backed_bodies = [b for b in self.mapping.body_geo_slots if self.mapping.body_shapes.get(b)]
+            if shape_backed_bodies:
+                self.override_model_inertia_from_uipc(shape_backed_bodies)
 
     # ------------------------------------------------------------------
     # Solver interface
