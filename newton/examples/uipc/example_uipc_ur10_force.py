@@ -47,13 +47,14 @@
 # Command:
 #   python -m newton.examples uipc_ur10_force --world-count 1
 #   python -m newton.examples uipc_ur10_force --gravity-comp
+#   python -m newton.examples uipc_ur10_force --stable-pd
 #   python -m newton.examples uipc_ur10_force --solver mujoco
 #
 ###########################################################################
 
 import numpy as np
 import warp as wp
-from newton_actuators import ActuatorPD
+from newton_actuators import ActuatorPD, ActuatorStablePD
 
 import newton
 import newton.examples
@@ -85,6 +86,7 @@ class Example:
         self.world_count = args.world_count
         self.solver_name = args.solver
         self.gravity_comp = bool(args.gravity_comp)
+        self.stable_pd = bool(args.stable_pd)
         self.viewer = viewer
 
         # --- Joint-space PD gains ---------------------------------------------
@@ -135,14 +137,18 @@ class Example:
             if ur10.joint_type[i] == newton.JointType.REVOLUTE:
                 ur10.joint_armature[i] = 1e-2
 
-        # Register one ActuatorPD per UR10 DOF. Each call appends to the shared
-        # entry (ActuatorPD has no scalar params) so the final Model.actuators[0]
-        # drives every DOF on every replicated world with its own kp/kd/max_force.
-        # gravity compensation is injected via the actuator's ``constant_force``
-        # array, which we refresh every substep in ``_apply_feedback``.
+        # Register one PD actuator per UR10 DOF. ``--stable-pd`` swaps the
+        # standard PD for ``ActuatorStablePD`` (Tan et al. 2011): the control
+        # law predicts the next-step position via ``-qd*dt`` before the PD
+        # error, which removes the high-gain oscillation that plain PD hits
+        # under UIPC's implicit integrator.  Constructor signature is
+        # identical, so everything downstream that treats this as
+        # ``ActuatorPD`` (including the ``isinstance`` lookup below) still
+        # works — ``ActuatorStablePD`` subclasses ``ActuatorPD``.
+        actuator_cls = ActuatorStablePD if self.stable_pd else ActuatorPD
         for dof_idx in range(len(self.kp)):
             ur10.add_actuator(
-                ActuatorPD,
+                actuator_cls,
                 input_indices=[dof_idx],
                 kp=float(self.kp[dof_idx]),
                 kd=float(self.kd[dof_idx]),
@@ -393,6 +399,15 @@ class Example:
             "--gravity-comp",
             action="store_true",
             help="Enable Jacobian-transpose gravity compensation (off by default).",
+        )
+        parser.add_argument(
+            "--stable-pd",
+            action="store_true",
+            help=(
+                "Use ActuatorStablePD (Tan et al. 2011) instead of ActuatorPD. "
+                "The implicit-in-position PD prediction damps the high-gain "
+                "oscillation the plain PD shows under UIPC's implicit integrator."
+            ),
         )
         parser.set_defaults(world_count=1)
         return parser
