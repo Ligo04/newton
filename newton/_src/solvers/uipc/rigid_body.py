@@ -221,6 +221,9 @@ class RigidBodyBuilder:
         is_dynamic = sc.vertices().find(uipc_builtin.is_dynamic)
         view(is_dynamic)[:] = 0  # ty:ignore[no-matching-overload]  # pyright: ignore[reportArgumentType]
 
+        is_fixed = sc.vertices().find(uipc_builtin.is_fixed)
+        view(is_fixed)[:] = 1  # ty:ignore[no-matching-overload]  # pyright: ignore[reportArgumentType]
+
         sc.vertices().create(uipc_builtin.gravity, np.array([[0.0], [0.0], [0.0]], dtype=np.float64))
 
         obj = self._scene.objects().create("static_colliders")
