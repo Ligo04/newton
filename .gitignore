@@ -75,3 +75,5 @@ docs/_static/viser/
 **/*.ipynb_checkpoints/
 .omc/
 output/
+.aura/
+.claude/scheduled_tasks.lock
