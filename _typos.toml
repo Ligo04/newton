@@ -3,3 +3,5 @@
 abd = "abd"
 # Shepperd's method — quaternion extraction algorithm (proper noun)
 Shepperd = "Shepperd"
+# Level of Detail — standard 3D graphics term (viser LOD simplification)
+LOD = "LOD"

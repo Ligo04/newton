@@ -4,6 +4,7 @@
 
 ### Added
 
+- Add composable actuator subsystem with pluggable `Controller` (`ControllerPD`, `ControllerPID`, `ControllerNeuralMLP`, `ControllerNeuralLSTM`), `Clamping` (`ClampingMaxEffort`, `ClampingDCMotor`, `ClampingPositionBased`), and `Delay` components; supports per-DOF delays, CUDA graph capture, and masked environment reset
 - Add heatmap rendering for scalar arrays logged through `ViewerGL.log_array()`
 - Add `SolverXPBD.update_contacts()` to populate `contacts.force` with per-contact spatial forces (linear force and torque) derived from XPBD constraint impulses
 - Raise process priority automatically in `--benchmark` mode for more stable measurements; add `--realtime` for maximum priority.
@@ -15,6 +16,7 @@
 - Add fast parity-based SDF construction path for watertight meshes in `SDF.create_from_mesh`, using `wp.mesh_query_point_sign_parity` instead of winding numbers; selected via the new `sign_method` argument (`"auto"` — the default — picks parity when `Mesh.is_watertight` is true, or `"parity"` / `"winding"` to force either strategy)
 - Add `ViewerBase.log_arrows()` for arrow rendering (wide line + arrowhead) in the GL viewer with a dedicated geometry shader
 - Add `enable_multiccd` parameter to `SolverMuJoCo` for multi-CCD contact generation (up to 4 contact points per geom pair)
+- Support `<joint type="ball"/>` in the MJCF importer, and preserve authored damping, stiffness, and frictionloss when exporting ball joints to MuJoCo specs (previously silently dropped)
 - Add `ViewerViser.log_scalar()` for live scalar time-series plots via uPlot
 - Honor `UsdGeomImageable` visibility (including inherited `invisible`) on USD prims imported via `ModelBuilder.add_usd()`; visual shapes, gaussian splats, and collider shapes are imported with `ShapeFlags.VISIBLE` cleared when the prim is effectively invisible, while collision behavior is preserved
 
@@ -52,6 +54,7 @@
 - Fix MJCF importer in `compiler.angle="degree"` mode: (1) stop multiplying joint `damping`/`stiffness` by `180/π` (MuJoCo stores these in `N·m·s/rad` and `N·m/rad` regardless of `angle`); (2) stop `deg2rad`-scaling the default `±MAXVAL` sentinel for joints without an explicit `range=`, which was turning unlimited hinges into bounded joints with `~1.75e8 rad` range
 - Fix ViewerViser mesh popping artifacts caused by viser's automatic LOD simplification creating holes in complex geometry
 - Fix degenerate zero-area triangles in SDF marching-cubes isosurface extraction by clamping edge interpolation away from cube corners and guarding against near-zero cross products
+- Fix multi-world coordinate conversion using the wrong body center of mass for replicated worlds
 - Fix MJCF importer ignoring `<default><equality/></default>` attribute defaults (e.g. `solref`, `solimp`) for `<connect>`/`<weld>`/`<joint>` equality constraints
 - Remove incorrect body-level `mjc:damping` -> `rigid_body_linear_damping` mapping from `SchemaResolverMjc`; `mjc:damping` is defined on `MjcJointAPI`, not on bodies
 
@@ -102,6 +105,7 @@
 - Add `deterministic` flag to `CollisionPipeline` and `NarrowPhase` for GPU-thread-scheduling-independent contact ordering via radix sort and deterministic fingerprint tiebreaking in contact reduction
 - Add `ViewerBase.log_arrows()` for arrow rendering (wide line + arrowhead) in the GL viewer with a dedicated geometry shader
 - Add `MODEL_PROPERTIES` support to `SolverUIPC.notify_model_changed()` -- runtime `model.gravity` changes are now propagated into the live UIPC `scene.config()`. `JOINT_PROPERTIES` / `BODY_PROPERTIES` / `MODEL_PROPERTIES` are routed through dedicated `_notify_*` handlers; `JOINT_PROPERTIES` now runs FK via `newton.eval_fk` (single on-device Warp launch) so `body_qd` is refreshed alongside `body_q`. All other flags (joint-DOF, body-inertial, shape, constraint, tendon, actuator) remain unsupported and share a single aggregated warning
+- Add site-targeted actuator support to MuJoCo solver
 
 ### Changed
 
@@ -130,6 +134,8 @@
 - Add optional `state` parameter to `SolverBase.update_contacts()` to align the base-class signature with Kamino and MuJoCo solvers
 - Use `Literal` types for `SolverImplicitMPM.Config` string fields with fixed option sets (`solver`, `warmstart_mode`, `collider_velocity_mode`, `grid_type`, `transfer_scheme`, `integration_scheme`)
 - Migrate `wp.array(dtype=X)` type annotations to `wp.array[X]` bracket syntax (Warp 1.12+).
+- Replace `ModelBuilder.add_actuator(actuator_class, input_indices=..., output_indices=..., **kwargs)` with `ModelBuilder.add_actuator(controller_class, index=..., clamping=[...], delay_steps=..., pos_index=..., **ctrl_kwargs)` where each call registers a single DOF
+- Change `ArticulationView.get_actuator_parameter(actuator, name)` and `set_actuator_parameter(actuator, name, values)` to require a `component` argument identifying the owning `Controller`, `Clamping`, or `Delay` instance: `get_actuator_parameter(actuator, actuator.controller, "kp")`
 - Align articulated `State.body_qd` / FK / IK / Jacobian / mass-matrix linear velocity with COM-referenced motion. If you were comparing `body_qd[:3]` against finite-differenced body-origin motion, recover origin velocity via `v_origin = v_com - omega x r_com_world`. Descendant `FREE` / `DISTANCE` `joint_qd` remains parent-frame and `joint_f` remains a world-frame COM wrench.
 
 ### Deprecated
@@ -148,6 +154,7 @@
 - Deprecate `ModelBuilder.add_shape_ellipsoid()` parameters `a`, `b`, `c` in favor of `rx`, `ry`, `rz`
 - Deprecate passing a `Gaussian` as the second positional argument to `ModelBuilder.add_shape_gaussian()`; use the `gaussian=` keyword argument instead
 - Deprecate `SensorTiledCamera.utils.assign_random_colors_per_world()` and `assign_random_colors_per_shape()` in favor of per-shape colors via `ModelBuilder.add_shape_*(color=...)`
+- Deprecate `newton-actuators` package dependency; all actuator functionality is now built into `newton.actuators`. The dependency is kept for backward compatibility and will be removed in a future release; migrate imports from `newton_actuators` to `newton.actuators`
 
 ### Removed
 
