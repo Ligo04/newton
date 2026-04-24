@@ -12,7 +12,7 @@
 # passive so they swing as the cart accelerates.
 #
 # Compare with ``example_uipc_cartpole_pd_force`` which keeps the same task
-# but implements the PD law in user space via ``newton_actuators.ActuatorPD``
+# but implements the PD law in user space via ``newton.actuators.ControllerPD``
 # and feeds the computed torque into ``JointTargetMode.EFFORT``.
 #
 # Command: python -m newton.examples uipc_cartpole_pd_position --world-count 1
@@ -45,7 +45,7 @@ class Example:
         self.cart_frequency = 0.5  # [Hz]
 
         # PD gains for UIPC's built-in position aim drive. Matched with the
-        # gains used in the ActuatorPD force variant so the two examples
+        # gains used in the ControllerPD force variant so the two examples
         # produce comparable tracking.
         self.kp = 2000.0
         self.kd = 200.0

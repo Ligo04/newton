@@ -6,6 +6,7 @@ from .controller_neural_lstm import ControllerNeuralLSTM
 from .controller_neural_mlp import ControllerNeuralMLP
 from .controller_pd import ControllerPD
 from .controller_pid import ControllerPID
+from .controller_stable_pd import ControllerStablePD
 
 __all__ = [
     "Controller",
@@ -13,4 +14,5 @@ __all__ = [
     "ControllerNeuralMLP",
     "ControllerPD",
     "ControllerPID",
+    "ControllerStablePD",
 ]

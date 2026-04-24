@@ -27,7 +27,7 @@
 # value in ``joint_f[cart_dof]`` accelerates the cart in the direction that
 # catches a positive-theta lean, so the state-feedback sign flips relative
 # to the textbook convention. This is cross-DOF feedback (the cart force
-# depends on pole state), which the single-DOF ``newton_actuators.ActuatorPD``
+# depends on pole state), which the single-DOF ``newton.actuators.ControllerPD``
 # cannot express, so we compute the force in Python and write it directly
 # into ``control.joint_f``. The cart DOF is set to ``JointTargetMode.EFFORT``
 # so the UIPC solver consumes that force as a generalised effort on the
@@ -51,7 +51,7 @@
 # them; only the constructor kwargs and contact setup differ.
 #
 # --stable-pd switches the pole2 joint-lock from a hand-rolled scalar PD
-# to ``ActuatorStablePD`` (Tan et al. 2011).  Tan's implicit-in-position
+# to ``ControllerStablePD`` (Tan et al. 2011).  Tan's implicit-in-position
 # rewrite
 #
 #     (M + Kd·Δt)·θ̈ = Kp·(0 - θ - θ̇·Δt) + Kd·(0 - θ̇) - C
@@ -60,11 +60,11 @@
 # cancels the high-frequency numerical oscillation that plain explicit PD
 # exhibits at the stiff ``k_lock = 400 N·m/rad`` used here.  The cart
 # controller is *not* touched — its state feedback is cross-DOF (F_cart
-# depends on pole1 state) and ActuatorStablePD only handles per-DOF PD.
+# depends on pole1 state) and ControllerStablePD only handles per-DOF PD.
 # For the StablePD actuator we wire:
 #
-#     act_state.mass_matrix = H[pole2, pole2]   # eval_mass_matrix slice
-#     act_state.bias_forces = J_lin^T · (m·g)   # pole2 column, gravity
+#     ctrl_state.mass_matrix = H[pole2, pole2]   # eval_mass_matrix slice
+#     ctrl_state.bias_forces = J_lin^T · (m·g)   # pole2 column, gravity
 #
 # Coriolis is neglected (balance task, velocities remain small).
 #
@@ -76,11 +76,12 @@
 
 import numpy as np
 import warp as wp
-from newton_actuators import ActuatorStablePD
 
 import newton
 import newton.examples
 from newton import JointTargetMode
+from newton.actuators import Actuator as _NewtonActuator
+from newton.actuators import ClampingMaxEffort, ControllerStablePD
 from newton.selection import ArticulationView
 
 
@@ -103,7 +104,7 @@ class Example:
         if self.stable_pd and self.world_count != 1:
             raise ValueError(
                 "--stable-pd currently requires --world-count 1: the batched builder "
-                "would merge all worlds' pole2 DOFs into one ActuatorStablePD instance "
+                "would merge all worlds' pole2 DOFs into one ControllerStablePD instance "
                 "whose on-device Cholesky scales as O(Nw³) with zero off-diagonal mass "
                 "coupling. Block-diagonal batched solves are a follow-up."
             )
@@ -157,23 +158,23 @@ class Example:
         cartpole.joint_target_mode[cart_dof + 1] = int(JointTargetMode.NONE)
         cartpole.joint_target_mode[cart_dof + 2] = int(JointTargetMode.EFFORT)
 
-        # Register an ActuatorStablePD on pole2 so ``--stable-pd`` can drive
-        # the joint-lock via Tan 2011 instead of the hand-rolled scalar PD in
-        # ``_apply_feedback``.  The actuator accumulates into ``control.joint_f``
-        # with ``+=`` — we zero joint_f before writing cart force + running the
-        # actuator so no residual leaks across substeps.  ``target_pos`` /
-        # ``target_vel`` both default to 0 (``Model.control()`` zero-inits
-        # them), which is the pole2 lock's set-point, so no per-step target
-        # update is needed.
+        # Register a ControllerStablePD on pole2 so ``--stable-pd`` can drive
+        # the joint-lock via Tan 2011 instead of the hand-rolled scalar PD
+        # in ``_apply_feedback``.  The composed Actuator scatter-adds into
+        # ``control.joint_f`` (``+=``), so we zero joint_f before writing
+        # the cart force and running the actuator so no residual leaks
+        # across substeps.  Effort clamping is handled by the dedicated
+        # ``ClampingMaxEffort`` layer (the controller kernel itself no
+        # longer clamps).  ``target_pos`` / ``target_vel`` both default to
+        # 0 (``Model.control()`` zero-inits them), which is the pole2
+        # lock's set-point, so no per-step target update is needed.
         if self.stable_pd:
             cartpole.add_actuator(
-                ActuatorStablePD,
-                input_indices=[cart_dof + 2],
+                ControllerStablePD,
+                index=cart_dof + 2,
                 kp=self.k_lock,
                 kd=self.k_lock_d,
-                max_force=self.max_torque_lock,
-                gear=1.0,
-                constant_force=0.0,
+                clamping=[(ClampingMaxEffort, {"max_effort": self.max_torque_lock})],
             )
 
         if self.world_count > 1:
@@ -206,22 +207,32 @@ class Example:
         self.pole1_dof = 1
         self.pole2_dof = 2
 
-        # ActuatorStablePD state + scratch for the per-substep Tan 2011 solve.
-        # ``eval_mass_matrix`` and ``eval_jacobian`` want reusable output
-        # buffers so we don't re-allocate every substep.
-        self._pole2_actuator: ActuatorStablePD | None = None
-        self._act_state: ActuatorStablePD.State | None = None
+        # ControllerStablePD state + scratch for the per-substep Tan 2011
+        # solve.  The composed ``Actuator.State`` wraps the controller's
+        # ``State`` under ``.controller_state``.  ``eval_mass_matrix`` and
+        # ``eval_jacobian`` want reusable output buffers so we don't
+        # re-allocate every substep.
+        self._pole2_actuator: _NewtonActuator | None = None
+        self._act_state: _NewtonActuator.State | None = None
         self._H_buf: wp.array | None = None
         self._J_buf: wp.array | None = None
         self._gravity_np: np.ndarray | None = None
         self._body_mass_np: np.ndarray | None = None
         self._bodies_per_world: int = 0
         if self.stable_pd:
-            pole2_actuator = next((a for a in self.model.actuators if isinstance(a, ActuatorStablePD)), None)
+            pole2_actuator = next(
+                (
+                    a
+                    for a in self.model.actuators
+                    if isinstance(a, _NewtonActuator) and isinstance(a.controller, ControllerStablePD)
+                ),
+                None,
+            )
             if pole2_actuator is None:
-                raise RuntimeError("--stable-pd set but ActuatorStablePD missing from model.actuators")
-            assert len(pole2_actuator.kp) == self.world_count, (
-                f"ActuatorStablePD kp length {len(pole2_actuator.kp)} != world_count {self.world_count}"
+                raise RuntimeError("--stable-pd set but ControllerStablePD missing from model.actuators")
+            kp_len = len(pole2_actuator.controller.kp)
+            assert kp_len == self.world_count, (
+                f"ControllerStablePD kp length {kp_len} != world_count {self.world_count}"
             )
             self._pole2_actuator = pole2_actuator
             self._act_state = pole2_actuator.state()
@@ -278,7 +289,7 @@ class Example:
         """Jacobian-transpose gravity torque on the pole2 DOF.
 
         Returns the ``(world_count,)`` bias-force vector consumed by the
-        Tan 2011 ``ActuatorStablePD`` — namely ``C = g(q) = Σ J_lin[:, pole2]^T · (m · g)``,
+        Tan 2011 ``ControllerStablePD`` — namely ``C = g(q) = Σ J_lin[:, pole2]^T · (m · g)``,
         i.e. the torque gravity *imposes* on the pole2 joint.  Coriolis /
         centrifugal terms are omitted (velocities stay small in the
         balance task — for trajectory tracking a full RNEA would be
@@ -320,7 +331,7 @@ class Example:
         behaviour of the per-DOF ``ActuatorPD`` kernel.
 
         When ``--stable-pd`` is set, the pole2 slot is left at zero and
-        the Tan 2011 ``ActuatorStablePD`` then accumulates its implicit
+        the Tan 2011 ``ControllerStablePD`` then accumulates its implicit
         torque on top of the freshly written cart force.
         """
         # Shape: (world_count, 1, dofs_per_arti)
@@ -350,7 +361,7 @@ class Example:
         f[:, 0, self.cart_dof] = f_cart
         if not self.stable_pd:
             # Hand-rolled scalar PD locking pole2 to pole1. Same torque law
-            # ActuatorStablePD would produce with C=0 under explicit integration.
+            # ControllerStablePD would produce with C=0 under explicit integration.
             tau2 = -self.k_lock * th2 - self.k_lock_d * thd2
             np.clip(tau2, -self.max_torque_lock, self.max_torque_lock, out=tau2)
             f[:, 0, self.pole2_dof] = tau2
@@ -360,18 +371,23 @@ class Example:
             # Feed the Tan 2011 State: pole2 inertia + gravity bias.
             # eval_mass_matrix returns H of shape (articulation_count=1, 3, 3);
             # the pole2 actuator only sees the scalar H[0, pole2, pole2] block,
-            # reshaped to (1, 1) to match act_state.mass_matrix.
+            # reshaped to (1, 1) to match controller_state.mass_matrix.
             self._H_buf = newton.eval_mass_matrix(self.model, self.state_0, H=self._H_buf)
             p2 = self.pole2_dof
             pole2_m = self._H_buf.numpy()[0, p2 : p2 + 1, p2 : p2 + 1].astype(np.float32)
-            self._act_state.mass_matrix.assign(pole2_m)
-            self._act_state.bias_forces.assign(self._compute_pole2_bias())
+            ctrl_state = self._act_state.controller_state
+            ctrl_state.mass_matrix.assign(pole2_m)
+            ctrl_state.bias_forces.assign(self._compute_pole2_bias())
 
+            # ControllerStablePD.update_state is a no-op (per-step scratch,
+            # no cross-step information), so passing the same State as both
+            # current and next is safe; the composed Actuator just needs a
+            # non-None next_act_state for its stateful-actuator validation.
             self._pole2_actuator.step(
                 sim_state=self.state_0,
                 sim_control=self.control,
                 current_act_state=self._act_state,
-                next_act_state=None,
+                next_act_state=self._act_state,
                 dt=self.sim_dt,
             )
 
@@ -449,7 +465,7 @@ class Example:
             "--stable-pd",
             action="store_true",
             help=(
-                "Drive the stiff pole2 joint-lock with ActuatorStablePD "
+                "Drive the stiff pole2 joint-lock with ControllerStablePD "
                 "(Tan et al. 2011) instead of the hand-rolled scalar PD. "
                 "The per-substep State is populated with pole2's diagonal "
                 "entry from newton.eval_mass_matrix and the Jacobian-T "

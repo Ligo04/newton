@@ -44,17 +44,17 @@
 #   - ``semi_implicit`` runs but tends to absorb ``joint_f`` into its
 #     joint attachment constraints and barely moves the arm here.
 #
-# --stable-pd swaps every actuator to Tan 2011 stable PD.  The implicit
-# rewrite
+# --stable-pd swaps every actuator's controller to Tan 2011 stable PD.
+# The implicit rewrite
 #
 #     (M + diag(Kd)·Δt)·qddot = Kp·(q* - q - q̇·Δt) + Kd·(q̇* - q̇) - C
 #     τ = const + Kp·(q* - q - q̇·Δt) + Kd·(q̇* - q̇) - Kd·qddot·Δt
 #
 # needs the articulation mass matrix ``M(q)`` and bias forces
-# ``C(q, q̇)`` fed into the actuator state each substep.  Here we wire:
+# ``C(q, q̇)`` fed into the controller state each substep.  Here we wire:
 #
-#     act_state.mass_matrix = newton.eval_mass_matrix(model, state)
-#     act_state.bias_forces = -τ_g               # Jacobian-T gravity
+#     ctrl_state.mass_matrix = newton.eval_mass_matrix(model, state)
+#     ctrl_state.bias_forces = -τ_g              # Jacobian-T gravity
 #
 # Coriolis / centrifugal terms are dropped (UR10 velocities are small in
 # a static-hold demo); a full-fidelity controller would run RNEA.  Since
@@ -71,12 +71,13 @@
 
 import numpy as np
 import warp as wp
-from newton_actuators import ActuatorPD, ActuatorStablePD
 
 import newton
 import newton.examples
 import newton.utils
 from newton import JointTargetMode
+from newton.actuators import Actuator as _NewtonActuator
+from newton.actuators import ClampingMaxEffort, ControllerPD, ControllerStablePD
 from newton.selection import ArticulationView
 
 
@@ -164,24 +165,24 @@ class Example:
             if ur10.joint_type[i] == newton.JointType.REVOLUTE:
                 ur10.joint_armature[i] = 1e-2
 
-        # Register one PD actuator per UR10 DOF. ``--stable-pd`` swaps the
-        # standard PD for ``ActuatorStablePD`` (Tan et al. 2011): the control
-        # law predicts the next-step position via ``-qd*dt`` before the PD
-        # error, which removes the high-gain oscillation that plain PD hits
-        # under UIPC's implicit integrator.  Constructor signature is
-        # identical, so everything downstream that treats this as
-        # ``ActuatorPD`` (including the ``isinstance`` lookup below) still
-        # works — ``ActuatorStablePD`` subclasses ``ActuatorPD``.
-        actuator_cls = ActuatorStablePD if self.stable_pd else ActuatorPD
+        # Register one PD actuator per UR10 DOF. ``--stable-pd`` swaps plain
+        # ``ControllerPD`` for ``ControllerStablePD`` (Tan et al. 2011): the
+        # stable-PD control law predicts the next-step position via ``-qd*dt``
+        # before the PD error, which removes the high-gain oscillation that
+        # plain PD hits under UIPC's implicit integrator. Both controllers
+        # are composed under ``newton.actuators.Actuator`` with a per-DOF
+        # ``ClampingMaxEffort`` layer handling torque limits — clamping
+        # lives outside the controller kernel in the new architecture.
+        controller_cls = ControllerStablePD if self.stable_pd else ControllerPD
         for dof_idx in range(len(self.kp)):
             ur10.add_actuator(
-                actuator_cls,
-                input_indices=[dof_idx],
+                controller_cls,
+                index=dof_idx,
                 kp=float(self.kp[dof_idx]),
                 kd=float(self.kd[dof_idx]),
-                max_force=float(self.max_torque[dof_idx]),
-                gear=1.0,
-                constant_force=0.0,
+                clamping=[
+                    (ClampingMaxEffort, {"max_effort": float(self.max_torque[dof_idx])}),
+                ],
             )
 
         if self.world_count > 1:
@@ -243,28 +244,37 @@ class Example:
         self.ur10s.set_attribute("joint_target_pos", self.control, self.q_target)
         self.ur10s.set_attribute("joint_target_vel", self.control, self.qd_target)
 
-        # Cache the ActuatorPD instance that drives every UR10 DOF. The
-        # builder merged the 6 per-DOF ``add_actuator`` calls (x world_count
-        # replicas) into a single ActuatorPD, so ``constant_force`` is a flat
-        # ``(world_count * dofs_per_world,)`` array ordered [w0d0..w0d5, w1d0..w1d5, ...].
-        pd_actuator = next(a for a in self.model.actuators if isinstance(a, ActuatorPD))
-        assert isinstance(pd_actuator, ActuatorPD)  # narrow for type-checkers
+        # Cache the composed Actuator that drives every UR10 DOF. ``.kp``
+        # lives on ``pd_actuator.controller``; effort limits on the
+        # ClampingMaxEffort entry, not on the actuator itself. The builder
+        # merged the 6 per-DOF ``add_actuator`` calls (x world_count replicas)
+        # into one flat ``(world_count*6,)`` parameter vector, ordered
+        # [w0d0..w0d5, w1d0..w1d5, ...]. Under ``--stable-pd`` the
+        # controller class is ``ControllerStablePD``; otherwise ``ControllerPD``.
+        expected_controller_cls = ControllerStablePD if self.stable_pd else ControllerPD
+        pd_actuator = next(
+            a
+            for a in self.model.actuators
+            if isinstance(a, _NewtonActuator) and isinstance(a.controller, expected_controller_cls)
+        )
         self.pd_actuator = pd_actuator
         expected = self.world_count * self.dofs_per_world
-        assert len(self.pd_actuator.kp) == expected, (
-            f"ActuatorPD kp length {len(self.pd_actuator.kp)} != {expected}; "
+        kp_len = len(pd_actuator.controller.kp)
+        assert kp_len == expected, (
+            f"PD actuator kp length {kp_len} != {expected}; "
             "builder/replicate did not merge the per-DOF actuators as expected"
         )
 
-        # ``ActuatorStablePD`` is stateful: every step needs ``mass_matrix``
+        # ``ControllerStablePD`` is stateful: every step needs ``mass_matrix``
         # and ``bias_forces`` written into its ``State`` for the Tan 2011
-        # implicit solve (see class docstring). The batched builder would
-        # merge all worlds' DOFs into one (6·Nw)-actuator instance, and the
-        # per-step on-device Cholesky scales as O((6·Nw)³) — fine for Nw=1
-        # but quickly defeats the "stable" motivation. Keep this demo to
-        # the single-world case; batched block-diagonal solves are a
+        # implicit solve (see class docstring). The composed ``Actuator.State``
+        # wraps the controller's state under ``.controller_state``. The
+        # batched builder would merge all worlds' DOFs into one (6·Nw)-actuator
+        # instance, and the per-step on-device Cholesky scales as O((6·Nw)³) —
+        # fine for Nw=1 but quickly defeats the "stable" motivation. Keep this
+        # demo to the single-world case; batched block-diagonal solves are a
         # follow-up.
-        self._act_state: ActuatorStablePD.State | None = None
+        self._act_state: _NewtonActuator.State | None = None
         self._H_buf: wp.array | None = None
         if self.stable_pd:
             if self.world_count != 1:
@@ -376,9 +386,13 @@ class Example:
 
         if self.gravity_comp:
             tau_g = self._compute_gravity_comp()
-            # constant_force layout matches the order we registered the
-            # actuators (6 DOFs x N worlds). Flatten accordingly.
-            self.pd_actuator.constant_force.assign(tau_g.reshape(-1).astype(np.float32))
+            # const_effort layout matches the order we registered the
+            # actuators (6 DOFs x N worlds). Flatten accordingly. Only
+            # ControllerPD exposes ``const_effort`` — gravity-comp is
+            # mutually exclusive with stable-pd (see validation in
+            # ``__init__``), so the controller here is guaranteed to be
+            # ControllerPD.
+            self.pd_actuator.controller.const_effort.assign(tau_g.reshape(-1).astype(np.float32))
 
         if self.stable_pd:
             # Populate the Tan 2011 State each substep.  ``eval_mass_matrix``
@@ -386,7 +400,8 @@ class Example:
             # for world_count=1 this is (1, 6, 6) and H[0] is the UR10 6x6
             # joint-space inertia that goes into the (M + diag(Kd)·Δt) solve.
             self._H_buf = newton.eval_mass_matrix(self.model, self.state_0, H=self._H_buf)
-            self._act_state.mass_matrix.assign(self._H_buf.numpy()[0])
+            ctrl_state = self._act_state.controller_state
+            ctrl_state.mass_matrix.assign(self._H_buf.numpy()[0])
 
             # ``_compute_gravity_comp`` returns τ_g = -Σ Jᵀ(m·g), i.e. the
             # torque that *cancels* gravity (what ActuatorPD.constant_force
@@ -395,13 +410,18 @@ class Example:
             # is dropped — acceptable for UR10 static-hold but not for a
             # trajectory tracker.
             tau_g = self._compute_gravity_comp().reshape(-1).astype(np.float32)
-            self._act_state.bias_forces.assign(-tau_g)
+            ctrl_state.bias_forces.assign(-tau_g)
 
+        # ControllerStablePD's update_state is a no-op (per-step scratch, no
+        # cross-step information), so passing the same State object as both
+        # current and next is safe; the composed Actuator just needs a
+        # non-None next_act_state for its stateful-actuator validation.
+        next_state = self._act_state if self.stable_pd else None
         self.pd_actuator.step(
             sim_state=self.state_0,
             sim_control=self.control,
             current_act_state=self._act_state,
-            next_act_state=None,
+            next_act_state=next_state,
             dt=self.sim_dt,
         )
 
@@ -475,7 +495,7 @@ class Example:
             "--stable-pd",
             action="store_true",
             help=(
-                "Use ActuatorStablePD (Tan et al. 2011) instead of ActuatorPD. "
+                "Use ControllerStablePD (Tan et al. 2011) instead of ControllerPD. "
                 "The controller runs an on-device (M + diag(Kd)·Δt)·qddot = b "
                 "solve each substep, so the example populates its State with "
                 "M = newton.eval_mass_matrix and bias_forces = Jacobian-T "

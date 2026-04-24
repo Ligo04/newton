@@ -2,19 +2,21 @@
 # SPDX-License-Identifier: Apache-2.0
 
 ###########################################################################
-# Example UIPC Cartpole PD — Force (Effort) Control via ActuatorPD
+# Example UIPC Cartpole PD — Force (Effort) Control via ControllerPD
 #
 # Drives the cart (prismatic DOF) with a PD controller implemented as a
-# Newton ``ActuatorPD``. The actuator reads ``state.joint_q`` /
-# ``state.joint_qd`` and ``control.joint_target_pos`` / ``joint_target_vel``,
-# computes the PD torque, and writes it into ``control.joint_f``. The cart
-# DOF is configured as ``JointTargetMode.EFFORT`` so the UIPC solver
-# forwards that force as generalized effort on the joint.
+# Newton ``ControllerPD`` composed under ``newton.actuators.Actuator`` with
+# a ``ClampingMaxEffort`` layer for the force limit. The actuator reads
+# ``state.joint_q`` / ``state.joint_qd`` and ``control.joint_target_pos`` /
+# ``joint_target_vel``, computes the PD torque, clamps it, and writes it
+# into ``control.joint_f``. The cart DOF is configured as
+# ``JointTargetMode.EFFORT`` so the UIPC solver forwards that force as
+# generalized effort on the joint.
 #
 # Compared to ``example_uipc_cartpole_pd_position`` which uses a solver-
 # native position drive, this variant shows the canonical "external
 # actuator" pipeline:
-#   1. ``builder.add_actuator(ActuatorPD, ...)`` registers a PD actuator
+#   1. ``builder.add_actuator(ControllerPD, ...)`` registers a PD actuator
 #   2. every step: write the position target into ``control.joint_target_pos``
 #   3. every step: ``actuator.step(state, control, ...)`` computes joint_f
 #   4. every step: ``solver.step(...)`` consumes joint_f via EFFORT mode
@@ -28,11 +30,11 @@ import math
 import numpy as np
 import uipc
 import warp as wp
-from newton_actuators import ActuatorPD
 
 import newton
 import newton.examples
 from newton import JointTargetMode
+from newton.actuators import ClampingMaxEffort, ControllerPD
 from newton.selection import ArticulationView
 
 
@@ -82,13 +84,16 @@ class Example:
         cartpole.joint_target_mode[cart_dof + 2] = int(JointTargetMode.NONE)
 
         # Register the PD actuator on the cart DOF. The actuator reads
-        # control.joint_target_pos / joint_target_vel and writes control.joint_f.
+        # control.joint_target_pos / joint_target_vel, the ControllerPD
+        # kernel computes the PD torque, ClampingMaxEffort clamps it to
+        # ±max_force, and the Actuator scatter-adds the result into
+        # control.joint_f.
         cartpole.add_actuator(
-            ActuatorPD,
-            input_indices=[cart_dof],
+            ControllerPD,
+            index=cart_dof,
             kp=self.kp,
             kd=self.kd,
-            max_force=self.max_force,
+            clamping=[(ClampingMaxEffort, {"max_effort": self.max_force})],
         )
 
         if self.world_count > 1:
@@ -156,9 +161,9 @@ class Example:
     def _apply_actuators(self):
         """Run every registered actuator so joint_f gets filled before solver.step.
 
-        ``pd_controller_kernel`` accumulates into ``control.joint_f`` (``out += force``),
+        ``Actuator.step`` scatter-adds into ``control.joint_f`` (``out += force``),
         so we must clear the buffer each frame or the PD force will grow unboundedly
-        across frames and blow past ``max_force``.
+        across frames and blow past the clamping ceiling.
         """
         self.control.joint_f.zero_()
         for actuator in self.model.actuators:
@@ -186,7 +191,7 @@ class Example:
             self.state_0, self.state_1 = self.state_1, self.state_0
 
     def _log_applied_force(self):
-        """Print the PD torque ActuatorPD produced for the cart this frame."""
+        """Print the PD torque ControllerPD produced for the cart this frame."""
         joint_q = self.cartpoles.get_attribute("joint_q", self.state_0).numpy()
         joint_f = self.cartpoles.get_attribute("joint_f", self.control).numpy()
         target = self.cart_amplitude * math.sin(2.0 * math.pi * self.cart_frequency * self.sim_time)
