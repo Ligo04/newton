@@ -129,9 +129,19 @@ class Example:
         asset_path = newton.utils.download_asset("universal_robots_ur10")
         asset_file = str(asset_path / "usd" / "ur10_instanceable.usda")
         height = 1.2
+        # ``floating=False`` welds the UR10 base to the world via an explicit
+        # FIXED joint instead of the USD default D6-with-all-axes-locked.
+        # Both resolve to "0 DOF for the base" in intent, but SolverUIPC
+        # silently SKIPS D6 joints (see ArticulationBuilder.build), which
+        # would leave base_link as a free 12-DOF ABD body held up only by
+        # IPC ground contact — the arm would free-fall from ``height=1.2m``
+        # before PD could do anything. FIXED joint is supported by every
+        # backend here (UIPC / MuJoCo / Featherstone) and anchors base_link
+        # rigidly, so the 6 revolute DOFs really are the full control space.
         ur10.add_usd(
             asset_file,
             xform=wp.transform(wp.vec3(0.0, 0.0, height)),
+            floating=False,
             collapse_fixed_joints=False,
             enable_self_collisions=False,
             hide_collision_shapes=True,
@@ -300,6 +310,7 @@ class Example:
                 dump_enable=True,
             )
             solver.set_contact(True, 0.001)
+            solver.override_uipc_inertia_from_model(list(range(self.model.body_count)))
             return solver, True
         if name == "mujoco":
             return newton.solvers.SolverMuJoCo(self.model), False

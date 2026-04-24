@@ -399,7 +399,8 @@ class Articulation:
         # print(
         #     f"[uipc_debug][{self.name}] frame={info.frame()}  "
         #     f"revolute[{newton_joint_idx}]: "
-        #     f"curr={curr_deg:+8.3f} deg  target={tgt_deg:+8.3f} deg  diff={tgt_deg - curr_deg:+7.3f}"
+        #     f"curr={curr_deg:+8.3f} deg  target={tgt_deg:+8.3f} deg  diff={tgt_deg - curr_deg:+7.3f} "
+        #     f"external_torque={external_torque:+8.3f} Nm"
         # )
 
     def prismatic_joint_anim(
