@@ -377,42 +377,6 @@ def _aabb_box_mesh(verts: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return box_verts, box_faces
 
 
-def _convex_hull_fallback(verts: np.ndarray) -> tuple[np.ndarray, np.ndarray] | None:
-    """Build a closed convex-hull trimesh around ``verts`` with outward normals.
-
-    Used when the merged trimesh for a body fails the closure check —
-    typically because the source USD/mesh shapes are non-watertight.
-
-    Returns ``None`` if the input is degenerate (coplanar/colinear) and
-    Qhull cannot construct a 3D hull.
-    """
-    from scipy.spatial import ConvexHull, QhullError
-
-    try:
-        hull = ConvexHull(verts)
-    except QhullError:
-        return None
-    hull_verts = verts[hull.vertices].astype(np.float64)
-    # Compact remap of original vertex indices
-    remap = -np.ones(len(verts), dtype=np.int64)
-    remap[hull.vertices] = np.arange(len(hull.vertices), dtype=np.int64)
-    faces = remap[hull.simplices].astype(np.int32)
-
-    # scipy's ConvexHull does NOT guarantee consistent winding across
-    # simplices (some come out CW, others CCW), so a single global flip is
-    # insufficient — UIPC's per-face divergence sum then disagrees with the
-    # closed-mesh formula and fires the volume>0 assertion.  Reorient each
-    # triangle individually using ``hull.equations`` (outward plane normals).
-    normals = hull.equations[:, :3]  # shape (nfaces, 3), unit outward
-    tri = hull_verts[faces]  # (nfaces, 3, 3)
-    face_normals = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
-    # Flip any face whose CCW normal points opposite the hull's outward normal.
-    flip = np.einsum("ij,ij->i", face_normals, normals) < 0.0
-    if flip.any():
-        faces[flip] = faces[flip][:, [0, 2, 1]]
-    return hull_verts, faces
-
-
 def _weld_vertices(
     verts: np.ndarray,
     faces: np.ndarray,
@@ -492,6 +456,10 @@ def build_body_mesh(model: Model, body_idx: int) -> tuple[SimplicialComplex, flo
 
     all_verts: list[np.ndarray] = []
     all_faces: list[np.ndarray] = []
+    # (shape_index, GeoType) for each shape that actually contributed a mesh;
+    # surfaced in the non-watertight error message so users can pinpoint which
+    # shapes to pass through ``ModelBuilder.approximate_meshes``.
+    contributed_shapes: list[tuple[int, GeoType]] = []
     vert_offset = 0
 
     for s in shape_indices:
@@ -543,8 +511,16 @@ def build_body_mesh(model: Model, body_idx: int) -> tuple[SimplicialComplex, flo
             warnings.warn(f"Shape {s} (body {body_idx}): unsupported GeoType {geo_type}", stacklevel=2)
             continue
 
-        # Every reachable branch above either assigns verts/faces or
-        # ``continue``s, so we can use them unconditionally here.
+        # :meth:`newton.ModelBuilder.approximate_meshes`.
+        if geo_type in (
+            GeoType.BOX,
+            GeoType.SPHERE,
+            GeoType.CAPSULE,
+            GeoType.CYLINDER,
+            GeoType.CONE,
+        ):
+            verts, faces = _weld_vertices(verts, faces)
+
         effective_scale = np.ones(3) if scale_baked else scale.astype(np.float64)
         is_identity = (
             np.allclose(tf_np[:3], 0.0, atol=1e-7)
@@ -556,14 +532,14 @@ def build_body_mesh(model: Model, body_idx: int) -> tuple[SimplicialComplex, flo
             verts = _transform_points(verts, tf_wp, effective_scale)
         all_faces.append(faces + vert_offset)
         all_verts.append(verts)
+        contributed_shapes.append((s, geo_type))
         vert_offset += len(verts)
 
     if not all_verts:
         return None
 
-    merged_verts = np.vstack(all_verts).astype(np.float64)
-    merged_faces = np.vstack(all_faces).astype(np.int32)
-    welded_verts, welded_faces = _weld_vertices(merged_verts, merged_faces)
+    verts = np.vstack(all_verts).astype(np.float64)
+    faces = np.vstack(all_faces).astype(np.int32)
 
     # UIPC ABD's ``AffineBodyConstitution`` asserts ``volume > 0`` per body.
     # Two failure modes arise from real USD assets:
@@ -604,21 +580,20 @@ def build_body_mesh(model: Model, body_idx: int) -> tuple[SimplicialComplex, flo
         return sc, vol
 
     # Build SC from the welded mesh and use UIPC's native watertight check.
-    sc, vol = _make_sc(welded_verts, welded_faces)
+    sc, vol = _make_sc(verts, faces)
     if is_trimesh_closed(sc):
         return sc, vol
 
-    warnings.warn(
-        f"Body {body_idx} ({body_name}): merged mesh is not closed; falling back to convex hull "
-        "for UIPC ABD volume computation. Collision fidelity may be reduced.",
-        stacklevel=2,
+    shapes_repr = ", ".join(f"shape[{s}]={gt.name}" for s, gt in contributed_shapes) or "<none>"
+    raise RuntimeError(
+        f"Body {body_idx} ({body_name}): merged collision mesh is not closed (non-watertight), "
+        "which UIPC's affine-body constitution cannot accept. "
+        f"Contributing shapes: {shapes_repr}. "
+        "Convert the offending mesh shapes to a closed geometry at the builder level before "
+        'passing the model to SolverUIPC — e.g. `builder.approximate_meshes(method="convex_hull")` '
+        '(or `"coacd"` / `"bounding_box"`). See '
+        ":meth:`newton.ModelBuilder.approximate_meshes` for the full list of methods."
     )
-    hull = _convex_hull_fallback(welded_verts)
-    if hull is None:
-        # Qhull rejected the point set (colinear/coplanar) — use AABB box.
-        bv, bf = _aabb_box_mesh(welded_verts)
-        return _make_sc(bv, _orient_outward(bv, bf))
-    return _make_sc(hull[0], hull[1])
 
 
 def populate_backend_offsets(mapping: UIpcMappingInfo, device: wp.Device) -> None:

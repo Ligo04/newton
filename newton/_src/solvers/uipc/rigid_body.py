@@ -381,7 +381,6 @@ class RigidBodyBuilder:
         for group_bodies in groups.values():
             n = len(group_bodies)
             ref = group_bodies[0]
-
             # Build mesh once per group using the representative body
             result = build_body_mesh(model, ref.body_idx)
             if result is None:

@@ -731,6 +731,9 @@ class SolverUIPC(SolverBase):
 
         model = self.model
 
+        if not os.path.exists(self._workspace):
+            os.mkdir(self._workspace)
+
         # Create a single UIPC Engine / World / Scene
         self.engine = uipc.Engine(backend_name=self._backend, workspace=self._workspace)
         self.world = uipc.World(self.engine)

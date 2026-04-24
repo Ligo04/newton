@@ -314,7 +314,7 @@ class Example:
 
             solver = newton.solvers.SolverUIPC(
                 self.model,
-                workspace="/tmp/newton_uipc/ur10_force",
+                workspace="",
                 dt=self.sim_dt,
                 logger_level=uipc.Logger.Warn,
                 dump_enable=True,
