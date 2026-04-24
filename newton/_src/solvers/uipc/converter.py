@@ -8,13 +8,13 @@ from __future__ import annotations
 import warnings
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import uipc.builtin as uipc_builtin
 import warp as wp
 from uipc import Quaternion, Transform
-from uipc.geometry import SimplicialComplex, SimplicialComplexSlot, is_trimesh_closed
+from uipc.geometry import IAttributeSlot, SimplicialComplex, SimplicialComplexSlot, is_trimesh_closed
 from uipc.geometry import trimesh as uipc_trimesh
 
 from ...core.types import Axis
@@ -618,7 +618,11 @@ def populate_backend_offsets(mapping: UIpcMappingInfo, device: wp.Device) -> Non
 
     for i, body_idx in enumerate(body_indices):
         geo = mapping.body_geo_slots[body_idx].geometry()
-        offset_attr = geo.meta().find(uipc_builtin.backend_abd_body_offset)
+        # Stubs type ``find`` as non-optional; runtime may still omit the attribute.
+        offset_attr = cast(
+            IAttributeSlot | None,
+            geo.meta().find(uipc_builtin.backend_abd_body_offset),
+        )
         if offset_attr is None:
             warnings.warn(
                 f"Body {body_idx}: backend_abd_body_offset not found after world.init(), skipping backend mapping",
