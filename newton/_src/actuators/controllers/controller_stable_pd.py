@@ -24,22 +24,26 @@ def _next_block_multiple(n: int, block_size: int) -> int:
     return ((n + block_size - 1) // block_size) * block_size
 
 
-def _alloc_identity_padded_2d(n: int, n_padded: int, device: wp.Device) -> wp.array:
-    """Allocate an ``(n_padded, n_padded)`` float32 array with identity padding.
+def _alloc_identity_padded_blocks(num_worlds: int, n: int, n_padded: int, device: wp.Device) -> wp.array:
+    """Allocate ``W`` contiguous ``(n_padded, n_padded)`` blocks, each identity-padded.
 
-    The real block ``[:n, :n]`` is zero — callers are expected to overwrite it
-    each step (e.g. via :func:`_stable_pd_build_A_kernel`). The phantom block
-    ``[n:, n:]`` is initialised to the identity so the Cholesky factor of the
-    composite matrix is ``diag(L_real, I)``, which keeps the forward/backward
-    substitution on the padded rows equal to ``b[n:]`` — and since
-    :func:`_stable_pd_build_rhs_kernel` only writes ``b[:n]`` with
-    ``b[n:]`` kept at zero by construction, ``qddot[:n]`` is the exact
-    solution of the real ``[:n, :n]`` system.
+    Layout is ``(W, n_padded, n_padded)`` row-major; the kamino blocked LLT
+    kernels read it as a flat 1D float buffer with ``mio[w] = w·n_padded²``.
+
+    Inside each per-world block, the real ``[:n, :n]`` sub-block is zero —
+    callers are expected to overwrite it each step (e.g. via
+    :func:`_stable_pd_build_A_kernel`). The phantom region ``[n:, n:]`` is
+    initialised to the identity, so the Cholesky factor of the composite
+    block is ``diag(L_real, I)``. Combined with
+    :func:`_stable_pd_build_rhs_kernel` only writing ``b[w, :n]`` (the
+    rest stays zero by construction), the padded substitution on
+    ``b[w, n:]`` returns zero and ``qddot[w, :n]`` is the exact solution
+    of the real ``[:n, :n]`` system.
     """
-    buf = np.zeros((n_padded, n_padded), dtype=np.float32)
+    buf = np.zeros((num_worlds, n_padded, n_padded), dtype=np.float32)
     if n_padded > n:
         idx = np.arange(n, n_padded)
-        buf[idx, idx] = 1.0
+        buf[:, idx, idx] = 1.0
     return wp.array(buf, dtype=wp.float32, device=device)
 
 
@@ -55,51 +59,62 @@ def _stable_pd_build_rhs_kernel(
     target_vel_indices: wp.array[wp.uint32],
     kp: wp.array[float],
     kd: wp.array[float],
-    bias_forces: wp.array[float],
+    bias_forces: wp.array2d[float],
+    n_per_world: int,
     dt: float,
-    b: wp.array[float],
+    b: wp.array2d[float],
 ):
-    """b[i] = kp*(target_pos - q - q̇·dt) + kd*(target_vel - q̇) - bias_forces[i]."""
-    i = wp.tid()
-    pos_idx = pos_indices[i]
-    vel_idx = vel_indices[i]
-    tgt_pos_idx = target_pos_indices[i]
-    tgt_vel_idx = target_vel_indices[i]
+    """b[w, j] = kp·(target_pos - q - q̇·dt) + kd·(target_vel - q̇) - bias_forces[w, j].
+
+    Launched on a 2D ``(W, n_per_world)`` grid. ``b`` is shape
+    ``(W, n_padded)``; only the real ``[w, :n_per_world]`` slice is
+    written. The phantom ``[w, n_per_world:]`` columns stay zero from
+    allocation (and the Cholesky composite resolves them trivially).
+    """
+    w, j = wp.tid()
+    flat_i = w * n_per_world + j
+    pos_idx = pos_indices[flat_i]
+    vel_idx = vel_indices[flat_i]
+    tgt_pos_idx = target_pos_indices[flat_i]
+    tgt_vel_idx = target_vel_indices[flat_i]
 
     q_i = current_pos[pos_idx]
     qd_i = current_vel[vel_idx]
     qt_i = target_pos[tgt_pos_idx]
     qdt_i = target_vel[tgt_vel_idx]
 
-    p_term = kp[i] * (qt_i - q_i - qd_i * dt)
-    d_term = kd[i] * (qdt_i - qd_i)
+    p_term = kp[flat_i] * (qt_i - q_i - qd_i * dt)
+    d_term = kd[flat_i] * (qdt_i - qd_i)
 
     c_i = float(0.0)
     if bias_forces:
-        c_i = bias_forces[i]
+        c_i = bias_forces[w, j]
 
-    b[i] = p_term + d_term - c_i
+    b[w, j] = p_term + d_term - c_i
 
 
 @wp.kernel
 def _stable_pd_build_A_kernel(
-    mass_matrix: wp.array2d[float],
+    mass_matrix: wp.array3d[float],
     kd: wp.array[float],
+    n_per_world: int,
     dt: float,
-    A: wp.array2d[float],
+    A: wp.array3d[float],
 ):
-    """A[i, j] = M[i, j] + (i == j) * kd[i] * dt over the real [:n, :n] block.
+    """A[w, i, j] = M[w, i, j] + (i == j) · kd[w·n + i] · dt over the real block.
 
-    The phantom region ``[n:, n:]`` of ``A`` is left untouched here — the
-    kamino blocked Cholesky kernel applies identity padding to out-of-range
-    tiles on the fly (see ``llt_blocked.py``), so callers only need to
-    ensure the physical allocation covers ``(n_padded, n_padded)``.
+    Launched on a 3D ``(W, n_per_world, n_per_world)`` grid. ``A`` is
+    shape ``(W, n_padded, n_padded)``; only the real ``[w, :n, :n]``
+    sub-block is written. The phantom ``[w, n:, n:]`` region keeps the
+    identity-pad set at allocation (see
+    :func:`_alloc_identity_padded_blocks`), so the per-world composite
+    Cholesky reduces to the real ``[:n, :n]`` solve.
     """
-    i, j = wp.tid()
-    a_ij = mass_matrix[i, j]
+    w, i, j = wp.tid()
+    a_ij = mass_matrix[w, i, j]
     if i == j:
-        a_ij = a_ij + kd[i] * dt
-    A[i, j] = a_ij
+        a_ij = a_ij + kd[w * n_per_world + i] * dt
+    A[w, i, j] = a_ij
 
 
 @wp.kernel
@@ -116,58 +131,70 @@ def _stable_pd_effort_kernel(
     kp: wp.array[float],
     kd: wp.array[float],
     const_effort: wp.array[float],
-    qddot: wp.array[float],
+    qddot: wp.array2d[float],
+    n_per_world: int,
     dt: float,
     efforts: wp.array[float],
 ):
-    """effort = const_effort + feedforward + kp·err_pos + kd·err_vel - kd·qddot·dt."""
-    i = wp.tid()
-    pos_idx = pos_indices[i]
-    vel_idx = vel_indices[i]
-    tgt_pos_idx = target_pos_indices[i]
-    tgt_vel_idx = target_vel_indices[i]
+    """effort[w·n + j] = const_effort + feedforward + kp·err_pos + kd·err_vel - kd·qddot[w, j]·dt."""
+    w, j = wp.tid()
+    flat_i = w * n_per_world + j
+    pos_idx = pos_indices[flat_i]
+    vel_idx = vel_indices[flat_i]
+    tgt_pos_idx = target_pos_indices[flat_i]
+    tgt_vel_idx = target_vel_indices[flat_i]
 
     q_i = current_pos[pos_idx]
     qd_i = current_vel[vel_idx]
     qt_i = target_pos[tgt_pos_idx]
     qdt_i = target_vel[tgt_vel_idx]
 
-    p_term = kp[i] * (qt_i - q_i - qd_i * dt)
-    d_term = kd[i] * (qdt_i - qd_i)
+    p_term = kp[flat_i] * (qt_i - q_i - qd_i * dt)
+    d_term = kd[flat_i] * (qdt_i - qd_i)
 
     const_e = float(0.0)
     if const_effort:
-        const_e = const_effort[i]
+        const_e = const_effort[flat_i]
 
     ff = float(0.0)
     if feedforward:
         ff = feedforward[tgt_vel_idx]
 
-    efforts[i] = const_e + ff + p_term + d_term - kd[i] * qddot[i] * dt
+    efforts[flat_i] = const_e + ff + p_term + d_term - kd[flat_i] * qddot[w, j] * dt
 
 
 class ControllerStablePD(Controller):
     """Stateful stable-PD controller (Tan 2011) with implicit mass-matrix solve.
 
     Implements the Tan, Liu & Turk 2011 "stable proportional-derivative"
-    control law::
+    control law per world::
 
         p_term = kp · (target_pos - q - q̇·dt)
         d_term = kd · (target_vel - q̇)
-        (M + diag(kd)·dt) · q̈ = p_term + d_term - C
+        (M_w + diag(kd_w)·dt) · q̈_w = p_term_w + d_term_w - C_w
         effort = const_effort + feedforward + p_term + d_term - kd·q̈·dt
 
-    The ``q̈`` unknown is solved implicitly on the GPU via a blocked
-    Cholesky factorization of ``A = M + diag(kd)·dt`` (reusing the kamino
-    blocked LLT kernels). The entire step — rhs assembly, A-matrix
-    assembly, factorize, solve, and per-actuator effort composition — is a
-    sequence of ``wp.launch`` / ``wp.launch_tiled`` calls with no host↔device
-    transfers, making the pipeline CUDA-graph capturable.
+    The ``q̈`` unknowns are solved implicitly on the GPU via a blocked
+    Cholesky factorization of ``A_w = M_w + diag(kd_w)·dt`` for each
+    world ``w``, dispatched as a single batched kamino LLT launch with
+    ``num_blocks = num_worlds``. Every world's Cholesky operates on its
+    own ``n_per_world * n_per_world`` block independently — the mass
+    coupling between worlds is zero by construction (each world is a
+    disjoint articulation), so there is no need to factorize one big
+    ``(W·n) * (W·n)`` dense matrix. The entire step — rhs assembly,
+    A-matrix assembly, factorize, solve, and per-actuator effort
+    composition — is a sequence of ``wp.launch`` / ``wp.launch_tiled``
+    calls with no host↔device transfers, making the pipeline CUDA-graph
+    capturable.
 
     The caller is responsible for populating ``State.mass_matrix`` and
     ``State.bias_forces`` before each ``compute()`` call from the physics
     engine (:mod:`newton.sim`, MuJoCo, PhysX, UIPC, ...). This class makes
-    no assumption about the source of those quantities.
+    no assumption about the source of those quantities. The leading
+    batch dimension on both quantities matches the
+    ``(articulation_count, max_dofs, max_dofs)`` output of
+    :func:`newton.eval_mass_matrix` directly, so multi-world callers can
+    typically slice and assign without any reshape.
 
     Unlike the historical ``ActuatorStablePD`` in ``newton_actuators``,
     this class delegates effort clamping to the downstream
@@ -193,39 +220,54 @@ class ControllerStablePD(Controller):
         """Per-step inputs and scratch buffers for the Tan 2011 solve.
 
         User-populated each step (before :meth:`ControllerStablePD.compute`):
-            mass_matrix: Effective mass/inertia ``M(q)`` for this actuator
-                subsystem, shape ``(N, N)``, dtype ``float32``.
-            bias_forces: Coriolis + gravity + external force compensation
-                ``C(q, q̇)``, shape ``(N,)``, dtype ``float32``.
+            mass_matrix: Per-world effective mass/inertia ``M_w(q)`` for
+                this actuator subsystem, shape
+                ``(num_worlds, n_per_world, n_per_world)``, dtype
+                ``float32``. The leading batch dimension matches
+                :func:`newton.eval_mass_matrix` output (``(articulation_count,
+                max_dofs, max_dofs)``), so common usage is a direct slice
+                + assign.
+            bias_forces: Per-world Coriolis + gravity + external force
+                compensation ``C_w(q, q̇)``, shape
+                ``(num_worlds, n_per_world)``, dtype ``float32``.
 
         Internal scratch (allocated by :meth:`ControllerStablePD.state`):
-            A: Augmented mass matrix ``M + diag(kd)·dt``, shape
-                ``(N_padded, N_padded)``, dtype ``float32``. Only the real
-                ``[:N, :N]`` block is written each step; the phantom region
-                is left as zeros and identity-padded on the fly inside the
-                kamino LLT kernel.
-            L: Cholesky factor of ``A`` in the same layout.
-            b: Rhs ``p_term + d_term - C``, shape ``(N_padded,)``; only
-                ``b[:N]`` is written.
+            A: Augmented per-world mass matrices ``M_w + diag(kd_w)·dt``,
+                shape ``(num_worlds, n_padded, n_padded)``, dtype
+                ``float32``. Only the real ``[:, :n, :n]`` sub-blocks
+                are written each step; the phantom regions are
+                identity-padded at allocation and never touched.
+            L: Per-world Cholesky factors of ``A``, same layout as ``A``.
+            b: Rhs ``p_term + d_term - C`` per world, shape
+                ``(num_worlds, n_padded)``; only ``b[:, :n]`` is written.
             y: Forward-substitution intermediate ``L · y = b``, shape
-                ``(N_padded,)``.
+                ``(num_worlds, n_padded)``.
             qddot: Solution of ``Lᵀ · qddot = y`` (implicit acceleration),
-                shape ``(N_padded,)``; only ``qddot[:N]`` is read.
+                shape ``(num_worlds, n_padded)``; only ``qddot[:, :n]``
+                is read.
         """
 
-        mass_matrix: wp.array2d[float] | None = None
-        bias_forces: wp.array[float] | None = None
-        A: wp.array2d[float] | None = None
-        L: wp.array2d[float] | None = None
-        b: wp.array[float] | None = None
-        y: wp.array[float] | None = None
-        qddot: wp.array[float] | None = None
+        mass_matrix: wp.array3d[float] | None = None
+        bias_forces: wp.array2d[float] | None = None
+        A: wp.array3d[float] | None = None
+        L: wp.array3d[float] | None = None
+        b: wp.array2d[float] | None = None
+        y: wp.array2d[float] | None = None
+        qddot: wp.array2d[float] | None = None
 
         def reset(self, mask: wp.array[wp.bool] | None = None) -> None:
             """Zero all buffers in-place. ``mask`` is ignored (scratch is per-actuator-batch)."""
             for arr in (self.mass_matrix, self.bias_forces, self.A, self.L, self.b, self.y, self.qddot):
                 if arr is not None:
                     arr.zero_()
+
+    SHARED_PARAMS = frozenset({"num_worlds", "block_size", "tile_block_dim"})  # pyright: ignore[reportAssignmentType]
+    """Controller-construction kwargs shared across every actuator in the entry.
+
+    The :class:`~newton.ModelBuilder` per-DOF / shared split inspects this set
+    to decide which kwargs flow through ``controller_shared_kwargs`` instead
+    of being stacked into per-actuator arrays.
+    """
 
     @classmethod
     def resolve_arguments(cls, args: dict[str, Any]) -> dict[str, Any]:
@@ -235,7 +277,23 @@ class ControllerStablePD(Controller):
         kd = args.get("kd", 0.0)
         if kd < 0:
             raise ValueError(f"kd must be non-negative, got {kd}")
-        return {"kp": kp, "kd": kd, "const_effort": args.get("const_effort", 0.0)}
+        num_worlds = int(args.get("num_worlds", 1))
+        if num_worlds < 1:
+            raise ValueError(f"num_worlds must be >= 1, got {num_worlds}")
+        resolved: dict[str, Any] = {
+            "kp": kp,
+            "kd": kd,
+            "const_effort": args.get("const_effort", 0.0),
+            "num_worlds": num_worlds,
+        }
+        # block_size / tile_block_dim pass through opt-in: include only when the
+        # user authored them so the entry-key shared-tuple stays minimal and
+        # groups still merge across calls that didn't override the defaults.
+        if "block_size" in args:
+            resolved["block_size"] = int(args["block_size"])
+        if "tile_block_dim" in args:
+            resolved["tile_block_dim"] = int(args["tile_block_dim"])
+        return resolved
 
     def __init__(
         self,
@@ -243,15 +301,23 @@ class ControllerStablePD(Controller):
         kd: wp.array[float],
         const_effort: wp.array[float] | None = None,
         *,
+        num_worlds: int = 1,
         block_size: int = DEFAULT_BLOCK_SIZE,
         tile_block_dim: int = DEFAULT_TILE_BLOCK_DIM,
     ):
         """Initialize stable-PD controller.
 
         Args:
-            kp: Proportional gains [N/m or N·m/rad]. Shape ``(N,)``.
-            kd: Derivative gains [N·s/m or N·m·s/rad]. Shape ``(N,)``.
-            const_effort: Constant bias effort [N or N·m]. Shape ``(N,)``. ``None`` to skip.
+            kp: Proportional gains [N/m or N·m/rad]. Shape ``(num_worlds·n_per_world,)``.
+            kd: Derivative gains [N·s/m or N·m·s/rad]. Same shape as ``kp``.
+            const_effort: Constant bias effort [N or N·m]. Same shape as ``kp``. ``None`` to skip.
+            num_worlds: Number of independent worlds (block-diagonal blocks). Default 1.
+                The total actuator count must be divisible by ``num_worlds``;
+                each world contributes the same ``n_per_world`` DOFs in a
+                contiguous chunk of the flat per-DOF arrays
+                (``[w0_dof0, ..., w0_dofN-1, w1_dof0, ..., w1_dofN-1, ...]``,
+                which is exactly the layout :meth:`newton.ModelBuilder.replicate`
+                produces).
             block_size: Tile edge length for the blocked Cholesky. Default 32.
             tile_block_dim: CUDA thread-block size for the tile kernels. Default 128.
         """
@@ -259,9 +325,12 @@ class ControllerStablePD(Controller):
             raise ValueError(f"kp shape {kp.shape} must match kd shape {kd.shape}")
         if const_effort is not None and const_effort.shape != kp.shape:
             raise ValueError(f"const_effort shape {const_effort.shape} must match kp shape {kp.shape}")
+        if num_worlds < 1:
+            raise ValueError(f"num_worlds must be >= 1, got {num_worlds}")
         self.kp = kp
         self.kd = kd
         self.const_effort = const_effort
+        self._num_worlds = int(num_worlds)
         self._block_size = int(block_size)
         self._tile_block_dim = int(tile_block_dim)
         # Lazy import: top-level would trigger newton._src.solvers.__init__ →
@@ -282,23 +351,36 @@ class ControllerStablePD(Controller):
         self._launch_factorize = llt_blocked_factorize
         self._launch_solve = llt_blocked_solve
         # Populated in finalize() once the device is known.
-        self._n: int = 0
+        self._n_per_world: int = 0
         self._n_padded: int = 0
         self._dim: wp.array[wp.int32] | None = None
         self._mio: wp.array[wp.int32] | None = None
         self._vio: wp.array[wp.int32] | None = None
 
     def finalize(self, device: wp.Device, num_actuators: int) -> None:
-        self._n = int(num_actuators)
-        self._n_padded = _next_block_multiple(self._n, self._block_size)
-        # Single-matrix batch layout for the kamino LLT kernels. We declare the
-        # matrix as the full padded size so kamino interprets the flat view
-        # with the correct row stride (``n_padded`` floats per row). The
-        # phantom ``[n:, n:]`` region is identity-padded by :meth:`state`, so
-        # the composite system still resolves to the real ``[:n, :n]`` solve.
-        self._dim = wp.array([self._n_padded], dtype=wp.int32, device=device)
-        self._mio = wp.array([0], dtype=wp.int32, device=device)
-        self._vio = wp.array([0], dtype=wp.int32, device=device)
+        if num_actuators % self._num_worlds != 0:
+            raise ValueError(
+                f"num_actuators ({num_actuators}) must be divisible by num_worlds "
+                f"({self._num_worlds}); each world must contribute the same DOF count"
+            )
+        self._n_per_world = num_actuators // self._num_worlds
+        self._n_padded = _next_block_multiple(self._n_per_world, self._block_size)
+        # Per-world batched layout for the kamino LLT kernels: each world's
+        # matrix occupies ``n_padded × n_padded`` floats laid out contiguously  # noqa: RUF003
+        # in a flat 1D buffer, and each world's vector occupies ``n_padded``
+        # floats. ``dim[w] = n_padded`` (composite system, identity-padded
+        # by :meth:`state`); ``mio[w] = w·n_padded²``; ``vio[w] = w·n_padded``.
+        self._dim = wp.array([self._n_padded] * self._num_worlds, dtype=wp.int32, device=device)
+        self._mio = wp.array(
+            [w * self._n_padded * self._n_padded for w in range(self._num_worlds)],
+            dtype=wp.int32,
+            device=device,
+        )
+        self._vio = wp.array(
+            [w * self._n_padded for w in range(self._num_worlds)],
+            dtype=wp.int32,
+            device=device,
+        )
 
     def is_stateful(self) -> bool:
         return True
@@ -307,16 +389,19 @@ class ControllerStablePD(Controller):
         return True
 
     def state(self, num_actuators: int, device: wp.Device) -> ControllerStablePD.State:
-        n = int(num_actuators)
+        if num_actuators % self._num_worlds != 0:
+            raise ValueError(f"num_actuators ({num_actuators}) must be divisible by num_worlds ({self._num_worlds})")
+        n = num_actuators // self._num_worlds
         n_padded = _next_block_multiple(n, self._block_size)
+        W = self._num_worlds
         return ControllerStablePD.State(
-            mass_matrix=wp.zeros((n, n), dtype=wp.float32, device=device),
-            bias_forces=wp.zeros(n, dtype=wp.float32, device=device),
-            A=_alloc_identity_padded_2d(n, n_padded, device=device),
-            L=_alloc_identity_padded_2d(n, n_padded, device=device),
-            b=wp.zeros(n_padded, dtype=wp.float32, device=device),
-            y=wp.zeros(n_padded, dtype=wp.float32, device=device),
-            qddot=wp.zeros(n_padded, dtype=wp.float32, device=device),
+            mass_matrix=wp.zeros((W, n, n), dtype=wp.float32, device=device),
+            bias_forces=wp.zeros((W, n), dtype=wp.float32, device=device),
+            A=_alloc_identity_padded_blocks(W, n, n_padded, device=device),
+            L=_alloc_identity_padded_blocks(W, n, n_padded, device=device),
+            b=wp.zeros((W, n_padded), dtype=wp.float32, device=device),
+            y=wp.zeros((W, n_padded), dtype=wp.float32, device=device),
+            qddot=wp.zeros((W, n_padded), dtype=wp.float32, device=device),
         )
 
     def compute(
@@ -347,12 +432,13 @@ class ControllerStablePD(Controller):
                 "Allocate via ControllerStablePD.state() rather than constructing State() directly."
             )
 
-        n = self._n
+        n = self._n_per_world
+        W = self._num_worlds
 
-        # Step 1: b[:n] = p_term + d_term - C (per-actuator, parallel).
+        # Step 1: b[w, :n] = p_term + d_term - C (per-world per-actuator, parallel).
         wp.launch(
             kernel=_stable_pd_build_rhs_kernel,
-            dim=n,
+            dim=(W, n),
             inputs=[
                 positions,
                 velocities,
@@ -365,54 +451,55 @@ class ControllerStablePD(Controller):
                 self.kp,
                 self.kd,
                 state.bias_forces,
+                n,
                 dt,
             ],
             outputs=[state.b],
             device=device,
         )
 
-        # Step 2: A[:n, :n] = M + diag(kd)·dt (per-entry, parallel).
+        # Step 2: A[w, :n, :n] = M_w + diag(kd_w)·dt (per-world per-entry, parallel).
         wp.launch(
             kernel=_stable_pd_build_A_kernel,
-            dim=(n, n),
-            inputs=[state.mass_matrix, self.kd, dt],
+            dim=(W, n, n),
+            inputs=[state.mass_matrix, self.kd, n, dt],
             outputs=[state.A],
             device=device,
         )
 
-        # Step 3: blocked Cholesky factorize A → L (tile-parallel on GPU).
-        # kamino kernels expect flat 1D views of the (n_padded, n_padded) buffers;
-        # reshape is a zero-copy alias so this does not break graph capture.
+        # Step 3: blocked Cholesky factorize A → L (tile-parallel on GPU, batched over worlds).
+        # kamino kernels expect flat 1D views of the per-world (n_padded, n_padded) and
+        # n_padded buffers; reshape is a zero-copy alias so this does not break graph capture.
         self._launch_factorize(
             kernel=self._factorize_kernel,
             dim=self._dim,
             mio=self._mio,
             A=state.A.reshape(-1),
             L=state.L.reshape(-1),
-            num_blocks=1,
+            num_blocks=W,
             block_dim=self._tile_block_dim,
             device=device,
         )
 
-        # Step 4: forward + backward substitution → qddot (tile-parallel on GPU).
+        # Step 4: forward + backward substitution → qddot (tile-parallel, batched over worlds).
         self._launch_solve(
             kernel=self._solve_kernel,
             dim=self._dim,
             mio=self._mio,
             vio=self._vio,
             L=state.L.reshape(-1),
-            b=state.b,
-            y=state.y,
-            x=state.qddot,
-            num_blocks=1,
+            b=state.b.reshape(-1),
+            y=state.y.reshape(-1),
+            x=state.qddot.reshape(-1),
+            num_blocks=W,
             block_dim=self._tile_block_dim,
             device=device,
         )
 
-        # Step 5: effort[i] = const_e + ff + kp·err_pos + kd·err_vel - kd·qddot·dt.
+        # Step 5: effort[w·n + j] = const_e + ff + kp·err_pos + kd·err_vel - kd·qddot[w, j]·dt.
         wp.launch(
             kernel=_stable_pd_effort_kernel,
-            dim=n,
+            dim=(W, n),
             inputs=[
                 positions,
                 velocities,
@@ -427,6 +514,7 @@ class ControllerStablePD(Controller):
                 self.kd,
                 self.const_effort,
                 state.qddot,
+                n,
                 dt,
             ],
             outputs=[forces],

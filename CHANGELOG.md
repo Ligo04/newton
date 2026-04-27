@@ -13,6 +13,7 @@
 - Add `ViewerGL.log_scalar()` for live scalar time-series plots in the viewer
 - Add `Mesh.is_watertight` property (cached) that reports whether every geometric edge is shared by exactly two triangles
 - Add `ControllerStablePD` implementing the Tan 2011 stable-PD control law with an implicit `(M + diag(Kd)·Δt) q̈ = …` solve on the GPU, reusing the kamino blocked-Cholesky kernels
+- Add `num_worlds` parameter to `ControllerStablePD` for batched block-diagonal Cholesky over replicated worlds; the implicit solve dispatches kamino's blocked LLT with `num_blocks = num_worlds` so cost scales as `O(W·n³)` instead of the merged-dense `O((W·n)³)`. `ControllerStablePD.State.mass_matrix` and `bias_forces` gain a leading batch dimension (shapes `(W, n_per_world, n_per_world)` and `(W, n_per_world)`), matching `newton.eval_mass_matrix` output for direct slice-and-assign
 - Add `deterministic` flag to `CollisionPipeline` and `NarrowPhase` for GPU-thread-scheduling-independent contact ordering via radix sort and deterministic fingerprint tiebreaking in contact reduction
 - Add fast parity-based SDF construction path for watertight meshes in `SDF.create_from_mesh`, using `wp.mesh_query_point_sign_parity` instead of winding numbers; selected via the new `sign_method` argument (`"auto"` — the default — picks parity when `Mesh.is_watertight` is true, or `"parity"` / `"winding"` to force either strategy)
 - Add `ViewerBase.log_arrows()` for arrow rendering (wide line + arrowhead) in the GL viewer with a dedicated geometry shader

@@ -101,13 +101,8 @@ class Example:
         self.stable_pd = bool(args.stable_pd)
         self.viewer = viewer
 
-        if self.stable_pd and self.world_count != 1:
-            raise ValueError(
-                "--stable-pd currently requires --world-count 1: the batched builder "
-                "would merge all worlds' pole2 DOFs into one ControllerStablePD instance "
-                "whose on-device Cholesky scales as O(Nw³) with zero off-diagonal mass "
-                "coupling. Block-diagonal batched solves are a follow-up."
-            )
+        # ControllerStablePD batches the implicit solve block-diagonally
+        # over worlds via num_worlds; --world-count > 1 is supported.
 
         # --- Cart state-feedback gains (all positive) -------------------------
         # These are the magnitudes of the four classical LQR gains; see the
@@ -175,6 +170,7 @@ class Example:
                 kp=self.k_lock,
                 kd=self.k_lock_d,
                 clamping=[(ClampingMaxEffort, {"max_effort": self.max_torque_lock})],
+                num_worlds=self.world_count,
             )
 
         if self.world_count > 1:
@@ -368,16 +364,13 @@ class Example:
         self.cartpoles.set_attribute("joint_f", self.control, f)
 
         if self.stable_pd:
-            # Feed the Tan 2011 State: pole2 inertia + gravity bias.
-            # eval_mass_matrix returns H of shape (articulation_count=1, 3, 3);
-            # the pole2 actuator only sees the scalar H[0, pole2, pole2] block,
-            # reshaped to (1, 1) to match controller_state.mass_matrix.
+            # (pole2, pole2) entry of the per-world inertia, shape (W, 1, 1).
             self._H_buf = newton.eval_mass_matrix(self.model, self.state_0, H=self._H_buf)
             p2 = self.pole2_dof
-            pole2_m = self._H_buf.numpy()[0, p2 : p2 + 1, p2 : p2 + 1].astype(np.float32)
+            pole2_m = np.ascontiguousarray(self._H_buf.numpy()[:, p2 : p2 + 1, p2 : p2 + 1], dtype=np.float32)
             ctrl_state = self._act_state.controller_state
             ctrl_state.mass_matrix.assign(pole2_m)
-            ctrl_state.bias_forces.assign(self._compute_pole2_bias())
+            ctrl_state.bias_forces.assign(self._compute_pole2_bias().reshape(self.world_count, 1))
 
             # ControllerStablePD.update_state is a no-op (per-step scratch,
             # no cross-step information), so passing the same State as both
@@ -470,7 +463,8 @@ class Example:
                 "The per-substep State is populated with pole2's diagonal "
                 "entry from newton.eval_mass_matrix and the Jacobian-T "
                 "gravity bias (Coriolis neglected). Cart state feedback "
-                "is untouched. Requires --world-count 1."
+                "is untouched. Multi-world is supported via the controller's "
+                "block-diagonal batched Cholesky."
             ),
         )
         parser.set_defaults(world_count=1)

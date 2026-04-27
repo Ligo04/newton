@@ -25,6 +25,7 @@ from newton.actuators import (
     ControllerNeuralMLP,
     ControllerPD,
     ControllerPID,
+    ControllerStablePD,
     Delay,
     parse_actuator_prim,
 )
@@ -181,6 +182,175 @@ class TestControllerPID(unittest.TestCase):
             state_0, state_1 = state_1, state_0
 
             self.assertAlmostEqual(forces.numpy()[0], expected, places=4, msg=f"step {step_i}")
+
+
+def _stable_pd_reference(
+    kp: np.ndarray,
+    kd: np.ndarray,
+    const: np.ndarray,
+    M: np.ndarray,
+    C: np.ndarray,
+    q: np.ndarray,
+    qd: np.ndarray,
+    tgt_q: np.ndarray,
+    tgt_qd: np.ndarray,
+    dt: float,
+) -> np.ndarray:
+    """Numpy reference for one world's Tan 2011 stable-PD effort.
+
+    Solves ``(M + diag(kd)·dt) · qddot = kp·(tgt_q - q - qd·dt) + kd·(tgt_qd - qd) - C``
+    via :func:`numpy.linalg.solve`, then returns
+    ``effort = const + kp·err_pos + kd·err_vel - kd·qddot·dt``.
+    """
+    p_term = kp * (tgt_q - q - qd * dt)
+    d_term = kd * (tgt_qd - qd)
+    rhs = p_term + d_term - C
+    A = M + np.diag(kd) * dt
+    qddot = np.linalg.solve(A, rhs)
+    return const + p_term + d_term - kd * qddot * dt
+
+
+class TestControllerStablePD(unittest.TestCase):
+    """Stable-PD controller (Tan 2011) — implicit M·qddot solve, optional multi-world.
+
+    Verifies the Cholesky-based effort matches a per-world numpy
+    ``np.linalg.solve`` reference, both for ``num_worlds=1`` (back-compat
+    layout with leading singleton batch dim) and ``num_worlds>1`` (the
+    block-diagonal batched solve introduced for replicated articulations).
+    """
+
+    def _run_single_world(self, n: int, dt: float, seed: int) -> None:
+        rng = np.random.default_rng(seed)
+        device = wp.get_device()
+
+        kp = rng.uniform(50.0, 200.0, size=n).astype(np.float32)
+        kd = rng.uniform(5.0, 20.0, size=n).astype(np.float32)
+        const = rng.uniform(-2.0, 2.0, size=n).astype(np.float32)
+
+        # Symmetric positive-definite mass matrix: M = L·Lᵀ + I (for stability margin).
+        L = rng.uniform(0.5, 1.5, size=(n, n)).astype(np.float32)
+        M = (L @ L.T + np.eye(n, dtype=np.float32)).astype(np.float32)
+        C = rng.uniform(-1.0, 1.0, size=n).astype(np.float32)
+
+        q = rng.uniform(-0.5, 0.5, size=n).astype(np.float32)
+        qd = rng.uniform(-1.0, 1.0, size=n).astype(np.float32)
+        tgt_q = rng.uniform(-1.0, 1.0, size=n).astype(np.float32)
+        tgt_qd = rng.uniform(-0.5, 0.5, size=n).astype(np.float32)
+
+        ctrl = ControllerStablePD(
+            kp=wp.array(kp, dtype=wp.float32, device=device),
+            kd=wp.array(kd, dtype=wp.float32, device=device),
+            const_effort=wp.array(const, dtype=wp.float32, device=device),
+            num_worlds=1,
+        )
+        ctrl.finalize(device, n)
+        state = ctrl.state(n, device)
+        # mass_matrix shape (1, n, n); bias_forces shape (1, n).
+        state.mass_matrix.assign(M.reshape(1, n, n))
+        state.bias_forces.assign(C.reshape(1, n))
+
+        indices = wp.array(np.arange(n, dtype=np.uint32), device=device)
+        forces = wp.zeros(n, dtype=wp.float32, device=device)
+        ctrl.compute(
+            positions=wp.array(q, dtype=wp.float32, device=device),
+            velocities=wp.array(qd, dtype=wp.float32, device=device),
+            target_pos=wp.array(tgt_q, dtype=wp.float32, device=device),
+            target_vel=wp.array(tgt_qd, dtype=wp.float32, device=device),
+            feedforward=None,
+            pos_indices=indices,
+            vel_indices=indices,
+            target_pos_indices=indices,
+            target_vel_indices=indices,
+            forces=forces,
+            state=state,
+            dt=dt,
+            device=device,
+        )
+
+        expected = _stable_pd_reference(kp, kd, const, M, C, q, qd, tgt_q, tgt_qd, dt)
+        np.testing.assert_allclose(forces.numpy(), expected, rtol=1e-3, atol=1e-3)
+
+    def test_compute_single_world(self):
+        """num_worlds=1 should match np.linalg.solve at typical articulation sizes."""
+        self._run_single_world(n=6, dt=1.0 / 240.0, seed=0)
+
+    def test_compute_multi_world_block_diagonal(self):
+        """num_worlds=W: each world's effort must match its own per-world numpy solve.
+
+        Uses *different* gains, mass matrices, and bias forces in each
+        world to prove the batched Cholesky factors each block
+        independently rather than mixing the systems.
+        """
+        W = 4
+        n = 5
+        dt = 1.0 / 240.0
+        device = wp.get_device()
+        rng = np.random.default_rng(42)
+
+        kp = rng.uniform(50.0, 200.0, size=(W, n)).astype(np.float32)
+        kd = rng.uniform(5.0, 20.0, size=(W, n)).astype(np.float32)
+        const = rng.uniform(-2.0, 2.0, size=(W, n)).astype(np.float32)
+        L = rng.uniform(0.5, 1.5, size=(W, n, n)).astype(np.float32)
+        # SPD per-world: M_w = L_w·L_wᵀ + I
+        M = np.matmul(L, np.swapaxes(L, -1, -2)) + np.eye(n, dtype=np.float32)[None]
+        M = M.astype(np.float32)
+        C = rng.uniform(-1.0, 1.0, size=(W, n)).astype(np.float32)
+        q = rng.uniform(-0.5, 0.5, size=(W, n)).astype(np.float32)
+        qd = rng.uniform(-1.0, 1.0, size=(W, n)).astype(np.float32)
+        tgt_q = rng.uniform(-1.0, 1.0, size=(W, n)).astype(np.float32)
+        tgt_qd = rng.uniform(-0.5, 0.5, size=(W, n)).astype(np.float32)
+
+        ctrl = ControllerStablePD(
+            kp=wp.array(kp.reshape(-1), dtype=wp.float32, device=device),
+            kd=wp.array(kd.reshape(-1), dtype=wp.float32, device=device),
+            const_effort=wp.array(const.reshape(-1), dtype=wp.float32, device=device),
+            num_worlds=W,
+        )
+        total = W * n
+        ctrl.finalize(device, total)
+        state = ctrl.state(total, device)
+        state.mass_matrix.assign(np.ascontiguousarray(M))
+        state.bias_forces.assign(np.ascontiguousarray(C))
+
+        indices = wp.array(np.arange(total, dtype=np.uint32), device=device)
+        forces = wp.zeros(total, dtype=wp.float32, device=device)
+        ctrl.compute(
+            positions=wp.array(q.reshape(-1), dtype=wp.float32, device=device),
+            velocities=wp.array(qd.reshape(-1), dtype=wp.float32, device=device),
+            target_pos=wp.array(tgt_q.reshape(-1), dtype=wp.float32, device=device),
+            target_vel=wp.array(tgt_qd.reshape(-1), dtype=wp.float32, device=device),
+            feedforward=None,
+            pos_indices=indices,
+            vel_indices=indices,
+            target_pos_indices=indices,
+            target_vel_indices=indices,
+            forces=forces,
+            state=state,
+            dt=dt,
+            device=device,
+        )
+
+        result = forces.numpy().reshape(W, n)
+        for w in range(W):
+            expected_w = _stable_pd_reference(kp[w], kd[w], const[w], M[w], C[w], q[w], qd[w], tgt_q[w], tgt_qd[w], dt)
+            np.testing.assert_allclose(
+                result[w],
+                expected_w,
+                rtol=1e-3,
+                atol=1e-3,
+                err_msg=f"world {w} effort mismatch — block-diagonal Cholesky did not isolate worlds",
+            )
+
+    def test_finalize_rejects_non_divisible_actuator_count(self):
+        """num_actuators must be a multiple of num_worlds — otherwise raise."""
+        device = wp.get_device()
+        ctrl = ControllerStablePD(
+            kp=wp.array([1.0, 1.0, 1.0], dtype=wp.float32, device=device),
+            kd=wp.array([0.1, 0.1, 0.1], dtype=wp.float32, device=device),
+            num_worlds=2,
+        )
+        with self.assertRaisesRegex(ValueError, "divisible by num_worlds"):
+            ctrl.finalize(device, 3)
 
 
 @unittest.skipUnless(_HAS_TORCH, "torch not installed")

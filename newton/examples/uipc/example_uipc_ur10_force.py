@@ -54,11 +54,12 @@
 # ``C(q, q̇)`` fed into the controller state each substep.  Here we wire:
 #
 #     ctrl_state.mass_matrix = newton.eval_mass_matrix(model, state)
-#     ctrl_state.bias_forces = -τ_g              # Jacobian-T gravity
+#     ctrl_state.bias_forces = -τ_g + τ_c        # gravity + finite-diff Coriolis
 #
-# Coriolis / centrifugal terms are dropped (UR10 velocities are small in
-# a static-hold demo); a full-fidelity controller would run RNEA.  Since
-# gravity is already baked into ``bias_forces``, --stable-pd is
+# ``τ_c`` is computed from finite differences of ``M(q)`` using the
+# Christoffel contraction.  This keeps the demo on public Newton APIs; a
+# production controller would usually consume an exact RNEA bias-force API.
+# Since gravity is already baked into ``bias_forces``, --stable-pd is
 # mutually exclusive with --gravity-comp.
 #
 # Command:
@@ -79,6 +80,34 @@ from newton import JointTargetMode
 from newton.actuators import Actuator as _NewtonActuator
 from newton.actuators import ClampingMaxEffort, ControllerPD, ControllerStablePD
 from newton.selection import ArticulationView
+
+
+def _compute_coriolis_from_mass_derivatives(dH_dq: np.ndarray, qd: np.ndarray) -> np.ndarray:
+    """Contract mass-matrix derivatives into Coriolis/centrifugal bias forces.
+
+    Args:
+        dH_dq: Mass-matrix derivatives where ``dH_dq[k, i, j]`` is
+            ``d H[i, j] / d q[k]``.
+        qd: Generalized velocities [m/s or rad/s], shape ``(dof_count,)``.
+
+    Returns:
+        Coriolis/centrifugal bias forces [N or N·m], shape ``(dof_count,)``.
+    """
+    dH_dq = np.asarray(dH_dq, dtype=np.float32)
+    qd = np.asarray(qd, dtype=np.float32)
+    dof_count = int(qd.shape[0])
+    if dH_dq.shape != (dof_count, dof_count, dof_count):
+        raise ValueError(f"dH_dq shape {dH_dq.shape} must be ({dof_count}, {dof_count}, {dof_count})")
+
+    coriolis = np.zeros(dof_count, dtype=np.float32)
+    for i in range(dof_count):
+        total = 0.0
+        for j in range(dof_count):
+            for k in range(dof_count):
+                christoffel = 0.5 * (dH_dq[k, i, j] + dH_dq[j, i, k] - dH_dq[i, j, k])
+                total += float(christoffel) * float(qd[j]) * float(qd[k])
+        coriolis[i] = total
+    return coriolis
 
 
 class Example:
@@ -103,7 +132,6 @@ class Example:
 
         self.world_count = args.world_count
         self.solver_name = args.solver
-        self.gravity_comp = bool(args.gravity_comp)
         self.stable_pd = bool(args.stable_pd)
         self.viewer = viewer
 
@@ -175,6 +203,9 @@ class Example:
         # lives outside the controller kernel in the new architecture.
         controller_cls = ControllerStablePD if self.stable_pd else ControllerPD
         for dof_idx in range(len(self.kp)):
+            # num_worlds drives the per-world block-diagonal Cholesky in
+            # ControllerStablePD; ControllerPD doesn't accept it.
+            extra_kwargs = {"num_worlds": self.world_count} if self.stable_pd else {}
             ur10.add_actuator(
                 controller_cls,
                 index=dof_idx,
@@ -183,6 +214,7 @@ class Example:
                 clamping=[
                     (ClampingMaxEffort, {"max_effort": float(self.max_torque[dof_idx])}),
                 ],
+                **extra_kwargs,
             )
 
         if self.world_count > 1:
@@ -227,8 +259,8 @@ class Example:
 
         # Gravity vector and per-body masses — host-side caches avoid a GPU
         # round-trip on every substep.
-        self._gravity_np = self.model.gravity.numpy()  # (world_count, 3)
-        self._body_mass_np = self.model.body_mass.numpy()  # (body_count,)
+        self._gravity_np = self.model.gravity.numpy()  # ty:ignore[unresolved-attribute]  # pyright: ignore[reportOptionalMemberAccess]
+        self._body_mass_np = self.model.body_mass.numpy()  # ty:ignore[unresolved-attribute]  # pyright: ignore[reportOptionalMemberAccess]
 
         # Reusable scratch for eval_jacobian so we don't re-allocate each step.
         self._J_buf: wp.array | None = None
@@ -259,37 +291,19 @@ class Example:
         )
         self.pd_actuator = pd_actuator
         expected = self.world_count * self.dofs_per_world
-        kp_len = len(pd_actuator.controller.kp)
+        kp_len = len(pd_actuator.controller.kp)  # ty:ignore[unresolved-attribute]  # pyright: ignore[reportAttributeAccessIssue]
         assert kp_len == expected, (
             f"PD actuator kp length {kp_len} != {expected}; "
             "builder/replicate did not merge the per-DOF actuators as expected"
         )
 
-        # ``ControllerStablePD`` is stateful: every step needs ``mass_matrix``
-        # and ``bias_forces`` written into its ``State`` for the Tan 2011
-        # implicit solve (see class docstring). The composed ``Actuator.State``
-        # wraps the controller's state under ``.controller_state``. The
-        # batched builder would merge all worlds' DOFs into one (6·Nw)-actuator
-        # instance, and the per-step on-device Cholesky scales as O((6·Nw)³) —
-        # fine for Nw=1 but quickly defeats the "stable" motivation. Keep this
-        # demo to the single-world case; batched block-diagonal solves are a
-        # follow-up.
+        # ControllerStablePD needs ``mass_matrix`` + ``bias_forces`` in
+        # its State each step; populated below in ``_apply_feedback``.
         self._act_state: _NewtonActuator.State | None = None
         self._H_buf: wp.array | None = None
+        self._H_fd_buf: wp.array | None = None
+        self._coriolis_eps = 1.0e-3
         if self.stable_pd:
-            if self.world_count != 1:
-                raise ValueError(
-                    "--stable-pd currently requires --world-count 1: the builder merges "
-                    "all worlds into a single num_actuators=6·world_count instance whose "
-                    "on-device Cholesky would scale as O((6·Nw)³) with zero off-diagonal "
-                    "mass coupling. Block-diagonal batched solves are a follow-up."
-                )
-            if self.gravity_comp:
-                raise ValueError(
-                    "--stable-pd integrates gravity via its bias_forces input, so "
-                    "--gravity-comp would double-compensate through constant_force. "
-                    "Pass only one of the two flags."
-                )
             self._act_state = self.pd_actuator.state()
 
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
@@ -314,13 +328,14 @@ class Example:
 
             solver = newton.solvers.SolverUIPC(
                 self.model,
-                workspace="",
+                workspace="/tmp/newton_uipc",
                 dt=self.sim_dt,
                 logger_level=uipc.Logger.Warn,
                 dump_enable=True,
             )
             solver.set_contact(True, 0.001)
-            solver.override_uipc_inertia_from_model(list(range(self.model.body_count)))
+            solver.sync_uipc_inertia_with_model()
+            solver.initialize()
             return solver, True
         if name == "mujoco":
             return newton.solvers.SolverMuJoCo(self.model), False
@@ -328,7 +343,6 @@ class Example:
             return newton.solvers.SolverFeatherstone(self.model), False
         raise ValueError(f"unsupported --solver: {name!r}")
 
-    # ----------------------------------------------------------------- control
     def _compute_gravity_comp(self) -> np.ndarray:
         """Jacobian-transpose gravity compensation.
 
@@ -346,8 +360,9 @@ class Example:
         but leave the maximal-coordinate ``body_q`` cache stale, and
         ``eval_jacobian`` reads ``body_q``.
         """
-        newton.eval_fk(self.model, self.state_0.joint_q, self.state_0.joint_qd, self.state_0)
         self._J_buf = newton.eval_jacobian(self.model, self.state_0, self._J_buf)
+        if self._J_buf is None:
+            raise ValueError("eval_jacobian unexpectedly returned None for UR10 articulation")
         J_np = self._J_buf.numpy()  # shape (A, max_links*6, max_dofs)
 
         tau_g = np.zeros((self.world_count, 1, self.dofs_per_world), dtype=np.float32)
@@ -366,6 +381,63 @@ class Example:
                 tau_g[w, 0] -= J_lin.T @ (m * g_vec)
         return tau_g
 
+    def _mass_matrix_at_joint_q(self, joint_q: np.ndarray) -> np.ndarray:
+        """Evaluate per-world ``M_w(q_w)`` at the given flat ``joint_q``.
+
+        Mutates ``state_0.joint_q``; callers must restore it. Returns
+        shape ``(world_count, dofs_per_world, dofs_per_world)``.
+        """
+        state_joint_q = self.state_0.joint_q
+        if state_joint_q is None:
+            raise ValueError("UR10 force example requires a joint_q state array")
+        state_joint_q.assign(joint_q.astype(np.float32, copy=False))
+        self._H_fd_buf = newton.eval_mass_matrix(self.model, self.state_0, H=self._H_fd_buf)
+        if self._H_fd_buf is None:
+            raise ValueError("eval_mass_matrix unexpectedly returned None for UR10 articulation")
+        return self._H_fd_buf.numpy()[:, : self.dofs_per_world, : self.dofs_per_world].astype(np.float32, copy=True)
+
+    def _compute_coriolis_bias(self) -> np.ndarray:
+        """Per-world finite-difference Coriolis/centrifugal bias ``C(q, qd)``.
+
+        Perturbs DOF ``p`` of every world simultaneously, so eval_mass_matrix
+        runs ``2·dofs_per_world`` times regardless of ``world_count``.
+        Returns ``(world_count, dofs_per_world)``.
+        """
+        state_joint_q = self.state_0.joint_q
+        state_joint_qd = self.state_0.joint_qd
+        if state_joint_q is None or state_joint_qd is None:
+            raise ValueError("UR10 force example requires joint_q and joint_qd state arrays")
+        q0 = state_joint_q.numpy().astype(np.float32, copy=True)
+        qd = state_joint_qd.numpy().astype(np.float32, copy=True)
+        n = self.dofs_per_world
+        W = self.world_count
+        expected = W * n
+        if q0.size != expected or qd.size != expected:
+            raise ValueError(
+                f"expected flat joint state of length world_count*dofs_per_world = {expected}; "
+                f"got joint_q size {q0.size}, joint_qd size {qd.size}"
+            )
+
+        qd_per_world = qd.reshape(W, n)
+        dH_dq = np.empty((W, n, n, n), dtype=np.float32)
+        eps = np.float32(self._coriolis_eps)
+        try:
+            for p in range(n):
+                q_plus = q0.reshape(W, n).copy()
+                q_minus = q0.reshape(W, n).copy()
+                q_plus[:, p] += eps
+                q_minus[:, p] -= eps
+                H_plus = self._mass_matrix_at_joint_q(q_plus.reshape(-1))
+                H_minus = self._mass_matrix_at_joint_q(q_minus.reshape(-1))
+                dH_dq[:, p, :, :] = (H_plus - H_minus) / (2.0 * eps)
+        finally:
+            state_joint_q.assign(q0)
+
+        bias = np.empty((W, n), dtype=np.float32)
+        for w in range(W):
+            bias[w] = _compute_coriolis_from_mass_derivatives(dH_dq[w], qd_per_world[w])
+        return bias
+
     def _apply_feedback(self):
         """Run every registered actuator -> ``control.joint_f``.
 
@@ -382,35 +454,23 @@ class Example:
            substep).
         3. Run each actuator.
         """
-        self.control.joint_f.zero_()
-
-        if self.gravity_comp:
-            tau_g = self._compute_gravity_comp()
-            # const_effort layout matches the order we registered the
-            # actuators (6 DOFs x N worlds). Flatten accordingly. Only
-            # ControllerPD exposes ``const_effort`` — gravity-comp is
-            # mutually exclusive with stable-pd (see validation in
-            # ``__init__``), so the controller here is guaranteed to be
-            # ControllerPD.
-            self.pd_actuator.controller.const_effort.assign(tau_g.reshape(-1).astype(np.float32))
+        self.control.joint_f.zero_()  # pyright: ignore[reportOptionalMemberAccess]  # ty:ignore[unresolved-attribute]
 
         if self.stable_pd:
-            # Populate the Tan 2011 State each substep.  ``eval_mass_matrix``
-            # returns H of shape (articulation_count, max_dofs, max_dofs) —
-            # for world_count=1 this is (1, 6, 6) and H[0] is the UR10 6x6
-            # joint-space inertia that goes into the (M + diag(Kd)·Δt) solve.
             self._H_buf = newton.eval_mass_matrix(self.model, self.state_0, H=self._H_buf)
+            if self._H_buf is None:
+                raise ValueError("eval_mass_matrix unexpectedly returned None for UR10 articulation")
+            if self._act_state is None:
+                raise ValueError("ControllerStablePD state was not initialized")
             ctrl_state = self._act_state.controller_state
-            ctrl_state.mass_matrix.assign(self._H_buf.numpy()[0])
+            # H is (W, max_dofs, max_dofs); matches State.mass_matrix's
+            # (W, n_per_world, n_per_world) for max_dofs == n_per_world == 6.
+            ctrl_state.mass_matrix.assign(self._H_buf)  # ty:ignore[unresolved-attribute]  # pyright: ignore[reportAttributeAccessIssue, reportOptionalMemberAccess]
 
-            # ``_compute_gravity_comp`` returns τ_g = -Σ Jᵀ(m·g), i.e. the
-            # torque that *cancels* gravity (what ActuatorPD.constant_force
-            # wants).  Tan 2011's ``C`` in the rhs ``b = p + d - C`` is the
-            # torque gravity *imposes* on the joints, so C = -τ_g.  Coriolis
-            # is dropped — acceptable for UR10 static-hold but not for a
-            # trajectory tracker.
-            tau_g = self._compute_gravity_comp().reshape(-1).astype(np.float32)
-            ctrl_state.bias_forces.assign(-tau_g)
+            # Tan 2011 C = -τ_g + τ_coriolis, shape (W, n_per_world).
+            tau_g = self._compute_gravity_comp().reshape(self.world_count, self.dofs_per_world).astype(np.float32)
+            tau_c = self._compute_coriolis_bias().astype(np.float32)
+            ctrl_state.bias_forces.assign(-tau_g + tau_c)  # ty:ignore[unresolved-attribute]  # pyright: ignore[reportAttributeAccessIssue, reportOptionalMemberAccess]
 
         # ControllerStablePD's update_state is a no-op (per-step scratch, no
         # cross-step information), so passing the same State object as both
@@ -430,7 +490,7 @@ class Example:
         for _ in range(self.sim_substeps):
             self._apply_feedback()
             self.state_0.clear_forces()
-            self.solver.step(
+            self.solver.step(  # ty:ignore[unresolved-attribute]  # pyright: ignore[reportAttributeAccessIssue]
                 self.state_0,
                 self.state_1,
                 self.control,
@@ -450,13 +510,19 @@ class Example:
         self.viewer.end_frame()
 
     def _log_tracking(self):
-        """Print world-0 joint tracking error and applied torques."""
+        """Print world-0 joint positions, velocities, tracking error, and torques."""
         q = self.ur10s.get_attribute("joint_q", self.state_0).numpy()[0, 0]
+        qd = self.ur10s.get_attribute("joint_qd", self.state_0).numpy()[0, 0]
         f = self.ur10s.get_attribute("joint_f", self.control).numpy()[0, 0]
         err = self.HOME_POSE - q
+        q_str = " ".join(f"{p:+.4f}" for p in q)
+        qd_str = " ".join(f"{v:+.4f}" for v in qd)
         err_str = " ".join(f"{e:+.3f}" for e in err)
         tau_str = " ".join(f"{t:+7.2f}" for t in f)
-        print(f"[t={self.sim_time:6.3f}s] err=[{err_str}] rad  tau=[{tau_str}] N·m")
+        print(
+            f"[t={self.sim_time:6.3f}s] q(rad)=[{q_str}]  qd(rad/s)=[{qd_str}]\n"
+            f"              err(rad)=[{err_str}]  tau(N·m)=[{tau_str}]"
+        )
 
     # -------------------------------------------------------------------- test
     def test_final(self):
@@ -487,11 +553,6 @@ class Example:
             help="Newton solver backend driving the force controller.",
         )
         parser.add_argument(
-            "--gravity-comp",
-            action="store_true",
-            help="Enable Jacobian-transpose gravity compensation (off by default).",
-        )
-        parser.add_argument(
             "--stable-pd",
             action="store_true",
             help=(
@@ -499,8 +560,8 @@ class Example:
                 "The controller runs an on-device (M + diag(Kd)·Δt)·qddot = b "
                 "solve each substep, so the example populates its State with "
                 "M = newton.eval_mass_matrix and bias_forces = Jacobian-T "
-                "gravity every substep. Coriolis is neglected (static-hold "
-                "demo). Mutually exclusive with --gravity-comp (bias_forces "
+                "gravity plus finite-difference Coriolis every substep. "
+                "Mutually exclusive with --gravity-comp (bias_forces "
                 "already contains gravity). Requires --world-count 1."
             ),
         )
