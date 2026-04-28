@@ -337,9 +337,13 @@ class Articulation:
     ) -> None:
         """UIPC Animator callback for a revolute joint.
 
-        Reads the current angle from the UIPC geometry, updates local
-        readback state, then writes constraint flags and target angle
-        back into the geometry based on the cached control mode.
+        Writes constraint flags and target angle into the UIPC geometry
+        based on the cached control mode.  State readback is **not** done
+        here — the animator may fire multiple times during one
+        ``world.advance()`` (e.g. line search, Newton iterations), so the
+        ``angle`` value seen here is not the canonical pre/post-step
+        position.  See :meth:`read_pre_advance` and
+        :meth:`read_post_retrieve`.
 
         Args:
             info: UIPC animation update info for this dispatch (frame
@@ -352,27 +356,12 @@ class Articulation:
         """
         if not self._ensure_state():
             return
-        assert self.joint_position is not None
-        assert self.joint_velocity is not None
         assert self.is_constrained is not None
         assert self.is_force_constrained is not None
         assert self.target_force is not None
         assert self.target_position is not None
 
         local = self._joint_to_local[newton_joint_idx]
-        pos_np = self.joint_position.numpy()
-        vel_np = self.joint_velocity.numpy()
-
-        # UIPC's ``angle`` edge attribute reports rotation with the opposite
-        # sign to Newton's joint-angle convention. Driving works correctly
-        # (UIPC physically moves the joint to Newton's target), but the
-        # readback is sign-flipped, so negate on read-back.
-        curr_angle: float = float(view(geo.edges().find("angle"))[edge_idx])  # ty:ignore[no-matching-overload]  # pyright: ignore[reportArgumentType]
-
-        # Update readback (numpy view writes through to wp.array on CPU)
-        if self._step_count > 0:
-            vel_np[local] = (curr_angle - pos_np[local]) / self._dt
-        pos_np[local] = curr_angle
 
         # Constraint and force flags
         driving = bool(self.is_constrained.numpy()[local])
@@ -393,15 +382,6 @@ class Articulation:
         # Newton target directly.
         if driving:
             view(geo.edges().find("aim_angle"))[edge_idx] = aim_angle  # ty:ignore[no-matching-overload]  # pyright: ignore[reportArgumentType]
-
-        # curr_deg = math.degrees(curr_angle)
-        # tgt_deg = math.degrees(aim_angle)
-        # print(
-        #     f"[uipc_debug][{self.name}] frame={info.frame()}  "
-        #     f"revolute[{newton_joint_idx}]: "
-        #     f"curr={curr_deg:+8.3f} deg  target={tgt_deg:+8.3f} deg  diff={tgt_deg - curr_deg:+7.3f} "
-        #     f"external_torque={external_torque:+8.3f} Nm"
-        # )
 
     def prismatic_joint_anim(
         self,
@@ -424,22 +404,12 @@ class Articulation:
         """
         if not self._ensure_state():
             return
-        assert self.joint_position is not None
-        assert self.joint_velocity is not None
         assert self.is_constrained is not None
         assert self.is_force_constrained is not None
         assert self.target_force is not None
         assert self.target_position is not None
 
         local = self._joint_to_local[newton_joint_idx]
-        pos_np = self.joint_position.numpy()
-        vel_np = self.joint_velocity.numpy()
-        curr_dist: float = float(view(geo.edges().find("distance"))[edge_idx])  # ty:ignore[no-matching-overload]  # pyright: ignore[reportArgumentType]
-
-        # Update readback (numpy view writes through to wp.array on CPU)
-        if self._step_count > 0:
-            vel_np[local] = (curr_dist - pos_np[local]) / self._dt
-        pos_np[local] = curr_dist
 
         # Constraint and force flags
         driving = bool(self.is_constrained.numpy()[local])
@@ -456,12 +426,6 @@ class Articulation:
 
         if driving:
             view(geo.edges().find("aim_distance"))[edge_idx] = aim_distance  # ty:ignore[no-matching-overload]  # pyright: ignore[reportArgumentType]
-
-        # print(
-        #     f"[uipc_debug][{self.name}] frame={info.frame()}  "
-        #     f"prismatic[{newton_joint_idx}]: "
-        #     f"curr={curr_dist:+8.4f} m    target={aim_distance:+8.4f} m    diff={aim_distance - curr_dist:+7.4f}"
-        # )
 
     # ------------------------------------------------------------------
     # Per-step control caching & state readback
@@ -580,13 +544,40 @@ class Articulation:
             device=device,
         )
 
-    def read_post_retrieve(self) -> None:
-        """Re-read edge attributes after ``world.retrieve()``.
+    def read_pre_advance(self) -> None:
+        """Snapshot ``angle`` / ``distance`` into ``joint_position``.
 
-        The animator callback fires during ``world.advance()`` and reads
-        ``angle`` / ``distance`` values from the **previous** retrieve.
-        This method re-reads the edge attributes so that
-        ``joint_position`` reflects the **current** frame.
+        Call **once per step, before** :meth:`world.advance`.  This captures
+        the start-of-step joint position ``q_t`` so that
+        :meth:`read_post_retrieve` can compute
+        ``qd = (q_{t+dt} - q_t) / dt`` from two well-defined edge-attribute
+        snapshots — instead of from values seen inside the animator
+        callback, which UIPC may invoke multiple times per step (line
+        search, Newton iterations).
+        """
+        if not self._ensure_state():
+            return
+        assert self.joint_position is not None
+
+        pos_np = self.joint_position.numpy()
+        for newton_j in self.active_joint_indices:
+            if newton_j not in self._joint_edge_idx:
+                continue
+            local = self._joint_to_local[newton_j]
+            edge_idx = self._joint_edge_idx[newton_j]
+            geo: SimplicialComplex = self.joint_geo_slots[newton_j].geometry()
+            if self._joint_is_revolute[newton_j]:
+                pos_np[local] = float(view(geo.edges().find("angle"))[edge_idx])
+            else:
+                pos_np[local] = float(view(geo.edges().find("distance"))[edge_idx])
+
+    def read_post_retrieve(self) -> None:
+        """Re-read edge attributes after ``world.retrieve()`` and finite-difference.
+
+        Pairs with :meth:`read_pre_advance`: with ``pos_np`` holding the
+        pre-advance angle/distance, this reads the post-retrieve value and
+        sets ``vel = (post - pre) / dt``, then updates ``pos_np`` to the
+        post-retrieve value.
         """
         if not self._ensure_state():
             return
@@ -604,13 +595,10 @@ class Articulation:
             geo: SimplicialComplex = self.joint_geo_slots[newton_j].geometry()
 
             if self._joint_is_revolute[newton_j]:
-                # Negate to compensate for UIPC's opposite-sign angle convention
-                # (see ``revolute_joint_anim`` for details).
                 curr_val: float = float(view(geo.edges().find("angle"))[edge_idx])
             else:
                 curr_val = float(view(geo.edges().find("distance"))[edge_idx])
 
-            old_val = pos_np[local]
-            if self._step_count > 0:
-                vel_np[local] = (curr_val - old_val) / self._dt
+            pre_val = pos_np[local]
+            vel_np[local] = (curr_val - pre_val) / self._dt
             pos_np[local] = curr_val

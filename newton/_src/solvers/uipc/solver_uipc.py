@@ -18,7 +18,7 @@ import uipc.adapter.warp
 import warp as wp
 from uipc import Logger as ULogger
 from uipc import view
-from uipc.core import AffineBodyStateAccessorFeature, ContactElement, ContactTabular, SceneIO
+from uipc.core import AffineBodyStateAccessorFeature, ContactElement, ContactTabular, SceneIO, SubsceneElement
 from uipc.core import Scene as UScene
 from uipc.stats import SimulationStats as USimulationStats
 from uipc.unit import GPa, MPa
@@ -180,7 +180,7 @@ class SolverUIPC(SolverBase):
                 shutdown, so users do not need to call it explicitly. The
                 hook is a no-op if the report was already saved manually.
             auto_sync_inertia: If ``True`` (default), :meth:`initialize`
-                finishes by calling :meth:`override_model_inertia_from_uipc`
+                finishes by calling :meth:`sync_model_inertia_from_uipc`
                 so the Newton model's ``body_mass`` / ``body_com`` /
                 ``body_inertia`` (and their inverses) mirror the finalised
                 UIPC ABD values.  Set to ``False`` to preserve the exact
@@ -188,7 +188,7 @@ class SolverUIPC(SolverBase):
                 downstream consumer (e.g. Featherstone-derived mass matrix
                 for stable PD) has already been tuned against those values
                 and must not see UIPC's mesh-volume-derived drift.  Bodies
-                flagged via :meth:`override_uipc_inertia_from_model` are
+                flagged via :meth:`sync_uipc_inertia_with_model` are
                 always pushed into UIPC regardless of this flag.
         """
         super().__init__(model=model)
@@ -262,11 +262,17 @@ class SolverUIPC(SolverBase):
         # Bodies whose Newton-authored (mass, com, inertia) must be pushed
         # into the UIPC ABD geometry instead of letting UIPC re-derive them
         # from ``mass_density * mesh_volume``.  Populated via
-        # :meth:`override_uipc_inertia_from_model` before :meth:`initialize`.
+        # :meth:`sync_uipc_inertia_with_model` before :meth:`initialize`.
         self._custom_inertia_bodies: set[int] = set()
 
+        # Bodies that must not share UIPC AffineBody instancing.  Add indices
+        # before :meth:`initialize`; passed through to
+        # :meth:`~RigidBodyBuilder.build_affine_bodies` (merged with custom
+        # inertia there).
+        self._no_instance_bodies: set[int] = set()
+
         # Whether :meth:`initialize` should auto-call
-        # :meth:`override_model_inertia_from_uipc` at the end so the Newton
+        # :meth:`sync_model_inertia_from_uipc` at the end so the Newton
         # model mirrors UIPC's ABD-finalised mass properties.  Disable to
         # keep the authored ``ModelBuilder`` values untouched.
         self._auto_sync_inertia: bool = auto_sync_inertia
@@ -482,7 +488,7 @@ class SolverUIPC(SolverBase):
     # Mass / inertia bridge: read ABD-derived values back into Newton
     # ------------------------------------------------------------------
 
-    def override_uipc_inertia_from_model(
+    def sync_uipc_inertia_with_model(
         self,
         body_indices: list[int] | None = None,
     ) -> list[int]:
@@ -523,7 +529,7 @@ class SolverUIPC(SolverBase):
         """
         if self._initialized:
             raise RuntimeError(
-                "override_uipc_inertia_from_model must be called before "
+                "sync_uipc_inertia_with_model must be called before "
                 "initialize() — the UIPC ABD geometry is built there and "
                 "cannot be rewritten after world.init()."
             )
@@ -593,11 +599,11 @@ class SolverUIPC(SolverBase):
             if attr is None:
                 out[name] = None
                 continue
-            v = np.asarray(view(attr)[0], dtype=np.float64)
+            v = np.asarray(view(attr)[0], dtype=np.float64)  # ty:ignore[no-matching-overload]  # pyright: ignore[reportArgumentType]
             out[name] = float(v) if shape is None else v.reshape(shape).copy()
         return out
 
-    def override_model_inertia_from_uipc(
+    def sync_model_inertia_from_uipc(
         self,
         body_indices: list[int] | None = None,
     ) -> list[int]:
@@ -630,7 +636,7 @@ class SolverUIPC(SolverBase):
         """
         if not self._initialized:
             raise RuntimeError(
-                "override_model_inertia_from_uipc must be called after "
+                "sync_model_inertia_from_uipc must be called after "
                 "initialize()/world.init(); UIPC has not finalised the ABD "
                 "meta attributes yet."
             )
@@ -701,15 +707,15 @@ class SolverUIPC(SolverBase):
         Call this explicitly after any :meth:`configure_scene`,
         :meth:`configure_contact_tabular`,
         :meth:`configure_subscene_tabular`, and
-        :meth:`override_uipc_inertia_from_model` calls.
+        :meth:`sync_uipc_inertia_with_model` calls.
 
         After ``world.init(scene)`` returns, the Newton model's
         :attr:`Model.body_mass` / :attr:`Model.body_com` /
         :attr:`Model.body_inertia` (and their inverses) are **auto-synced** to
         the finalised UIPC ABD values via
-        :meth:`override_model_inertia_from_uipc` so both sides agree on rigid
+        :meth:`sync_model_inertia_from_uipc` so both sides agree on rigid
         body dynamics.  Bodies flagged through
-        :meth:`override_uipc_inertia_from_model` round-trip their authored
+        :meth:`sync_uipc_inertia_with_model` round-trip their authored
         values unchanged; all other bodies adopt UIPC's mesh-volume-derived
         triplet.  Shapeless articulation proxies (which carry sentinel ABD
         meta) are excluded from the sync.  Pass
@@ -731,43 +737,41 @@ class SolverUIPC(SolverBase):
 
         model = self.model
 
-        if not os.path.exists(self._workspace):
-            os.mkdir(self._workspace)
+        os.makedirs(self._workspace, exist_ok=True)
 
         # Create a single UIPC Engine / World / Scene
         self.engine = uipc.Engine(backend_name=self._backend, workspace=self._workspace)
         self.world = uipc.World(self.engine)
         self.scene = uipc.Scene(self._scene_config)
-        print("scene_config", self._scene_config)
+        print(f"scene_config:{self._scene_config}")
 
         # Subscene tabular for multi-world contact isolation — set up BEFORE
         # contact elements so that elements can be created within subscenes.
-        subscene_elements: list[Any] = []
-        if model.world_count > 1:
-            tabular = self.scene.subscene_tabular()
-            default_subscene_elem = tabular.default_element()
+        subscene_elements: list[SubsceneElement] = []
+        tabular = self.scene.subscene_tabular()
+        default_subscene_elem = tabular.default_element()
+        for world_index in range(model.world_count):
+            se = tabular.create(f"world_{world_index}")
+            subscene_elements.append(se)
 
-            for world_index in range(model.world_count):
-                se = tabular.create(f"world_{world_index}")
-                subscene_elements.append(se)
+        # Cross-subscene contact is disabled by default in UIPC;
+        # only enable each world ↔ default (ground).
+        for se in subscene_elements:
+            tabular.insert(default_subscene_elem, se, True)
 
-            # Cross-subscene contact is disabled by default in UIPC;
-            # only enable each world ↔ default (ground).
-            for i in range(model.world_count):
-                tabular.insert(default_subscene_elem, subscene_elements[i], True)
-
-            # Let user override subscene configuration
-            if self._subscene_tabular_fn is not None:
-                self._subscene_tabular_fn(tabular, subscene_elements, default_subscene_elem)
+        # Let user override subscene configuration (called once with all
+        # subscenes available).
+        if self._subscene_tabular_fn is not None:
+            self._subscene_tabular_fn(tabular, subscene_elements, default_subscene_elem)
 
         # Contact tabular — shared ground + per-world env / robot element pairs
         contact_tabular: ContactTabular = self.scene.contact_tabular()
         # Ground element is shared across all worlds
         ground_elem: ContactElement = contact_tabular.default_element()
-        env_elems: list[Any] = []
-        robo_elems: list[Any] = []
-        actor_elems: list[Any] = []
-        body_element_overrides: dict[int, Any] = {}
+        env_elems: list[ContactElement] = []
+        robo_elems: list[ContactElement] = []
+        actor_elems: list[ContactElement] = []
+        body_element_overrides: dict[int, ContactElement] = {}
 
         for world_index in range(model.world_count):
             suffix = f"_{world_index}"
@@ -809,8 +813,10 @@ class SolverUIPC(SolverBase):
         self._rigid_body_builder.build_ground_planes(ground_elem)
 
         # Build set of body indices that belong to articulations (robot links),
-        # a separate set for bodies attached via free joints, and a set of
-        # bodies that must not be instanced (children of ball joints).
+        # a separate set for bodies attached via free joints, and auto-flag
+        # ball-joint children so they don't share AffineBody instances with
+        # shape-key siblings.  User-supplied entries in
+        # ``self._no_instance_bodies`` are merged with the BALL set below.
         articulation_bodies: set[int] = set()
         free_joint_bodies: set[int] = set()
         ball_joint_bodies: set[int] = set()
@@ -849,8 +855,8 @@ class SolverUIPC(SolverBase):
 
         if state is None:
             state: State = model.state()
-            newton.eval_fk(model, model.joint_q, model.joint_qd, state)
-        wp.copy(model.body_q, state.body_q)
+            newton.eval_fk(model, model.joint_q, model.joint_qd, state)  # ty:ignore[invalid-argument-type]  # pyright: ignore[reportArgumentType]
+        wp.copy(model.body_q, state.body_q)  # ty:ignore[invalid-argument-type]  # pyright: ignore[reportArgumentType]
         if state.body_qd is not None and model.body_qd is not None:
             wp.copy(model.body_qd, state.body_qd)
 
@@ -861,13 +867,13 @@ class SolverUIPC(SolverBase):
                 particle_range = (
                     (int(particle_ws[world_index]), int(particle_ws[world_index + 1]))
                     if particle_ws is not None
-                    else None
+                    else (0, model.particle_count)
                 )
             else:
                 body_range = (0, model.body_count)
                 joint_range = (0, model.joint_count)
-                particle_range = (0, model.particle_count)
-            se = subscene_elements[world_index] if subscene_elements else None
+                particle_range: tuple[int, int] = (0, model.particle_count)
+            se = subscene_elements[world_index]
             self._rigid_body_builder.build_body_shape_mapping(body_range)
             self._rigid_body_builder.build_affine_bodies(
                 env_elems[world_index],
@@ -878,7 +884,7 @@ class SolverUIPC(SolverBase):
                 body_range,
                 se,
                 body_element_overrides,
-                no_instance_bodies=ball_joint_bodies,
+                no_instance_bodies=ball_joint_bodies | self._no_instance_bodies,
                 custom_inertia_bodies=self._custom_inertia_bodies,
             )
             self._rigid_body_builder.build_static_colliders(env_elems[world_index], se)
@@ -915,28 +921,14 @@ class SolverUIPC(SolverBase):
 
         self._initialized = True
 
-        # Auto-sync Newton model mass properties with UIPC's ABD values.
-        #
-        # After ``world.init(scene)``, every AffineBody geometry carries a
-        # finalised set of ABD meta attributes (``mass`` / ``mass_center`` /
-        # ``inertia``) that UIPC will use for dynamics.  For the default
-        # density path these are mesh-volume integrals that can diverge from
-        # Newton's authored values (e.g. box tessellation anisotropy); for
-        # bodies flagged through :meth:`override_uipc_inertia_from_model`
-        # they round-trip Newton's own values back exactly.
-        #
-        # Shapeless articulation proxies are excluded: their ABD meta is
-        # populated with sentinel values (``mass=1``, ``inertia=1e-6*I``)
-        # by :meth:`ArticulationBuilder._create_proxy` and must NOT clobber
-        # the authored mass of the real body they stand in for.
-        #
-        # Callers that have tuned downstream consumers (e.g. stable-PD mass
-        # matrix) against the authored values can opt out via
-        # ``auto_sync_inertia=False`` on the constructor.
+        # Sync model mass/inertia from UIPC ABD (after world init) so host-side
+        # dynamics (e.g. eval_mass_matrix) match the UIPC body properties.
+        # Skip shapeless articulation proxies; set auto_sync_inertia=False to
+        # leave model inertias as authored.
         if self._auto_sync_inertia:
             shape_backed_bodies = [b for b in self.mapping.body_geo_slots if self.mapping.body_shapes.get(b)]
             if shape_backed_bodies:
-                self.override_model_inertia_from_uipc(shape_backed_bodies)
+                self.sync_model_inertia_from_uipc(shape_backed_bodies)
 
     # ------------------------------------------------------------------
     # Solver interface
@@ -978,6 +970,10 @@ class SolverUIPC(SolverBase):
 
         # Phase 1: Cache joint control
         self._articulation_builder.cache_joint_control(control)
+
+        # Snapshot pre-advance joint angles/distances so the post-retrieve
+        # finite difference yields a true (q_{t+dt} - q_t) / dt velocity.
+        self._articulation_builder.read_joint_state_pre_advance()
 
         # Dump surface geometry before physics advance
         if self._dump_enable:
@@ -1262,7 +1258,12 @@ class SolverUIPC(SolverBase):
             wp.launch(
                 _spatial_to_vel_mat44_kernel,
                 dim=n,
-                inputs=[model.body_qd, mapping.body_indices_wp, self._abd_velocity_buf.warp()],
+                inputs=[
+                    model.body_qd,
+                    model.body_q,
+                    mapping.body_indices_wp,
+                    self._abd_velocity_buf.warp(),
+                ],
                 device=device,
             )
         else:
@@ -1311,10 +1312,11 @@ class SolverUIPC(SolverBase):
         # Single push into UIPC — triggers one `update_dof_attributes`.
         self._abd_accessor.copy_from(state_geo)
         self.world.retrieve()
-        if self.world.sanity_checker().check():
-            print("Sanity check passed")
-        else:
-            print("Sanity check failed")
+        if not self.world.sanity_checker().check():
+            warnings.warn(
+                "SolverUIPC: sanity_checker().check() returned False after pushing body state into UIPC.",
+                stacklevel=2,
+            )
 
     @override
     def update_contacts(self, contacts: Contacts) -> None:  # ty:ignore[invalid-method-override]  # pyright: ignore[reportIncompatibleMethodOverride]

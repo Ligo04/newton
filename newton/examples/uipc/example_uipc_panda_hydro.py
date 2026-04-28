@@ -118,15 +118,13 @@ class Example:
         builder.add_shape_mesh(body=left_finger_idx, mesh=pad_mesh, xform=pad_xform)
         builder.add_shape_mesh(body=right_finger_idx, mesh=pad_mesh, xform=pad_xform)
 
-        # Set SDF collisions on panda hand and fingers for hydroelastic contact
-        finger_body_indices = {
+        non_finger_shape_indices = [
             find_body("fr3_leftfinger"),
             find_body("fr3_rightfinger"),
             find_body("fr3_hand"),
-        }
-        non_finger_shape_indices = []
+        ]
         for shape_idx, body_idx in enumerate(builder.shape_body):
-            if body_idx not in finger_body_indices:
+            if body_idx not in non_finger_shape_indices and builder.shape_type[shape_idx] != newton.GeoType.CONVEX_MESH:
                 non_finger_shape_indices.append(shape_idx)
 
         # Convert non-finger shapes to convex hulls
@@ -172,7 +170,7 @@ class Example:
         # contact_tabular entry is disabled — so both the table (bottom vs
         # ground) and the manipulated object (bottom vs table top) are
         # lifted by ``uipc_gap`` to guarantee a strictly positive gap.
-        uipc_gap = 0.0012
+        uipc_gap = 0.001
         box_size = 0.05
         table_pos = wp.vec3(0.08, -0.5, box_size + uipc_gap)
         table_body = builder.add_body(
@@ -216,6 +214,7 @@ class Example:
                 is_kinematic=True,
             )
             builder.add_shape_mesh(body=cup_body, mesh=cup_mesh)
+            builder.approximate_meshes(method="convex_hull", shape_indices=[cup_body], keep_visual_shapes=True)
 
         # ------------------------------------------------------------------
         # Object to manipulate
@@ -246,7 +245,7 @@ class Example:
             # cube bottom flush with the table top, so we need ``2 *
             # uipc_gap`` (one for the table lift, one for the cube/table
             # minimum-separation margin) to satisfy UIPC's sanity check.
-            self.object_pos = [0.0, -0.5, 2 * box_size + 0.5 * size + 2 * uipc_gap]
+            self.object_pos = [0, -0.5, 2 * box_size + 0.5 * size + 2 * uipc_gap]
             object_xform = wp.transform(wp.vec3(self.object_pos), wp.quat_identity())
             self.object_body_local = builder.add_body(xform=object_xform, label="object")
             builder.add_shape_box(
@@ -255,7 +254,7 @@ class Example:
                 hy=size / 2,
                 hz=size / 2,
             )
-            self.grasping_offset = [0.03, 0.0, 0.14]
+            self.grasping_offset = [0.00, 0.0, 0.10]
             self.place_offset = 0.0
 
         # ------------------------------------------------------------------

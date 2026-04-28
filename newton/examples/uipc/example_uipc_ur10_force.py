@@ -333,7 +333,7 @@ class Example:
                 logger_level=uipc.Logger.Warn,
                 dump_enable=True,
             )
-            solver.set_contact(True, 0.001)
+            solver.set_contact(False, 0.001)
             solver.sync_uipc_inertia_with_model()
             solver.initialize()
             return solver, True

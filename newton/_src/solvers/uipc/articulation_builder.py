@@ -401,13 +401,10 @@ class ArticulationBuilder:
         joint_qd_start_np = model.joint_qd_start.numpy()
         joint_q_start_np = model.joint_q_start.numpy()
         # Revolute-only: UIPC's ``angle`` edge attribute measures rotation
-        # *relative to the build-time body configuration*, so we shift it
-        # into Newton's absolute joint-q space via ``init_angle``. UIPC
-        # computes internally:
-        #     current_angle = raw_angle - init_angle
-        #     effective_target = aim_angle + init_angle
-        # Writing ``-joint_q[q_start]`` makes both read and drive operate
-        # in Newton's absolute convention.
+        # *relative to the build-time body configuration*, so we seed
+        # ``init_angle`` with the build-time Newton angle ``joint_q`` so
+        # that both the readback (``angle``) and the drive target
+        # (``aim_angle``) operate in Newton's absolute joint-q space.
         # NOTE: the prismatic counterpart (``distance``) is already in
         # Newton absolute units — do NOT write ``init_distance``.
         joint_q_np = model.joint_q.numpy() if model.joint_q is not None else None
@@ -1069,14 +1066,25 @@ class ArticulationBuilder:
         # animator on the host side.
         wp.synchronize_device(self._device)
 
+    def read_joint_state_pre_advance(self) -> None:
+        """Snapshot pre-advance edge attributes on each articulation.
+
+        Call **once per step, before** ``world.advance()`` so each
+        :class:`Articulation` records the start-of-step ``angle`` /
+        ``distance`` for finite-difference velocity recovery in
+        :meth:`read_joint_state_post_retrieve`.
+        """
+        for art in self.articulations.values():
+            if art.num_active_joints > 0:
+                art.read_pre_advance()
+
     def read_joint_state_post_retrieve(self) -> None:
         """Re-read UIPC edge attributes after ``world.retrieve()``.
 
-        The animator callback fires during ``world.advance()`` and reads
-        edge attribute values from the **previous** retrieve. This method
-        updates ``joint_position`` / ``joint_velocity`` on each
-        articulation with the **current** frame values so that the
-        subsequent :meth:`write_joint_readback` writes up-to-date data.
+        Pairs with :meth:`read_joint_state_pre_advance`: each articulation
+        finite-differences the pre-advance and post-retrieve angle /
+        distance to update ``joint_position`` and ``joint_velocity``,
+        which the subsequent :meth:`write_joint_readback` consumes.
         """
         for art in self.articulations.values():
             if art.num_active_joints > 0:

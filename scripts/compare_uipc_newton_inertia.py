@@ -185,7 +185,7 @@ def main() -> None:
     print("\n" + "=" * 100)
     print("[3/4] Re-calling override_model_inertia_from_uipc() — should be idempotent after initialize's auto-sync")
     print("=" * 100)
-    written = solver.override_model_inertia_from_uipc()
+    written = solver.sync_model_inertia_from_uipc()
     print(f"\n  Overwrote {len(written)} bodies: {written}")
     max_err = 0.0
     for b in written:
@@ -221,7 +221,7 @@ def main() -> None:
     # b_custom is the 4th body added (after ground plane, which does not
     # contribute a body).  See _build_model for the ordering.
     b_custom = 3
-    flagged = solver2.override_uipc_inertia_from_model([b_custom])
+    flagged = solver2.sync_uipc_inertia_with_model([b_custom])
     print(f"\n  Flagged bodies for UIPC override: {flagged}")
 
     # Capture Newton's authored values before initialize() — this is the

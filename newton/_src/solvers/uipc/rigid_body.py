@@ -13,6 +13,7 @@ import uipc.builtin as uipc_builtin
 import warp as wp
 from uipc import view
 from uipc.constitution import AffineBodyConstitution, Empty
+from uipc.core import ContactElement, SubsceneElement
 from uipc.geometry import affine_body as uipc_affine_body
 from uipc.geometry import halfplane, label_surface
 
@@ -272,14 +273,14 @@ class RigidBodyBuilder:
 
     def build_affine_bodies(
         self,
-        env_elem: Any,
-        robo_elem: Any,
-        actor_elem: Any,
+        env_elem: ContactElement,
+        robo_elem: ContactElement,
+        actor_elem: ContactElement,
         articulation_bodies: set[int],
         free_joint_bodies: set[int],
         body_range: tuple[int, int],
-        subscene_elem: Any,
-        body_element_overrides: dict[int, Any] | None = None,
+        subscene_elem: SubsceneElement,
+        body_element_overrides: dict[int, ContactElement] | None = None,
         no_instance_bodies: set[int] | None = None,
         custom_inertia_bodies: set[int] | None = None,
     ) -> None:
@@ -314,8 +315,8 @@ class RigidBodyBuilder:
             body_element_overrides: Mapping from body index to a custom contact
                 element.  Overrides the default assignment for the specified
                 bodies.
-            no_instance_bodies: Set of body indices that must NOT be grouped
-                into instanced geometries (e.g. children of ball joints).
+            no_instance_bodies: Body indices that must not share instanced AffineBody
+                geometries.  ``None`` is treated as an empty set.
             custom_inertia_bodies: Set of body indices whose ABD mass matrix
                 must be taken from Newton's authored
                 ``body_mass`` / ``body_com`` / ``body_inertia`` rather than
@@ -338,7 +339,7 @@ class RigidBodyBuilder:
         body_mass_np = model.body_mass.numpy() if model.body_mass is not None else None
         body_com_np = model.body_com.numpy() if model.body_com is not None else None
         body_inertia_np = model.body_inertia.numpy() if model.body_inertia is not None else None
-        no_inst = set(no_instance_bodies) if no_instance_bodies else set()
+        no_inst = set(no_instance_bodies) if no_instance_bodies is not None else set()
         custom_inertia = set(custom_inertia_bodies) if custom_inertia_bodies else set()
         # Custom-inertia bodies must each live in their own SimplicialComplex
         # so ABD meta (per-geometry, not per-instance) reflects the unique

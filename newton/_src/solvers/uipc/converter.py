@@ -77,42 +77,88 @@ def _transform_to_mat44_kernel(
 @wp.kernel(enable_backward=False)
 def _spatial_to_vel_mat44_kernel(
     body_qd: wp.array[wp.spatial_vector],
+    body_q: wp.array[wp.transform],
     body_indices: wp.array[wp.int32],
     out_velocities: wp.array[wp.mat44d],
 ):
-    """Convert Newton wp.spatial_vector (linear, angular) to 4x4 velocity matrices in batch.
+    """Convert Newton ``(v_com_world, omega_world)`` body twists to UIPC's
+    affine velocity matrix layout.
 
-    Newton spatial_vector layout: (vx, vy, vz, wx, wy, wz).
-    UIPC velocity matrix: upper-left 3x3 = skew(angular), last column = linear.
+    Newton spatial_vector layout: ``(vx, vy, vz, wx, wy, wz)`` with the linear
+    part referenced at the body COM. UIPC's affine velocity matrix encodes
+    ``Ȧ`` (rate of the affine matrix) in the upper 3x3 and ``ṫ`` (rate of
+    translation) in column 3, in Eigen column-major layout. Because ABD's
+    mass-matrix already references velocity at the COM, ``ṫ = v_com``
+    directly — no kinematic shift is needed for the linear part.
+
+    The angular part requires ``Ȧ = [ωx] · R`` (rather than just ``[ωx]``)
+    because UIPC stores the affine derivative, which equals ``[ωx]`` only
+    when the body rotation is identity.
     """
     tid = wp.tid()
     body_idx = body_indices[tid]
     qd = body_qd[body_idx]
+    r = wp.transform_get_rotation(body_q[body_idx])
 
-    vx = wp.float64(qd[0])
-    vy = wp.float64(qd[1])
-    vz = wp.float64(qd[2])
-    wx = wp.float64(qd[3])
-    wy = wp.float64(qd[4])
-    wz = wp.float64(qd[5])
+    v_com = wp.vec3(qd[0], qd[1], qd[2])
+    wx = qd[3]
+    wy = qd[4]
+    wz = qd[5]
+
+    # Rotation matrix R (Warp row-major, R[i,j]) from quaternion (x, y, z, w).
+    one = float(1.0)
+    two = float(2.0)
+    rx = r[0]
+    ry = r[1]
+    rz = r[2]
+    rw = r[3]
+    r00 = one - two * (ry * ry + rz * rz)
+    r01 = two * (rx * ry - rz * rw)
+    r02 = two * (rx * rz + ry * rw)
+    r10 = two * (rx * ry + rz * rw)
+    r11 = one - two * (rx * rx + rz * rz)
+    r12 = two * (ry * rz - rx * rw)
+    r20 = two * (rx * rz - ry * rw)
+    r21 = two * (ry * rz + rx * rw)
+    r22 = one - two * (rx * rx + ry * ry)
+
+    # Ȧ = [ωx] · R in (i, j) row-major. Skew matrix:
+    #   [ωx] = [[ 0, -wz,  wy],
+    #           [ wz,   0, -wx],
+    #           [-wy,  wx,   0]]
+    a00 = -wz * r10 + wy * r20
+    a01 = -wz * r11 + wy * r21
+    a02 = -wz * r12 + wy * r22
+    a10 = wz * r00 - wx * r20
+    a11 = wz * r01 - wx * r21
+    a12 = wz * r02 - wx * r22
+    a20 = -wy * r00 + wx * r10
+    a21 = -wy * r01 + wx * r11
+    a22 = -wy * r02 + wx * r12
+
+    # Pack into Eigen column-major mat44d. Warp ``mat44d(...)`` is row-major,
+    # so each Warp row equals one Eigen column — ``warp[r,c] = eigen[c,r]``.
     zero = wp.float64(0.0)
-
     m = wp.mat44d(
+        # Warp row 0 = Eigen column 0
+        wp.float64(a00),
+        wp.float64(a10),
+        wp.float64(a20),
         zero,
-        -wz,
-        wy,
-        vx,
-        wz,
+        # Warp row 1 = Eigen column 1
+        wp.float64(a01),
+        wp.float64(a11),
+        wp.float64(a21),
         zero,
-        -wx,
-        vy,
-        -wy,
-        wx,
+        # Warp row 2 = Eigen column 2
+        wp.float64(a02),
+        wp.float64(a12),
+        wp.float64(a22),
         zero,
-        vz,
-        zero,
-        zero,
-        zero,
+        # Warp row 3 = Eigen column 3 (ṫ = v_com)
+        wp.float64(v_com[0]),
+        wp.float64(v_com[1]),
+        wp.float64(v_com[2]),
         zero,
     )
     out_velocities[tid] = m
@@ -148,6 +194,12 @@ def _read_from_backend_kernel(
     but wrapped as Warp ``mat44d`` which uses row-major indexing.  Therefore
     every element access swaps row and column: ``m[i, j]`` in Warp reads the
     Eigen element at ``(j, i)``.
+
+    UIPC's ABD parameterization references body velocity at the COM (the
+    mass matrix internalizes the COM offset via the first moment), so the
+    translation column already encodes ``v_com_world`` — no kinematic shift
+    is required for the linear part. The angular part needs ``[ωx] = Ȧ · R^T``
+    because UIPC stores ``Ȧ`` (not ``[ωx]``) in the upper 3x3.
     """
     tid = wp.tid()
     backend_idx = backend_offsets[tid]
@@ -216,16 +268,51 @@ def _read_from_backend_kernel(
         wp.quat(wp.float32(qx), wp.float32(qy), wp.float32(qz), wp.float32(qw)),
     )
 
-    # Extract velocity (column-major): linear from Eigen column 3, angular from skew-symmetric
+    # The affine velocity matrix stores ``Ȧ`` (rate of the affine matrix)
+    # in the upper 3x3 and ``ṫ`` (rate of translation) in column 3, in
+    # Eigen column-major layout — Warp ``v[i,j]`` reads Eigen ``v[j,i]``.
+    #
+    # UIPC's affine body parameterization already references velocity at
+    # the COM (the mass matrix couples ṫ and Ȧ to COM via the first
+    # moment ``m·x̄``), so ``ṫ`` is already ``v_com_world`` — no
+    # ``ω x com`` shift is needed.
+    #
+    # The angular velocity follows from the rigid constraint ``Ȧ = [ωx] R``:
+    #     [ωx] = Ȧ · R^T
+    # Reading the skew components of ``Ȧ`` directly is only correct when
+    # ``R = I``; we project through ``R^T`` to get true spatial ``ω``.
     v = src_velocities[backend_idx]
-    vx = wp.float32(v[3, 0])
-    vy = wp.float32(v[3, 1])
-    vz = wp.float32(v[3, 2])
-    wx = wp.float32(v[1, 2])
-    wy = wp.float32(v[2, 0])
-    wz = wp.float32(v[0, 1])
 
-    out_body_qd[body_idx] = wp.spatial_vector(vx, vy, vz, wx, wy, wz)
+    # ṫ = v_com (Eigen column 3 → Warp row 3).
+    v_com = wp.vec3(wp.float32(v[3, 0]), wp.float32(v[3, 1]), wp.float32(v[3, 2]))
+
+    # [ωx] = Ȧ · A^T. With Eigen ``A[i,j]`` = Warp ``m[j,i]`` (rotation
+    # only, so A = R), ``(Ȧ · A^T)_eigen[i,k]`` = Σ_j v[j,i] · m[j,k].
+    # We only need three components: ω_x = [ωx][2,1], ω_y = [ωx][0,2],
+    # ω_z = [ωx][1,0].
+    m01 = wp.float32(m[0, 1])
+    m02 = wp.float32(m[0, 2])
+    m00 = wp.float32(m[0, 0])
+    m11 = wp.float32(m[1, 1])
+    m12 = wp.float32(m[1, 2])
+    m10 = wp.float32(m[1, 0])
+    m21 = wp.float32(m[2, 1])
+    m22 = wp.float32(m[2, 2])
+    m20 = wp.float32(m[2, 0])
+    v02 = wp.float32(v[0, 2])
+    v12 = wp.float32(v[1, 2])
+    v22 = wp.float32(v[2, 2])
+    v00 = wp.float32(v[0, 0])
+    v10 = wp.float32(v[1, 0])
+    v20 = wp.float32(v[2, 0])
+    v01 = wp.float32(v[0, 1])
+    v11 = wp.float32(v[1, 1])
+    v21 = wp.float32(v[2, 1])
+    omega_x = v02 * m01 + v12 * m11 + v22 * m21
+    omega_y = v00 * m02 + v10 * m12 + v20 * m22
+    omega_z = v01 * m00 + v11 * m10 + v21 * m20
+
+    out_body_qd[body_idx] = wp.spatial_vector(v_com, wp.vec3(omega_x, omega_y, omega_z))
 
 
 # ---------------------------------------------------------------------------
@@ -512,13 +599,7 @@ def build_body_mesh(model: Model, body_idx: int) -> tuple[SimplicialComplex, flo
             continue
 
         # :meth:`newton.ModelBuilder.approximate_meshes`.
-        if geo_type in (
-            GeoType.BOX,
-            GeoType.SPHERE,
-            GeoType.CAPSULE,
-            GeoType.CYLINDER,
-            GeoType.CONE,
-        ):
+        if geo_type in (GeoType.BOX, GeoType.SPHERE, GeoType.CAPSULE, GeoType.CYLINDER, GeoType.CONE, GeoType.MESH):
             verts, faces = _weld_vertices(verts, faces)
 
         effective_scale = np.ones(3) if scale_baked else scale.astype(np.float64)
