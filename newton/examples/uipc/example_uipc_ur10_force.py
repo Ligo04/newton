@@ -127,7 +127,7 @@ class Example:
         self.fps = 60
         self.frame_dt = 1.0 / self.fps
         self.sim_time = 0.0
-        self.sim_substeps = 4
+        self.sim_substeps = 1
         self.sim_dt = self.frame_dt / self.sim_substeps
 
         self.world_count = args.world_count
@@ -333,7 +333,7 @@ class Example:
                 logger_level=uipc.Logger.Warn,
                 dump_enable=True,
             )
-            solver.set_contact(False, 0.001)
+            solver.set_contact(True, 0.001)
             solver.sync_uipc_inertia_with_model()
             solver.initialize()
             return solver, True
@@ -565,7 +565,7 @@ class Example:
                 "already contains gravity). Requires --world-count 1."
             ),
         )
-        parser.set_defaults(world_count=1)
+        parser.set_defaults(world_count=4)
         return parser
 
 

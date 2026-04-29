@@ -77,3 +77,4 @@ docs/_static/viser/
 output/
 .aura/
 .claude/scheduled_tasks.lock
+.omx/
