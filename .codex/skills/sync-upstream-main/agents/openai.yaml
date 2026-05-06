@@ -1,0 +1,4 @@
+interface:
+  display_name: "Sync upstream main"
+  short_description: "Fetch upstream/main and merge it into backend/uipc safely"
+  default_prompt: "Use this skill to synchronize upstream/main into backend/uipc. Fetch upstream/main, attempt a no-edit merge, and if conflicts occur stop immediately, report the conflicted files, and hand the decision to the user without resolving conflicts automatically."
