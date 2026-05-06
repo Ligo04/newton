@@ -1,15 +1,23 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Cloth (NeoHookeanShell) builder for the UIPC solver backend."""
+"""Cloth builder for the UIPC solver backend."""
 
 from __future__ import annotations
 
 from typing import Any
 
 import numpy as np
-from uipc.constitution import DiscreteShellBending, ElasticModuli2D, NeoHookeanShell
-from uipc.geometry import label_surface
+from uipc import view
+from uipc.constitution import (
+    DiscreteShellBending,
+    ElasticModuli2D,
+    NeoHookeanShell,
+    SoftPositionConstraint,
+    StrainLimitingBaraffWitkinShell,
+)
+from uipc.core import ContactElement, SubsceneElement
+from uipc.geometry import is_trimesh_closed, label_surface
 from uipc.geometry import trimesh as uipc_trimesh
 
 from ...sim import Model
@@ -17,11 +25,10 @@ from .converter import UIpcMappingInfo
 
 
 class ClothBuilder:
-    """Build UIPC cloth (NeoHookeanShell) from Newton particles and triangles.
+    """Build UIPC cloth from Newton particles and triangles.
 
     Converts Newton :class:`~newton.Model` cloth data (particles + triangles +
-    edges) into UIPC ``NeoHookeanShell`` and ``DiscreteShellBending``
-    constitutions.
+    edges) into UIPC shell and bending constitutions.
 
     Newton stores cloth as particles with triangle connectivity and material
     parameters (``tri_ke``, ``tri_ka``, ``tri_kd``, ``tri_drag``, ``tri_lift``).
@@ -33,7 +40,15 @@ class ClothBuilder:
         - Poisson's ratio defaults to 0.3
         - Bending stiffness from ``edge_bending_properties`` or default
         - ``particle_mass`` -> mass density [kg/m^2]
+
+    By default the membrane model is UIPC's
+    ``StrainLimitingBaraffWitkinShell``.  Pass ``"neo_hookean"`` through
+    :class:`~newton.solvers.SolverUIPC` to use ``NeoHookeanShell`` instead.
     """
+
+    CLOTH_MODEL_STRAIN_LIMITING_BARAFF_WITKIN = "strain_limiting_baraff_witkin"
+    CLOTH_MODEL_NEO_HOOKEAN = "neo_hookean"
+    CLOTH_THICKNESS_ATTRIBUTE = "cloth_thick"
 
     def __init__(
         self,
@@ -43,6 +58,9 @@ class ClothBuilder:
         default_thickness: float = 0.001,
         default_poisson_ratio: float = 0.3,
         default_bending_stiffness: float = 0.01,
+        cloth_model: str = CLOTH_MODEL_STRAIN_LIMITING_BARAFF_WITKIN,
+        enable_soft_position_constraint: bool = True,
+        soft_position_strength_ratio: float = 100.0,
     ):
         self._model = model
         self._scene = scene
@@ -50,6 +68,9 @@ class ClothBuilder:
         self._default_thickness = default_thickness
         self._default_poisson_ratio = default_poisson_ratio
         self._default_bending_stiffness = default_bending_stiffness
+        self._cloth_model = self._normalize_cloth_model(cloth_model)
+        self._enable_soft_position_constraint = enable_soft_position_constraint
+        self._soft_position_strength_ratio = soft_position_strength_ratio
 
     @property
     def has_cloth(self) -> bool:
@@ -58,15 +79,16 @@ class ClothBuilder:
 
     def build(
         self,
-        contact_elem: Any,
+        contact_elem: ContactElement,
         particle_range: tuple[int, int] | None = None,
-        subscene_elem: Any | None = None,
+        subscene_elem: SubsceneElement | None = None,
     ) -> None:
         """Convert Newton cloth particles and triangles to UIPC cloth objects.
 
         Groups all triangles that are NOT part of tetrahedra into cloth meshes.
         Extracts the referenced particles, remaps indices, creates a UIPC
-        ``trimesh``, and applies ``NeoHookeanShell`` + ``DiscreteShellBending``.
+        ``trimesh``, and applies the configured membrane model plus
+        ``DiscreteShellBending``.
 
         Args:
             contact_elem: Contact element to apply to cloth geometries.
@@ -121,6 +143,12 @@ class ClothBuilder:
 
         # Create UIPC trimesh
         sc = uipc_trimesh(cloth_verts, cloth_faces)
+        if is_trimesh_closed(sc):
+            raise RuntimeError(
+                "UIPC cloth expects an open triangle mesh, but the Newton cloth mesh is closed "
+                "(watertight). Use a deformable/rigid representation for closed meshes, or open "
+                "the surface before passing it to ModelBuilder.add_cloth_mesh()."
+            )
 
         # Apply contact and subscene
         contact_elem.apply_to(sc)
@@ -131,27 +159,40 @@ class ClothBuilder:
         # Determine material parameters from Newton model
         youngs_modulus = self._get_youngs_modulus(model)
         poisson_ratio = self._default_poisson_ratio
-        thickness = self._default_thickness
+        thickness_values = self._get_thickness_values(model, cloth_particle_indices)
+        thickness = float(np.mean(thickness_values)) if thickness_values is not None else self._default_thickness
         bending_stiffness = self._get_bending_stiffness(model)
 
         # Compute mass density from particle masses and mesh area
         mass_density = self._estimate_mass_density(model, cloth_particle_indices, thickness)
 
-        # Apply NeoHookeanShell constitution
-        nhs = NeoHookeanShell()
         moduli = ElasticModuli2D.youngs_poisson(youngs_modulus, poisson_ratio)
-        nhs.apply_to(sc, moduli, mass_density=mass_density, thickness=thickness)
+        if self._cloth_model == self.CLOTH_MODEL_NEO_HOOKEAN:
+            membrane = NeoHookeanShell()
+        else:
+            membrane = StrainLimitingBaraffWitkinShell()
+        membrane.apply_to(sc, moduli, mass_density=mass_density, thickness=thickness)
+        if thickness_values is not None:
+            self._write_vertex_thickness(sc, thickness_values, thickness)
 
         # Apply DiscreteShellBending constitution
         dsb = DiscreteShellBending()
         dsb.apply_to(sc, bending_stiffness)
 
+        # Add dormant soft-position attributes.  Vertices remain unconstrained
+        # until SolverUIPC.set_cloth_soft_position_constraints() toggles
+        # ``is_constrained`` and writes ``aim_position``.
+        if self._enable_soft_position_constraint:
+            spc = SoftPositionConstraint()
+            spc.apply_to(sc, self._soft_position_strength_ratio)
+
         # Create scene object
         obj = self._scene.objects().create("cloth_0")
-        geo_slot, _ = obj.geometries().create(sc)
+        geo_slot, rest_geo_slot = obj.geometries().create(sc)
 
         # Store mapping for state sync
         self._mapping.cloth_geo_slots.append(geo_slot)
+        self._mapping.cloth_rest_geo_slots.append(rest_geo_slot)
         self._mapping.cloth_particle_indices.append(cloth_particle_indices)
 
     def _get_youngs_modulus(self, model: Model) -> float:
@@ -192,3 +233,77 @@ class ClothBuilder:
                     # Volume density = surface_density / thickness
                     return total_mass / total_area / thickness
         return 100.0  # Default: 100 kg/m^3
+
+    def _get_thickness_values(self, model: Model, particle_indices: np.ndarray) -> np.ndarray | None:
+        """Return per-cloth-particle UIPC shell thickness values [m], if provided.
+
+        Newton examples pass cloth thickness through the ``cloth_thick``
+        particle custom attribute:
+
+        .. code-block:: python
+
+            builder.add_custom_attribute(
+                newton.ModelBuilder.CustomAttribute(
+                    name="cloth_thick",
+                    dtype=wp.float32,
+                    frequency=newton.Model.AttributeFrequency.PARTICLE,
+                )
+            )
+            builder.add_cloth_mesh(
+                ...,
+                custom_attributes_particles={"cloth_thick": [1.0e-4] * len(vertices)},
+            )
+
+        If the attribute is absent, the builder falls back to
+        ``default_thickness``.
+        """
+        thickness_attr = getattr(model, self.CLOTH_THICKNESS_ATTRIBUTE, None)
+        if thickness_attr is None:
+            return None
+
+        frequency = model.attribute_frequency.get(self.CLOTH_THICKNESS_ATTRIBUTE)
+        if frequency != Model.AttributeFrequency.PARTICLE:
+            raise ValueError(
+                f"Custom attribute {self.CLOTH_THICKNESS_ATTRIBUTE!r} must have PARTICLE frequency, got {frequency}."
+            )
+
+        thickness_np = np.asarray(thickness_attr.numpy(), dtype=np.float64).reshape(-1)
+        values = thickness_np[particle_indices]
+        if np.any(values < 0.0):
+            raise ValueError(
+                f"Custom attribute {self.CLOTH_THICKNESS_ATTRIBUTE!r} must be non-negative for all UIPC cloth particles."
+            )
+        values = np.where(values > 0.0, values, self._default_thickness)
+        return values
+
+    @staticmethod
+    def _write_vertex_thickness(sc: Any, thickness_values: np.ndarray, applied_thickness: float) -> None:
+        """Write per-vertex thickness and keep shell volume consistent."""
+        thickness_attr = sc.vertices().find("thickness")
+        if thickness_attr is not None:
+            view(thickness_attr)[:] = np.asarray(thickness_values, dtype=np.float64)
+
+        volume_attr = sc.vertices().find("volume")
+        if volume_attr is not None:
+            volume = view(volume_attr)
+            volume[:] = np.asarray(volume, dtype=np.float64) * (thickness_values / applied_thickness)
+
+    @classmethod
+    def _normalize_cloth_model(cls, cloth_model: str) -> str:
+        """Return the canonical UIPC cloth membrane model key."""
+        key = cloth_model.lower().replace("-", "_")
+        aliases = {
+            "strain_limiting": cls.CLOTH_MODEL_STRAIN_LIMITING_BARAFF_WITKIN,
+            "strain_limiting_shell": cls.CLOTH_MODEL_STRAIN_LIMITING_BARAFF_WITKIN,
+            "strain_limiting_baraff_witkin": cls.CLOTH_MODEL_STRAIN_LIMITING_BARAFF_WITKIN,
+            "strain_limiting_baraff_witkin_shell": cls.CLOTH_MODEL_STRAIN_LIMITING_BARAFF_WITKIN,
+            "baraff_witkin": cls.CLOTH_MODEL_STRAIN_LIMITING_BARAFF_WITKIN,
+            "baraff_witkin_shell": cls.CLOTH_MODEL_STRAIN_LIMITING_BARAFF_WITKIN,
+            "neo_hookean": cls.CLOTH_MODEL_NEO_HOOKEAN,
+            "neo_hookean_shell": cls.CLOTH_MODEL_NEO_HOOKEAN,
+        }
+        try:
+            return aliases[key]
+        except KeyError as exc:
+            valid = ", ".join(sorted(set(aliases)))
+            raise ValueError(f"Unknown UIPC cloth model {cloth_model!r}. Expected one of: {valid}") from exc

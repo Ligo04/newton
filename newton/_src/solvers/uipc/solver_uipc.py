@@ -18,7 +18,14 @@ import uipc.adapter.warp
 import warp as wp
 from uipc import Logger as ULogger
 from uipc import view
-from uipc.core import AffineBodyStateAccessorFeature, ContactElement, ContactTabular, SceneIO, SubsceneElement
+from uipc.core import (
+    AffineBodyStateAccessorFeature,
+    ContactElement,
+    ContactTabular,
+    FiniteElementStateAccessorFeature,
+    SceneIO,
+    SubsceneElement,
+)
 from uipc.core import Scene as UScene
 from uipc.stats import SimulationStats as USimulationStats
 from uipc.unit import GPa, MPa
@@ -34,6 +41,8 @@ from .articulation_builder import ArticulationBuilder
 from .cloth import ClothBuilder
 from .converter import (
     UIpcMappingInfo,
+    _read_fem_particle_positions_from_backend_kernel,
+    _read_fem_particles_from_backend_kernel,
     _read_from_backend_kernel,
     _spatial_to_vel_mat44_kernel,
     _transform_to_mat44_kernel,
@@ -152,6 +161,9 @@ class SolverUIPC(SolverBase):
         dump_enable: bool = False,
         require_profile: bool = False,
         auto_sync_inertia: bool = True,
+        cloth_model: str = "strain_limiting_baraff_witkin",
+        cloth_thickness: float = 0.001,
+        cloth_soft_position_strength_ratio: float = 100.0,
     ):
         """Create a UIPC solver instance from a Newton model.
 
@@ -190,6 +202,16 @@ class SolverUIPC(SolverBase):
                 and must not see UIPC's mesh-volume-derived drift.  Bodies
                 flagged via :meth:`sync_uipc_inertia_with_model` are
                 always pushed into UIPC regardless of this flag.
+            cloth_model: UIPC membrane model used for Newton cloth triangles.
+                Defaults to ``"strain_limiting_baraff_witkin"``.  Pass
+                ``"neo_hookean"`` to use ``NeoHookeanShell`` instead.  In
+                both cases ``DiscreteShellBending`` is added for bending.
+            cloth_thickness: UIPC shell thickness [m] applied to Newton cloth
+                triangles.
+            cloth_soft_position_strength_ratio: Default UIPC
+                ``SoftPositionConstraint`` strength ratio added to cloth
+                vertices.  Vertices are unconstrained until
+                :meth:`set_cloth_soft_position_constraints` enables them.
         """
         super().__init__(model=model)
         self.import_uipc()
@@ -206,6 +228,9 @@ class SolverUIPC(SolverBase):
         self._kappa = kappa
         self._default_mass_density = default_mass_density
         self._dump_enable = dump_enable
+        self._cloth_model = cloth_model
+        self._cloth_thickness = cloth_thickness
+        self._cloth_soft_position_strength_ratio = cloth_soft_position_strength_ratio
 
         # Scene config: start from UIPC defaults, apply Newton model overrides.
         if scene_config is None:
@@ -805,7 +830,14 @@ class SolverUIPC(SolverBase):
         # Create one builder per type (reused across worlds)
         self._rigid_body_builder = RigidBodyBuilder(model, scene, self.mapping, self._kappa, self._default_mass_density)
         self._articulation_builder = ArticulationBuilder(model, scene, self.mapping, self._dt, kappa=self._kappa)
-        self._cloth_builder = ClothBuilder(model, scene, self.mapping)
+        self._cloth_builder = ClothBuilder(
+            model,
+            scene,
+            self.mapping,
+            default_thickness=self._cloth_thickness,
+            cloth_model=self._cloth_model,
+            soft_position_strength_ratio=self._cloth_soft_position_strength_ratio,
+        )
         self._deformable_builder = DeformableBodyBuilder(
             model, scene, self.mapping, default_mass_density=self._default_mass_density
         )
@@ -856,7 +888,8 @@ class SolverUIPC(SolverBase):
         if state is None:
             state: State = model.state()
             newton.eval_fk(model, model.joint_q, model.joint_qd, state)  # ty:ignore[invalid-argument-type]  # pyright: ignore[reportArgumentType]
-        wp.copy(model.body_q, state.body_q)  # ty:ignore[invalid-argument-type]  # pyright: ignore[reportArgumentType]
+        if model.body_q is not None and state.body_q is not None:
+            wp.copy(model.body_q, state.body_q)
         if state.body_qd is not None and model.body_qd is not None:
             wp.copy(model.body_qd, state.body_qd)
 
@@ -890,7 +923,7 @@ class SolverUIPC(SolverBase):
             self._rigid_body_builder.build_static_colliders(env_elems[world_index], se)
             self._articulation_builder.build_joints(robo_elems[world_index], joint_range, se)
             if self._cloth_builder.has_cloth:
-                self._cloth_builder.build(env_elems[world_index], particle_range, se)
+                self._cloth_builder.build(actor_elems[world_index], particle_range, se)
             if self._deformable_builder.has_deformable:
                 self._deformable_builder.build(env_elems[world_index], particle_range, se)
 
@@ -918,6 +951,57 @@ class SolverUIPC(SolverBase):
         else:
             self._abd_transform_buf = None
             self._abd_velocity_buf = None
+
+        self._fem_accessor: FiniteElementStateAccessorFeature = self.world.features().find(
+            FiniteElementStateAccessorFeature
+        )
+        self._fem_position_buf = None
+        self._fem_velocity_buf = None
+        self._fem_backend_offsets_wp = None
+        self._fem_particle_indices_wp = None
+        self._fem_mapped_vertex_count = 0
+        self._fem_backend_vertex_count = 0
+        if self._fem_accessor is not None:
+            fem_backend_offsets: list[int] = []
+            fem_particle_indices: list[int] = []
+            for geo_slot, particle_indices in [
+                *zip(self.mapping.cloth_geo_slots, self.mapping.cloth_particle_indices, strict=False),
+                *zip(self.mapping.deformable_geo_slots, self.mapping.deformable_particle_indices, strict=False),
+            ]:
+                geo = geo_slot.geometry()
+                offset_attr = geo.meta().find("backend_fem_vertex_offset") or geo.meta().find("global_vertex_offset")
+                if offset_attr is None:
+                    continue
+                backend_offset = int(view(offset_attr)[0])
+                if backend_offset < 0:
+                    continue
+                particle_indices_np = np.asarray(particle_indices, dtype=np.int32)
+                fem_backend_offsets.extend(backend_offset + i for i in range(particle_indices_np.size))
+                fem_particle_indices.extend(int(i) for i in particle_indices_np)
+
+            if fem_backend_offsets:
+                self._fem_backend_vertex_count = int(self._fem_accessor.vertex_count())
+                self._fem_mapped_vertex_count = len(fem_backend_offsets)
+                self._fem_backend_offsets_wp = wp.array(
+                    fem_backend_offsets,
+                    dtype=wp.uint32,
+                    device=model.device,
+                )
+                self._fem_particle_indices_wp = wp.array(
+                    fem_particle_indices,
+                    dtype=wp.int32,
+                    device=model.device,
+                )
+                self._fem_position_buf = uipc.adapter.warp.buffer(
+                    self._fem_backend_vertex_count,
+                    dtype=wp.vec3d,
+                    device=model.device,
+                )
+                self._fem_velocity_buf = uipc.adapter.warp.buffer(
+                    self._fem_backend_vertex_count,
+                    dtype=wp.vec3d,
+                    device=model.device,
+                )
 
         self._initialized = True
 
@@ -987,11 +1071,14 @@ class SolverUIPC(SolverBase):
 
         # Phase 3: Read back results
         self._sync_body_state_from_uipc(state_out)
+        self._sync_particle_state_from_uipc(state_out)
         self._articulation_builder.read_joint_state_post_retrieve()
         self._articulation_builder.write_joint_readback(state_out)
 
         if state_out.body_f is not None:
             state_out.body_f.zero_()
+        if state_out.particle_f is not None:
+            state_out.particle_f.zero_()
 
         self._step_count += 1
         self._articulation_builder.increment_step()
@@ -1362,3 +1449,167 @@ class SolverUIPC(SolverBase):
                 ],
                 device=model.device,
             )
+
+    def _sync_particle_state_from_uipc(self, state_out: State) -> None:
+        """Read UIPC FEM vertex state back into Newton particles."""
+        if (
+            state_out.particle_q is None
+            or self._fem_accessor is None
+            or self._fem_mapped_vertex_count == 0
+            or self._fem_backend_vertex_count == 0
+            or self._fem_backend_offsets_wp is None
+            or self._fem_particle_indices_wp is None
+            or self._fem_position_buf is None
+        ):
+            return
+
+        self._fem_accessor.copy_position_to(
+            self._fem_position_buf.buffer_view(),
+            0,
+            self._fem_backend_vertex_count,
+        )
+
+        if state_out.particle_qd is not None and self._fem_velocity_buf is not None:
+            self._fem_accessor.copy_velocity_to(
+                self._fem_velocity_buf.buffer_view(),
+                0,
+                self._fem_backend_vertex_count,
+            )
+            wp.launch(
+                _read_fem_particles_from_backend_kernel,
+                dim=self._fem_mapped_vertex_count,
+                inputs=[
+                    self._fem_backend_offsets_wp,
+                    self._fem_position_buf.warp(),
+                    self._fem_velocity_buf.warp(),
+                    self._fem_particle_indices_wp,
+                    state_out.particle_q,
+                    state_out.particle_qd,
+                ],
+                device=self.model.device,
+            )
+        else:
+            wp.launch(
+                _read_fem_particle_positions_from_backend_kernel,
+                dim=self._fem_mapped_vertex_count,
+                inputs=[
+                    self._fem_backend_offsets_wp,
+                    self._fem_position_buf.warp(),
+                    self._fem_particle_indices_wp,
+                    state_out.particle_q,
+                ],
+                device=self.model.device,
+            )
+
+    def set_cloth_soft_position_constraints(
+        self,
+        particle_indices: np.ndarray | list[int],
+        aim_positions: np.ndarray | list[tuple[float, float, float]],
+        strength_ratio: float | None = None,
+        enabled: bool = True,
+    ) -> None:
+        """Enable UIPC soft-position control for selected cloth particles.
+
+        The UIPC cloth builder adds a dormant
+        ``SoftPositionConstraint`` to every cloth mesh.  This method marks
+        selected vertices as constrained and writes their target
+        ``aim_position`` values.  It is intended for kinematic cloth handles
+        such as twisting edges or robot-gripper attachments.
+
+        Args:
+            particle_indices: Newton particle indices to constrain.
+            aim_positions: Target world positions [m], shape ``(N, 3)``.
+            strength_ratio: Optional per-call UIPC ``strength_ratio``.  If
+                ``None``, keeps the value created by the builder.
+            enabled: Whether the selected vertices are constrained.
+
+        Raises:
+            RuntimeError: If the solver has not been initialized or cloth
+                soft-position attributes are unavailable.
+            ValueError: If the index and target arrays have incompatible
+                shapes.
+        """
+        if not self._initialized:
+            raise RuntimeError("set_cloth_soft_position_constraints requires an initialized SolverUIPC.")
+
+        indices = np.asarray(particle_indices, dtype=np.int32).reshape(-1)
+        targets = np.asarray(aim_positions, dtype=np.float64)
+        if targets.shape == (3,) and indices.size == 1:
+            targets = targets.reshape(1, 3)
+        if targets.shape != (indices.size, 3):
+            raise ValueError(f"aim_positions must have shape ({indices.size}, 3), got {targets.shape}")
+
+        found_any = False
+        for geo_slot, mesh_particle_indices in zip(
+            self.mapping.cloth_geo_slots,
+            self.mapping.cloth_particle_indices,
+            strict=False,
+        ):
+            local_by_global = {int(global_idx): local for local, global_idx in enumerate(mesh_particle_indices)}
+            local_indices: list[int] = []
+            local_targets: list[np.ndarray] = []
+            for particle_index, target in zip(indices, targets, strict=True):
+                local = local_by_global.get(int(particle_index))
+                if local is None:
+                    continue
+                local_indices.append(local)
+                local_targets.append(target)
+
+            if not local_indices:
+                continue
+
+            geo = geo_slot.geometry()
+            constrained_attr = geo.vertices().find("is_constrained")
+            aim_attr = geo.vertices().find("aim_position")
+            if constrained_attr is None or aim_attr is None:
+                raise RuntimeError(
+                    "UIPC cloth soft-position attributes are missing. "
+                    "Recreate SolverUIPC with cloth soft-position constraints enabled."
+                )
+
+            local_indices_np = np.asarray(local_indices, dtype=np.int64)
+            view(constrained_attr)[local_indices_np] = int(enabled)
+            view(aim_attr)[local_indices_np] = np.asarray(local_targets, dtype=np.float64).reshape(-1, 3, 1)
+
+            if strength_ratio is not None:
+                strength_attr = geo.vertices().find("strength_ratio")
+                if strength_attr is None:
+                    raise RuntimeError("UIPC cloth soft-position strength_ratio attribute is missing.")
+                view(strength_attr)[local_indices_np] = float(strength_ratio)
+
+            found_any = True
+
+        if not found_any:
+            raise ValueError("None of the requested particle_indices belong to UIPC cloth geometry.")
+
+    def clear_cloth_soft_position_constraints(
+        self,
+        particle_indices: np.ndarray | list[int] | None = None,
+    ) -> None:
+        """Disable UIPC soft-position constraints on cloth particles.
+
+        Args:
+            particle_indices: Optional Newton particle indices to disable.
+                ``None`` disables all UIPC cloth soft-position constraints.
+        """
+        if not self._initialized:
+            raise RuntimeError("clear_cloth_soft_position_constraints requires an initialized SolverUIPC.")
+
+        requested = None if particle_indices is None else set(np.asarray(particle_indices, dtype=np.int32).reshape(-1))
+        for geo_slot, mesh_particle_indices in zip(
+            self.mapping.cloth_geo_slots,
+            self.mapping.cloth_particle_indices,
+            strict=False,
+        ):
+            constrained_attr = geo_slot.geometry().vertices().find("is_constrained")
+            if constrained_attr is None:
+                continue
+            constrained = view(constrained_attr)
+            if requested is None:
+                constrained[:] = 0
+                continue
+            local_indices = [
+                local for local, global_idx in enumerate(mesh_particle_indices) if int(global_idx) in requested
+            ]
+            if local_indices:
+                constrained[np.asarray(local_indices, dtype=np.int64)] = 0

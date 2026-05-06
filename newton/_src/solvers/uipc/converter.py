@@ -315,6 +315,42 @@ def _read_from_backend_kernel(
     out_body_qd[body_idx] = wp.spatial_vector(v_com, wp.vec3(omega_x, omega_y, omega_z))
 
 
+@wp.kernel(enable_backward=False)
+def _read_fem_particles_from_backend_kernel(
+    backend_offsets: wp.array[wp.uint32],
+    src_positions: wp.array[wp.vec3d],
+    src_velocities: wp.array[wp.vec3d],
+    particle_indices: wp.array[wp.int32],
+    out_particle_q: wp.array[wp.vec3],
+    out_particle_qd: wp.array[wp.vec3],
+):
+    """Gather UIPC FEM vertex positions/velocities back into Newton particles."""
+    tid = wp.tid()
+    backend_idx = backend_offsets[tid]
+    particle_idx = particle_indices[tid]
+
+    q = src_positions[backend_idx]
+    qd = src_velocities[backend_idx]
+    out_particle_q[particle_idx] = wp.vec3(wp.float32(q[0]), wp.float32(q[1]), wp.float32(q[2]))
+    out_particle_qd[particle_idx] = wp.vec3(wp.float32(qd[0]), wp.float32(qd[1]), wp.float32(qd[2]))
+
+
+@wp.kernel(enable_backward=False)
+def _read_fem_particle_positions_from_backend_kernel(
+    backend_offsets: wp.array[wp.uint32],
+    src_positions: wp.array[wp.vec3d],
+    particle_indices: wp.array[wp.int32],
+    out_particle_q: wp.array[wp.vec3],
+):
+    """Gather UIPC FEM vertex positions back into Newton particles."""
+    tid = wp.tid()
+    backend_idx = backend_offsets[tid]
+    particle_idx = particle_indices[tid]
+
+    q = src_positions[backend_idx]
+    out_particle_q[particle_idx] = wp.vec3(wp.float32(q[0]), wp.float32(q[1]), wp.float32(q[2]))
+
+
 # ---------------------------------------------------------------------------
 # Numpy-level helpers (used only during scene construction, not per-step)
 # ---------------------------------------------------------------------------
@@ -367,6 +403,7 @@ class UIpcMappingInfo:
 
     # Cloth geometry mappings: list of (particle_indices, geo_slot) per cloth mesh
     cloth_geo_slots: list[Any] = field(default_factory=list)
+    cloth_rest_geo_slots: list[Any] = field(default_factory=list)
     cloth_particle_indices: list[Any] = field(default_factory=list)  # np.ndarray per mesh
 
     # Deformable geometry mappings: list of (particle_indices, geo_slot) per deformable mesh
