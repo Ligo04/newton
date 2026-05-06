@@ -478,7 +478,6 @@ class ControllerStablePD(Controller):
             L=state.L.reshape(-1),
             num_blocks=W,
             block_dim=self._tile_block_dim,
-            device=device,
         )
 
         # Step 4: forward + backward substitution → qddot (tile-parallel, batched over worlds).
@@ -493,7 +492,6 @@ class ControllerStablePD(Controller):
             x=state.qddot.reshape(-1),
             num_blocks=W,
             block_dim=self._tile_block_dim,
-            device=device,
         )
 
         # Step 5: effort[w·n + j] = const_e + ff + kp·err_pos + kd·err_vel - kd·qddot[w, j]·dt.
