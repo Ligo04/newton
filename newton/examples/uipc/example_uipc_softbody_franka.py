@@ -162,18 +162,12 @@ class Example:
             force_show_colliders=False,
         )
         builder.joint_q[:6] = [0.0, 0.0, 0.0, -1.59695, 0.0, 2.5307]
-        if len(builder.joint_q) >= 9:
-            builder.joint_q[7] = 0.04
-            builder.joint_q[8] = 0.04
         for d in range(min(9, len(builder.joint_q))):
             builder.joint_target_pos[d] = builder.joint_q[d]
-            builder.joint_target_ke[d] = 650.0
-            builder.joint_target_kd[d] = 100.0
             builder.joint_target_mode[d] = int(JointTargetMode.POSITION)
-            builder.joint_armature[d] = 1.0e-2 if d < 7 else 5.0e-2
 
         gripper_open = 1.0
-        gripper_close = 0.0
+        gripper_close = 0.5
         self.robot_key_poses = np.array(
             [
                 # approach: move above the duck
