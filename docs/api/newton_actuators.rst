@@ -33,6 +33,7 @@ construction.
    ControllerNeuralMLP
    ControllerPD
    ControllerPID
+   ControllerStablePD
    Delay
 
 .. rubric:: Functions
