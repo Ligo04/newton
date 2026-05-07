@@ -13,6 +13,7 @@ manipulating cloth example, which takes approximately 35 seconds to run on a
 CUDA device.
 """
 
+import importlib.util
 import os
 import subprocess
 import sys
@@ -30,6 +31,8 @@ from newton.tests.unittest_utils import (
     get_test_devices,
     sanitize_identifier,
 )
+
+_HAS_UIPC = importlib.util.find_spec("uipc") is not None
 
 
 def _build_command_line_options(test_options: dict[str, Any]) -> list:
@@ -773,6 +776,34 @@ add_example_test(
     test_options={"num-frames": 120},
     use_viewer=True,
 )
+
+
+class TestUIPCSoftbodyExamples(unittest.TestCase):
+    pass
+
+
+if _HAS_UIPC:
+    add_example_test(
+        TestUIPCSoftbodyExamples,
+        name="uipc.example_uipc_soft_hanging",
+        devices=cuda_test_devices,
+        test_options={"num-frames": 60},
+        use_viewer=True,
+    )
+    add_example_test(
+        TestUIPCSoftbodyExamples,
+        name="uipc.example_deformablebody",
+        devices=cuda_test_devices,
+        test_options={"num-frames": 10},
+        use_viewer=True,
+    )
+    add_example_test(
+        TestUIPCSoftbodyExamples,
+        name="uipc.example_uipc_softbody_franka",
+        devices=cuda_test_devices,
+        test_options={"num-frames": 10},
+        use_viewer=True,
+    )
 
 
 class TestKaminoExamples(unittest.TestCase):

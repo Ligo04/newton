@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from enum import IntEnum
 from typing import TYPE_CHECKING, Any
 
@@ -20,6 +21,94 @@ if TYPE_CHECKING:
     from ..actuators.actuator import Actuator
     from ..utils.heightfield import HeightfieldData
     from .collide import CollisionPipeline
+
+
+@dataclass(frozen=True)
+class ClothRange:
+    """Index ranges for entities created by one cloth builder call."""
+
+    label: str | None
+    """Optional label for identifying the cloth."""
+    particle_start: int
+    """Start particle index."""
+    particle_end: int
+    """End particle index."""
+    tri_start: int
+    """Start triangle index."""
+    tri_end: int
+    """End triangle index."""
+    edge_start: int
+    """Start bending edge index."""
+    edge_end: int
+    """End bending edge index."""
+    spring_start: int
+    """Start spring index."""
+    spring_end: int
+    """End spring index."""
+
+    @property
+    def particle_range(self) -> tuple[int, int]:
+        """Particle index range as ``(start, end)``."""
+        return self.particle_start, self.particle_end
+
+    @property
+    def tri_range(self) -> tuple[int, int]:
+        """Triangle index range as ``(start, end)``."""
+        return self.tri_start, self.tri_end
+
+    @property
+    def edge_range(self) -> tuple[int, int]:
+        """Bending edge index range as ``(start, end)``."""
+        return self.edge_start, self.edge_end
+
+    @property
+    def spring_range(self) -> tuple[int, int]:
+        """Spring index range as ``(start, end)``."""
+        return self.spring_start, self.spring_end
+
+
+@dataclass(frozen=True)
+class SoftBodyRange:
+    """Index ranges for entities created by one soft body builder call."""
+
+    label: str | None
+    """Optional label for identifying the soft body."""
+    particle_start: int
+    """Start particle index."""
+    particle_end: int
+    """End particle index."""
+    tet_start: int
+    """Start tetrahedron index."""
+    tet_end: int
+    """End tetrahedron index."""
+    tri_start: int
+    """Start surface triangle index."""
+    tri_end: int
+    """End surface triangle index."""
+    edge_start: int
+    """Start bending edge index."""
+    edge_end: int
+    """End bending edge index."""
+
+    @property
+    def particle_range(self) -> tuple[int, int]:
+        """Particle index range as ``(start, end)``."""
+        return self.particle_start, self.particle_end
+
+    @property
+    def tet_range(self) -> tuple[int, int]:
+        """Tetrahedron index range as ``(start, end)``."""
+        return self.tet_start, self.tet_end
+
+    @property
+    def tri_range(self) -> tuple[int, int]:
+        """Surface triangle index range as ``(start, end)``."""
+        return self.tri_start, self.tri_end
+
+    @property
+    def edge_range(self) -> tuple[int, int]:
+        """Bending edge index range as ``(start, end)``."""
+        return self.edge_start, self.edge_end
 
 
 class Model:
@@ -186,6 +275,11 @@ class Model:
 
             num_global_particles = particle_world_start[-1] - particle_world_start[-2] + particle_world_start[0]
         """
+
+        self.soft_body_ranges: list[SoftBodyRange] = []
+        """Entity ranges created by soft body builder calls."""
+        self.cloth_ranges: list[ClothRange] = []
+        """Entity ranges created by cloth builder calls."""
 
         self.shape_label: list[str] = []
         """List of labels for each shape."""

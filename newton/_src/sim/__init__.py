@@ -12,11 +12,12 @@ from .enums import (
     JointTargetMode,
     JointType,
 )
-from .model import Model
+from .model import ClothRange, Model, SoftBodyRange
 from .state import State
 
 __all__ = [
     "BodyFlags",
+    "ClothRange",
     "CollisionPipeline",
     "Contacts",
     "Control",
@@ -25,6 +26,7 @@ __all__ = [
     "JointType",
     "Model",
     "ModelBuilder",
+    "SoftBodyRange",
     "State",
     "eval_fk",
     "eval_ik",

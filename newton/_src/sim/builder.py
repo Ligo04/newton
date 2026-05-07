@@ -66,7 +66,7 @@ from .graph_coloring import (
     combine_independent_particle_coloring,
     construct_particle_graph,
 )
-from .model import Model
+from .model import ClothRange, Model, SoftBodyRange
 
 try:
     from newton_actuators import Actuator as _LegacyActuator
@@ -902,6 +902,10 @@ class ModelBuilder:
         """Particle color groups accumulated for :attr:`Model.particle_color_groups`."""
         self.particle_world: list[int] = []
         """World indices accumulated for :attr:`Model.particle_world`."""
+        self.soft_body_ranges: list[SoftBodyRange] = []
+        """Soft body entity ranges accumulated for :attr:`Model.soft_body_ranges`."""
+        self.cloth_ranges: list[ClothRange] = []
+        """Cloth entity ranges accumulated for :attr:`Model.cloth_ranges`."""
 
         # shapes (each shape has an entry in these arrays)
         self.shape_label: list[str] = []
@@ -3061,6 +3065,40 @@ class ModelBuilder:
             self.tri_indices.extend((np.array(builder.tri_indices, dtype=np.int32) + start_particle_idx).tolist())
         if builder.tet_count:
             self.tet_indices.extend((np.array(builder.tet_indices, dtype=np.int32) + start_particle_idx).tolist())
+
+        for cloth_range in builder.cloth_ranges:
+            cloth_label = (
+                f"{label_prefix}/{cloth_range.label}" if label_prefix and cloth_range.label else cloth_range.label
+            )
+            self.cloth_ranges.append(
+                ClothRange(
+                    label=cloth_label,
+                    particle_start=cloth_range.particle_start + start_particle_idx,
+                    particle_end=cloth_range.particle_end + start_particle_idx,
+                    tri_start=cloth_range.tri_start + start_triangle_idx,
+                    tri_end=cloth_range.tri_end + start_triangle_idx,
+                    edge_start=cloth_range.edge_start + start_edge_idx,
+                    edge_end=cloth_range.edge_end + start_edge_idx,
+                    spring_start=cloth_range.spring_start + start_spring_idx,
+                    spring_end=cloth_range.spring_end + start_spring_idx,
+                )
+            )
+
+        for soft_range in builder.soft_body_ranges:
+            soft_label = f"{label_prefix}/{soft_range.label}" if label_prefix and soft_range.label else soft_range.label
+            self.soft_body_ranges.append(
+                SoftBodyRange(
+                    label=soft_label,
+                    particle_start=soft_range.particle_start + start_particle_idx,
+                    particle_end=soft_range.particle_end + start_particle_idx,
+                    tet_start=soft_range.tet_start + start_tetrahedron_idx,
+                    tet_end=soft_range.tet_end + start_tetrahedron_idx,
+                    tri_start=soft_range.tri_start + start_triangle_idx,
+                    tri_end=soft_range.tri_end + start_triangle_idx,
+                    edge_start=soft_range.edge_start + start_edge_idx,
+                    edge_end=soft_range.edge_end + start_edge_idx,
+                )
+            )
 
         builder_coloring_translated = [group + start_particle_idx for group in builder.particle_color_groups]
         self.particle_color_groups = combine_independent_particle_coloring(
@@ -7787,7 +7825,8 @@ class ModelBuilder:
         custom_attributes_particles: dict[str, Any] | None = None,
         custom_attributes_edges: dict[str, Any] | None = None,
         custom_attributes_triangles: dict[str, Any] | None = None,
-    ):
+        label: str | None = None,
+    ) -> ClothRange:
         """Helper to create a regular planar cloth grid
 
         Creates a rectangular grid of particles with FEM triangles and bending elements
@@ -7807,6 +7846,10 @@ class ModelBuilder:
             fix_right: Make the right-most edge of particles kinematic
             fix_top: Make the top-most edge of particles kinematic
             fix_bottom: Make the bottom-most edge of particles kinematic
+            label: Optional label for identifying the cloth.
+
+        Returns:
+            Entity ranges created for the cloth.
         """
 
         def grid_index(x, y, dim_x):
@@ -7835,7 +7878,7 @@ class ModelBuilder:
         total_area = cell_x * cell_y * dim_x * dim_y
         density = total_mass / total_area
 
-        self.add_cloth_mesh(
+        cloth_range = self.add_cloth_mesh(
             pos=pos,
             rot=rot,
             scale=1.0,
@@ -7857,6 +7900,7 @@ class ModelBuilder:
             custom_attributes_particles=custom_attributes_particles,
             custom_attributes_triangles=custom_attributes_triangles,
             custom_attributes_edges=custom_attributes_edges,
+            label=label,
         )
 
         vertex_id = 0
@@ -7877,6 +7921,8 @@ class ModelBuilder:
                 self.particle_flags[start_vertex + vertex_id] = particle_flag
                 self.particle_mass[start_vertex + vertex_id] = particle_mass
                 vertex_id = vertex_id + 1
+
+        return cloth_range
 
     def add_cloth_mesh(
         self,
@@ -7902,7 +7948,8 @@ class ModelBuilder:
         custom_attributes_edges: dict[str, Any] | None = None,
         custom_attributes_triangles: dict[str, Any] | None = None,
         custom_attributes_springs: dict[str, Any] | None = None,
-    ) -> None:
+        label: str | None = None,
+    ) -> ClothRange:
         """Helper to create a cloth model from a regular triangle mesh
 
         Creates one FEM triangle element and one bending element for every face
@@ -7920,6 +7967,10 @@ class ModelBuilder:
             custom_attributes_edges: Dictionary of custom attribute names to values for the edges.
             custom_attributes_triangles: Dictionary of custom attribute names to values for the triangles.
             custom_attributes_springs: Dictionary of custom attribute names to values for the springs.
+            label: Optional label for identifying the cloth.
+
+        Returns:
+            Entity ranges created for the cloth.
 
         Note:
             The mesh should be two-manifold.
@@ -7940,6 +7991,8 @@ class ModelBuilder:
 
         start_vertex = len(self.particle_q)
         start_tri = len(self.tri_indices)
+        start_edge = len(self.edge_indices)
+        start_spring = len(self.spring_indices) // 2
 
         # particles
         # for v in vertices:
@@ -8010,6 +8063,20 @@ class ModelBuilder:
 
             for i, j in spring_indices:
                 self.add_spring(i, j, spring_ke, spring_kd, control=0.0, custom_attributes=custom_attributes_springs)
+
+        cloth_range = ClothRange(
+            label=label,
+            particle_start=start_vertex,
+            particle_end=len(self.particle_q),
+            tri_start=start_tri,
+            tri_end=len(self.tri_indices),
+            edge_start=start_edge,
+            edge_end=len(self.edge_indices),
+            spring_start=start_spring,
+            spring_end=len(self.spring_indices) // 2,
+        )
+        self.cloth_ranges.append(cloth_range)
+        return cloth_range
 
     def add_particle_grid(
         self,
@@ -8141,7 +8208,8 @@ class ModelBuilder:
         edge_ke: float = 0.0,
         edge_kd: float = 0.0,
         particle_radius: float | None = None,
-    ):
+        label: str | None = None,
+    ) -> SoftBodyRange:
         """Helper to create a rectangular tetrahedral FEM grid
 
         Creates a regular grid of FEM tetrahedra and surface triangles. Useful for example
@@ -8176,6 +8244,10 @@ class ModelBuilder:
             edge_ke: Bending edge stiffness used when ``add_surface_mesh_edges`` is True. Defaults to 0.0.
             edge_kd: Bending edge damping used when ``add_surface_mesh_edges`` is True. Defaults to 0.0.
             particle_radius: particle's contact radius (controls rigidbody-particle contact distance)
+            label: Optional label for identifying the soft body.
+
+        Returns:
+            Entity ranges created for the soft body.
 
         Note:
             The generated surface triangles and optional edges are for collision purposes.
@@ -8184,6 +8256,8 @@ class ModelBuilder:
             want the surface to behave like a thin skin.
         """
         start_vertex = len(self.particle_q)
+        start_tet = len(self.tet_indices)
+        start_edge = len(self.edge_indices)
 
         mass = cell_x * cell_y * cell_z * density
 
@@ -8276,6 +8350,20 @@ class ModelBuilder:
                     for o1, o2, v1, v2 in edge_indices:
                         self.add_edge(o1, o2, v1, v2, None, edge_ke, edge_kd)
 
+        soft_range = SoftBodyRange(
+            label=label,
+            particle_start=start_vertex,
+            particle_end=len(self.particle_q),
+            tet_start=start_tet,
+            tet_end=len(self.tet_indices),
+            tri_start=start_tri,
+            tri_end=len(self.tri_indices),
+            edge_start=start_edge,
+            edge_end=len(self.edge_indices),
+        )
+        self.soft_body_ranges.append(soft_range)
+        return soft_range
+
     def add_soft_mesh(
         self,
         pos: Vec3,
@@ -8298,7 +8386,8 @@ class ModelBuilder:
         edge_ke: float = 0.0,
         edge_kd: float = 0.0,
         particle_radius: float | None = None,
-    ) -> None:
+        label: str | None = None,
+    ) -> SoftBodyRange:
         """Helper to create a tetrahedral model from an input tetrahedral mesh.
 
         Can be called with either a :class:`~newton.TetMesh` object or raw
@@ -8336,6 +8425,10 @@ class ModelBuilder:
             edge_ke: Bending edge stiffness used when ``add_surface_mesh_edges`` is True. Defaults to 0.0.
             edge_kd: Bending edge damping used when ``add_surface_mesh_edges`` is True. Defaults to 0.0.
             particle_radius: particle's contact radius (controls rigidbody-particle contact distance).
+            label: Optional label for identifying the soft body.
+
+        Returns:
+            Entity ranges created for the soft body.
 
         Note:
             **Parameter resolution order:** explicit argument > :class:`~newton.TetMesh`
@@ -8409,6 +8502,8 @@ class ModelBuilder:
                     tri_custom[attr_name] = arr
 
         start_vertex = len(self.particle_q)
+        start_tet = len(self.tet_indices)
+        start_edge = len(self.edge_indices)
 
         pos = wp.vec3(pos[0], pos[1], pos[2])
         # add particles
@@ -8481,6 +8576,20 @@ class ModelBuilder:
                     # Add edges with specified stiffness/damping (for collision)
                     for o1, o2, v1, v2 in edge_indices:
                         self.add_edge(o1, o2, v1, v2, None, edge_ke, edge_kd)
+
+        soft_range = SoftBodyRange(
+            label=label,
+            particle_start=start_vertex,
+            particle_end=len(self.particle_q),
+            tet_start=start_tet,
+            tet_end=len(self.tet_indices),
+            tri_start=start_tri,
+            tri_end=len(self.tri_indices),
+            edge_start=start_edge,
+            edge_end=len(self.edge_indices),
+        )
+        self.soft_body_ranges.append(soft_range)
+        return soft_range
 
     # incrementally updates rigid body mass with additional mass and inertia expressed at a local to the body
     def _update_body_mass(self, i: int, m: float, inertia: Mat33, p: Vec3, q: Quat):
@@ -9793,6 +9902,8 @@ class ModelBuilder:
             m.particle_world = wp.array(self.particle_world, dtype=wp.int32)
             m.particle_max_radius = np.max(self.particle_radius) if len(self.particle_radius) > 0 else 0.0
             m.particle_max_velocity = self.particle_max_velocity
+            m.soft_body_ranges = list(self.soft_body_ranges)
+            m.cloth_ranges = list(self.cloth_ranges)
 
             particle_colors = np.empty(self.particle_count, dtype=int)
             for color in range(len(self.particle_color_groups)):

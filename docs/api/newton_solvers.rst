@@ -426,5 +426,6 @@ See the `DiffSim examples on GitHub`_ for the current reference workflows.
    SolverNotifyFlags
    SolverSemiImplicit
    SolverStyle3D
+   SolverUIPC
    SolverVBD
    SolverXPBD

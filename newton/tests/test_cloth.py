@@ -1175,7 +1175,98 @@ devices = get_test_devices(mode="basic")
 
 
 class TestCloth(unittest.TestCase):
-    pass
+    def test_cloth_grid_returns_and_finalizes_entity_ranges(self):
+        builder = newton.ModelBuilder()
+
+        cloth_range = builder.add_cloth_grid(
+            pos=wp.vec3(0.0, 0.0, 0.0),
+            rot=wp.quat_identity(),
+            vel=wp.vec3(0.0, 0.0, 0.0),
+            dim_x=1,
+            dim_y=1,
+            cell_x=1.0,
+            cell_y=1.0,
+            mass=1.0,
+            label="cloth_grid",
+        )
+
+        self.assertEqual(cloth_range.label, "cloth_grid")
+        self.assertEqual(cloth_range.particle_range, (0, builder.particle_count))
+        self.assertEqual(cloth_range.tri_range, (0, builder.tri_count))
+        self.assertEqual(cloth_range.edge_range, (0, builder.edge_count))
+        self.assertEqual(cloth_range.spring_range, (0, builder.spring_count))
+        self.assertEqual(builder.cloth_ranges, [cloth_range])
+
+        model = builder.finalize()
+        self.assertEqual(model.cloth_ranges, [cloth_range])
+
+    def test_cloth_mesh_returns_entity_ranges(self):
+        builder = newton.ModelBuilder()
+
+        cloth_range = builder.add_cloth_mesh(
+            pos=wp.vec3(0.0, 0.0, 0.0),
+            rot=wp.quat_identity(),
+            scale=1.0,
+            vel=wp.vec3(0.0, 0.0, 0.0),
+            vertices=[
+                wp.vec3(0.0, 0.0, 0.0),
+                wp.vec3(1.0, 0.0, 0.0),
+                wp.vec3(1.0, 1.0, 0.0),
+                wp.vec3(0.0, 1.0, 0.0),
+            ],
+            indices=[0, 1, 2, 0, 2, 3],
+            density=1.0,
+            label="cloth_mesh",
+        )
+
+        self.assertEqual(cloth_range.label, "cloth_mesh")
+        self.assertEqual(cloth_range.particle_range, (0, builder.particle_count))
+        self.assertEqual(cloth_range.tri_range, (0, builder.tri_count))
+        self.assertEqual(cloth_range.edge_range, (0, builder.edge_count))
+        self.assertEqual(cloth_range.spring_range, (0, builder.spring_count))
+        self.assertEqual(builder.cloth_ranges, [cloth_range])
+
+    def test_add_builder_offsets_cloth_ranges(self):
+        source = newton.ModelBuilder()
+        source_range = source.add_cloth_grid(
+            pos=wp.vec3(0.0, 0.0, 0.0),
+            rot=wp.quat_identity(),
+            vel=wp.vec3(0.0, 0.0, 0.0),
+            dim_x=1,
+            dim_y=1,
+            cell_x=1.0,
+            cell_y=1.0,
+            mass=1.0,
+            add_springs=True,
+            label="source",
+        )
+
+        builder = newton.ModelBuilder()
+        prefix_range = builder.add_cloth_grid(
+            pos=wp.vec3(0.0, 2.0, 0.0),
+            rot=wp.quat_identity(),
+            vel=wp.vec3(0.0, 0.0, 0.0),
+            dim_x=1,
+            dim_y=1,
+            cell_x=1.0,
+            cell_y=1.0,
+            mass=1.0,
+            add_springs=True,
+            label="prefix",
+        )
+        builder.add_builder(source, label_prefix="copy")
+
+        self.assertEqual(len(builder.cloth_ranges), 2)
+        merged_range = builder.cloth_ranges[1]
+        self.assertEqual(merged_range.label, f"copy/{source_range.label}")
+        self.assertEqual(merged_range.particle_start, prefix_range.particle_end)
+        self.assertEqual(merged_range.tri_start, prefix_range.tri_end)
+        self.assertEqual(merged_range.edge_start, prefix_range.edge_end)
+        self.assertEqual(merged_range.spring_start, prefix_range.spring_end)
+        self.assertEqual(merged_range.particle_end, prefix_range.particle_end + source_range.particle_end)
+        self.assertEqual(merged_range.tri_end, prefix_range.tri_end + source_range.tri_end)
+        self.assertEqual(merged_range.edge_end, prefix_range.edge_end + source_range.edge_end)
+        self.assertEqual(merged_range.spring_end, prefix_range.spring_end + source_range.spring_end)
 
 
 tests_to_run = {

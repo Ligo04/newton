@@ -164,6 +164,7 @@ class SolverUIPC(SolverBase):
         cloth_model: str = "strain_limiting_baraff_witkin",
         cloth_thickness: float = 0.001,
         cloth_soft_position_strength_ratio: float = 100.0,
+        enable_soft_position_constraint: bool = True,
     ):
         """Create a UIPC solver instance from a Newton model.
 
@@ -212,6 +213,9 @@ class SolverUIPC(SolverBase):
                 ``SoftPositionConstraint`` strength ratio added to cloth
                 vertices.  Vertices are unconstrained until
                 :meth:`set_cloth_soft_position_constraints` enables them.
+            enable_soft_position_constraint: Whether to add dormant UIPC
+                ``SoftPositionConstraint`` attributes to cloth and deformable
+                vertices.
         """
         super().__init__(model=model)
         self.import_uipc()
@@ -231,6 +235,7 @@ class SolverUIPC(SolverBase):
         self._cloth_model = cloth_model
         self._cloth_thickness = cloth_thickness
         self._cloth_soft_position_strength_ratio = cloth_soft_position_strength_ratio
+        self._enable_soft_position_constraint = enable_soft_position_constraint
 
         # Scene config: start from UIPC defaults, apply Newton model overrides.
         if scene_config is None:
@@ -836,10 +841,15 @@ class SolverUIPC(SolverBase):
             self.mapping,
             default_thickness=self._cloth_thickness,
             cloth_model=self._cloth_model,
+            enable_soft_position_constraint=self._enable_soft_position_constraint,
             soft_position_strength_ratio=self._cloth_soft_position_strength_ratio,
         )
         self._deformable_builder = DeformableBodyBuilder(
-            model, scene, self.mapping, default_mass_density=self._default_mass_density
+            model,
+            scene,
+            self.mapping,
+            default_mass_density=self._default_mass_density,
+            enable_soft_position_constraint=self._enable_soft_position_constraint,
         )
 
         self._rigid_body_builder.build_ground_planes(ground_elem)
@@ -925,7 +935,7 @@ class SolverUIPC(SolverBase):
             if self._cloth_builder.has_cloth:
                 self._cloth_builder.build(actor_elems[world_index], particle_range, se)
             if self._deformable_builder.has_deformable:
-                self._deformable_builder.build(env_elems[world_index], particle_range, se)
+                self._deformable_builder.build(actor_elems[world_index], particle_range, se)
 
         # Initialize UIPC world and set up state accessors
         self.world.init(scene)
@@ -1529,8 +1539,55 @@ class SolverUIPC(SolverBase):
             ValueError: If the index and target arrays have incompatible
                 shapes.
         """
+        self._set_soft_position_constraints(
+            self.mapping.cloth_geo_slots,
+            self.mapping.cloth_particle_indices,
+            "cloth",
+            particle_indices,
+            aim_positions,
+            strength_ratio,
+            enabled,
+        )
+
+    def set_deformable_soft_position_constraints(
+        self,
+        particle_indices: np.ndarray | list[int],
+        aim_positions: np.ndarray | list[tuple[float, float, float]],
+        strength_ratio: float | None = None,
+        enabled: bool = True,
+    ) -> None:
+        """Enable UIPC soft-position control for selected deformable particles.
+
+        Args:
+            particle_indices: Newton particle indices to constrain.
+            aim_positions: Target world positions [m], shape ``(N, 3)``.
+            strength_ratio: Optional per-call UIPC ``strength_ratio``.  If
+                ``None``, keeps the value created by the builder.
+            enabled: Whether the selected vertices are constrained.
+        """
+        self._set_soft_position_constraints(
+            self.mapping.deformable_geo_slots,
+            self.mapping.deformable_particle_indices,
+            "deformable",
+            particle_indices,
+            aim_positions,
+            strength_ratio,
+            enabled,
+        )
+
+    def _set_soft_position_constraints(
+        self,
+        geo_slots: list[Any],
+        particle_index_sets: list[Any],
+        geometry_name: str,
+        particle_indices: np.ndarray | list[int],
+        aim_positions: np.ndarray | list[tuple[float, float, float]],
+        strength_ratio: float | None,
+        enabled: bool,
+    ) -> None:
+        """Enable UIPC soft-position control for selected FEM vertices."""
         if not self._initialized:
-            raise RuntimeError("set_cloth_soft_position_constraints requires an initialized SolverUIPC.")
+            raise RuntimeError(f"set_{geometry_name}_soft_position_constraints requires an initialized SolverUIPC.")
 
         indices = np.asarray(particle_indices, dtype=np.int32).reshape(-1)
         targets = np.asarray(aim_positions, dtype=np.float64)
@@ -1540,11 +1597,7 @@ class SolverUIPC(SolverBase):
             raise ValueError(f"aim_positions must have shape ({indices.size}, 3), got {targets.shape}")
 
         found_any = False
-        for geo_slot, mesh_particle_indices in zip(
-            self.mapping.cloth_geo_slots,
-            self.mapping.cloth_particle_indices,
-            strict=False,
-        ):
+        for geo_slot, mesh_particle_indices in zip(geo_slots, particle_index_sets, strict=False):
             local_by_global = {int(global_idx): local for local, global_idx in enumerate(mesh_particle_indices)}
             local_indices: list[int] = []
             local_targets: list[np.ndarray] = []
@@ -1563,8 +1616,8 @@ class SolverUIPC(SolverBase):
             aim_attr = geo.vertices().find("aim_position")
             if constrained_attr is None or aim_attr is None:
                 raise RuntimeError(
-                    "UIPC cloth soft-position attributes are missing. "
-                    "Recreate SolverUIPC with cloth soft-position constraints enabled."
+                    f"UIPC {geometry_name} soft-position attributes are missing. "
+                    "Recreate SolverUIPC with soft-position constraints enabled."
                 )
 
             local_indices_np = np.asarray(local_indices, dtype=np.int64)
@@ -1574,13 +1627,13 @@ class SolverUIPC(SolverBase):
             if strength_ratio is not None:
                 strength_attr = geo.vertices().find("strength_ratio")
                 if strength_attr is None:
-                    raise RuntimeError("UIPC cloth soft-position strength_ratio attribute is missing.")
+                    raise RuntimeError(f"UIPC {geometry_name} soft-position strength_ratio attribute is missing.")
                 view(strength_attr)[local_indices_np] = float(strength_ratio)
 
             found_any = True
 
         if not found_any:
-            raise ValueError("None of the requested particle_indices belong to UIPC cloth geometry.")
+            raise ValueError(f"None of the requested particle_indices belong to UIPC {geometry_name} geometry.")
 
     def clear_cloth_soft_position_constraints(
         self,
@@ -1592,15 +1645,43 @@ class SolverUIPC(SolverBase):
             particle_indices: Optional Newton particle indices to disable.
                 ``None`` disables all UIPC cloth soft-position constraints.
         """
-        if not self._initialized:
-            raise RuntimeError("clear_cloth_soft_position_constraints requires an initialized SolverUIPC.")
-
-        requested = None if particle_indices is None else set(np.asarray(particle_indices, dtype=np.int32).reshape(-1))
-        for geo_slot, mesh_particle_indices in zip(
+        self._clear_soft_position_constraints(
             self.mapping.cloth_geo_slots,
             self.mapping.cloth_particle_indices,
-            strict=False,
-        ):
+            "cloth",
+            particle_indices,
+        )
+
+    def clear_deformable_soft_position_constraints(
+        self,
+        particle_indices: np.ndarray | list[int] | None = None,
+    ) -> None:
+        """Disable UIPC soft-position constraints on deformable particles.
+
+        Args:
+            particle_indices: Optional Newton particle indices to disable.
+                ``None`` disables all UIPC deformable soft-position constraints.
+        """
+        self._clear_soft_position_constraints(
+            self.mapping.deformable_geo_slots,
+            self.mapping.deformable_particle_indices,
+            "deformable",
+            particle_indices,
+        )
+
+    def _clear_soft_position_constraints(
+        self,
+        geo_slots: list[Any],
+        particle_index_sets: list[Any],
+        geometry_name: str,
+        particle_indices: np.ndarray | list[int] | None,
+    ) -> None:
+        """Disable UIPC soft-position constraints on FEM vertices."""
+        if not self._initialized:
+            raise RuntimeError(f"clear_{geometry_name}_soft_position_constraints requires an initialized SolverUIPC.")
+
+        requested = None if particle_indices is None else set(np.asarray(particle_indices, dtype=np.int32).reshape(-1))
+        for geo_slot, mesh_particle_indices in zip(geo_slots, particle_index_sets, strict=False):
             constrained_attr = geo_slot.geometry().vertices().find("is_constrained")
             if constrained_attr is None:
                 continue

@@ -408,6 +408,7 @@ class UIpcMappingInfo:
 
     # Deformable geometry mappings: list of (particle_indices, geo_slot) per deformable mesh
     deformable_geo_slots: list[Any] = field(default_factory=list)
+    deformable_rest_geo_slots: list[Any] = field(default_factory=list)
     deformable_particle_indices: list[Any] = field(default_factory=list)  # np.ndarray per mesh
 
 

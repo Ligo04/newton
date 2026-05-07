@@ -17,7 +17,7 @@ from uipc.constitution import (
     StrainLimitingBaraffWitkinShell,
 )
 from uipc.core import ContactElement, SubsceneElement
-from uipc.geometry import is_trimesh_closed, label_surface
+from uipc.geometry import is_trimesh_closed, label_surface, mesh_partition
 from uipc.geometry import trimesh as uipc_trimesh
 
 from ...sim import Model
@@ -99,12 +99,57 @@ class ClothBuilder:
         if model.tri_count == 0 or model.tri_indices is None or model.particle_q is None:
             return
 
+        if model.cloth_ranges:
+            for cloth_range in model.cloth_ranges:
+                if not self._range_in_particle_range(cloth_range.particle_range, particle_range):
+                    continue
+                selected_particles, cloth_faces, selected_tri_ids = self._select_range_cloth(model, cloth_range)
+                self._build_geometry(
+                    contact_elem,
+                    selected_particles,
+                    cloth_faces,
+                    selected_tri_ids,
+                    cloth_range.edge_range,
+                    subscene_elem,
+                )
+            return
+
+        selected_particles, cloth_faces, selected_tri_ids = self._select_legacy_cloth(model, particle_range)
+        self._build_geometry(contact_elem, selected_particles, cloth_faces, selected_tri_ids, None, subscene_elem)
+
+    def _select_range_cloth(self, model: Model, cloth_range: Any) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Return particles, local faces, and triangle IDs for one authored cloth range."""
+        assert model.tri_indices is not None
+        tri_indices_np = model.tri_indices.numpy().reshape(-1, 3)
+        tstart, tend = cloth_range.tri_range
+        selected_tri_ids = np.arange(tstart, tend, dtype=np.int32)
+        selected_tris = tri_indices_np[tstart:tend]
+        if selected_tris.size == 0:
+            return (
+                np.empty(0, dtype=np.int32),
+                np.empty((0, 3), dtype=np.int32),
+                np.empty(0, dtype=np.int32),
+            )
+
+        selected_particles = np.unique(selected_tris.reshape(-1).astype(np.int32))
+        global_to_local = {int(g): i for i, g in enumerate(selected_particles)}
+        local_faces = np.empty_like(selected_tris, dtype=np.int32)
+        for t, tri in enumerate(selected_tris):
+            for v in range(3):
+                local_faces[t, v] = global_to_local[int(tri[v])]
+        return selected_particles, local_faces, selected_tri_ids
+
+    def _select_legacy_cloth(
+        self, model: Model, particle_range: tuple[int, int] | None
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Select cloth triangles using the historical particle-range heuristic."""
         # Get triangle indices
-        tri_indices_np = model.tri_indices.numpy()  # (tri_count, 3)
+        assert model.tri_indices is not None
+        tri_indices_np = model.tri_indices.numpy().reshape(-1, 3)
         tri_count = model.tri_count
 
         # Identify cloth particles: referenced by triangles but NOT by tetrahedra
-        tri_particle_set = set(tri_indices_np.flatten())
+        tri_particle_set = {int(i) for i in tri_indices_np.flatten()}
 
         # Filter by particle range if specified
         if particle_range is not None:
@@ -114,11 +159,15 @@ class ClothBuilder:
         tet_particle_set: set[int] = set()
         if model.tet_count > 0 and model.tet_indices is not None:
             tet_indices_np = model.tet_indices.numpy()
-            tet_particle_set = set(tet_indices_np.flatten())
+            tet_particle_set = {int(i) for i in tet_indices_np.flatten()}
 
         cloth_particles = sorted(tri_particle_set - tet_particle_set)
         if not cloth_particles:
-            return
+            return (
+                np.empty(0, dtype=np.int32),
+                np.empty((0, 3), dtype=np.int32),
+                np.empty(0, dtype=np.int32),
+            )
 
         # Build particle index remapping: global -> local
         global_to_local = {g: l for l, g in enumerate(cloth_particles)}
@@ -126,16 +175,36 @@ class ClothBuilder:
 
         # Filter triangles: only those with all vertices in cloth_particles
         cloth_tris = []
+        selected_tri_ids = []
         for t in range(tri_count):
             i, j, k = tri_indices_np[t]
             if i in global_to_local and j in global_to_local and k in global_to_local:
                 cloth_tris.append([global_to_local[i], global_to_local[j], global_to_local[k]])
+                selected_tri_ids.append(t)
 
         if not cloth_tris:
+            return (
+                np.empty(0, dtype=np.int32),
+                np.empty((0, 3), dtype=np.int32),
+                np.empty(0, dtype=np.int32),
+            )
+
+        return cloth_particle_indices, np.array(cloth_tris, dtype=np.int32), np.array(selected_tri_ids, dtype=np.int32)
+
+    def _build_geometry(
+        self,
+        contact_elem: ContactElement,
+        cloth_particle_indices: np.ndarray,
+        cloth_faces: np.ndarray,
+        selected_tri_ids: np.ndarray,
+        edge_range: tuple[int, int] | None,
+        subscene_elem: SubsceneElement | None,
+    ) -> None:
+        """Build one UIPC cloth geometry."""
+        if cloth_particle_indices.size == 0 or cloth_faces.size == 0:
             return
 
-        cloth_faces = np.array(cloth_tris, dtype=np.int32)
-
+        model = self._model
         # Extract particle positions (already guarded by None check above)
         assert model.particle_q is not None
         particle_q_np = model.particle_q.numpy()  # (particle_count, 3)
@@ -156,28 +225,28 @@ class ClothBuilder:
             subscene_elem.apply_to(sc)
         label_surface(sc)
 
-        # Determine material parameters from Newton model
-        youngs_modulus = self._get_youngs_modulus(model)
-        poisson_ratio = self._default_poisson_ratio
+        mesh_partition(sc, 16)
+
         thickness_values = self._get_thickness_values(model, cloth_particle_indices)
         thickness = float(np.mean(thickness_values)) if thickness_values is not None else self._default_thickness
-        bending_stiffness = self._get_bending_stiffness(model)
 
         # Compute mass density from particle masses and mesh area
-        mass_density = self._estimate_mass_density(model, cloth_particle_indices, thickness)
+        mass_density = self._estimate_mass_density(model, cloth_particle_indices, selected_tri_ids, thickness)
 
-        moduli = ElasticModuli2D.youngs_poisson(youngs_modulus, poisson_ratio)
+        moduli = ElasticModuli2D.youngs_poisson(1000.0, self._default_poisson_ratio)
         if self._cloth_model == self.CLOTH_MODEL_NEO_HOOKEAN:
             membrane = NeoHookeanShell()
         else:
             membrane = StrainLimitingBaraffWitkinShell()
         membrane.apply_to(sc, moduli, mass_density=mass_density, thickness=thickness)
+        self._write_tri_elastic_moduli(sc, model, selected_tri_ids)
         if thickness_values is not None:
             self._write_vertex_thickness(sc, thickness_values, thickness)
 
         # Apply DiscreteShellBending constitution
         dsb = DiscreteShellBending()
-        dsb.apply_to(sc, bending_stiffness)
+        dsb.apply_to(sc, self._default_bending_stiffness)
+        self._write_edge_bending_stiffness(sc, model, cloth_particle_indices, edge_range)
 
         # Add dormant soft-position attributes.  Vertices remain unconstrained
         # until SolverUIPC.set_cloth_soft_position_constraints() toggles
@@ -187,7 +256,7 @@ class ClothBuilder:
             spc.apply_to(sc, self._soft_position_strength_ratio)
 
         # Create scene object
-        obj = self._scene.objects().create("cloth_0")
+        obj = self._scene.objects().create(f"cloth_{len(self._mapping.cloth_geo_slots)}")
         geo_slot, rest_geo_slot = obj.geometries().create(sc)
 
         # Store mapping for state sync
@@ -195,30 +264,64 @@ class ClothBuilder:
         self._mapping.cloth_rest_geo_slots.append(rest_geo_slot)
         self._mapping.cloth_particle_indices.append(cloth_particle_indices)
 
-    def _get_youngs_modulus(self, model: Model) -> float:
-        """Extract Young's modulus from Newton triangle material parameters.
+    def _write_tri_elastic_moduli(self, sc: Any, model: Model, selected_tri_ids: np.ndarray) -> None:
+        """Copy authored per-triangle membrane stiffness onto UIPC triangle attributes."""
+        if model.tri_materials is None or selected_tri_ids.size == 0:
+            return
 
-        Uses ``tri_ke`` (elastic stiffness) as the Young's modulus proxy.
-        """
-        if model.tri_count > 0 and model.tri_materials is not None:
-            tri_materials_np = model.tri_materials.numpy()
-            # tri_materials layout: (tri_count, 5) -> [ke, ka, kd, drag, lift]
-            avg_ke = float(np.mean(tri_materials_np[:, 0]))
-            if avg_ke > 0:
-                return avg_ke
-        return 1000.0  # Default: 1 kPa
+        tri_materials_np = model.tri_materials.numpy()[selected_tri_ids]  # ty:ignore[unresolved-attribute]  # pyright: ignore[reportAttributeAccessIssue]
+        mu_attr = sc.triangles().find("mu")
+        lambda_attr = sc.triangles().find("lambda")
+        if mu_attr is None or lambda_attr is None:
+            raise RuntimeError("Cloth membrane apply_to() did not create triangle mu/lambda attributes.")
 
-    def _get_bending_stiffness(self, model: Model) -> float:
-        """Extract bending stiffness from Newton edge parameters."""
-        if model.edge_count > 0 and model.edge_bending_properties is not None:
-            edge_props_np = model.edge_bending_properties.numpy()
-            # edge_bending_properties layout: (edge_count, 2) -> [stiffness, damping]
-            avg_ke = float(np.mean(edge_props_np[:, 0]))
-            if avg_ke > 0:
-                return avg_ke
-        return self._default_bending_stiffness
+        mu_view = view(mu_attr)
+        lambda_view = view(lambda_attr)
+        mu_view[:] = np.asarray(tri_materials_np[:, 0], dtype=mu_view.dtype)
+        lambda_view[:] = np.asarray(tri_materials_np[:, 1], dtype=lambda_view.dtype)
 
-    def _estimate_mass_density(self, model: Model, particle_indices: np.ndarray, thickness: float) -> float:
+    def _write_edge_bending_stiffness(
+        self,
+        sc: Any,
+        model: Model,
+        particle_indices: np.ndarray,
+        edge_range: tuple[int, int] | None,
+    ) -> None:
+        """Copy authored per-bending-edge stiffness onto UIPC edge attributes."""
+        if model.edge_count == 0 or model.edge_indices is None or model.edge_bending_properties is None:
+            return
+
+        bending_attr = sc.edges().find("bending_stiffness")
+        if bending_attr is None:
+            raise RuntimeError("DiscreteShellBending.apply_to() did not create edge bending_stiffness attributes.")
+
+        global_to_local = {int(global_idx): local_idx for local_idx, global_idx in enumerate(particle_indices)}
+        uipc_edges = np.asarray(view(sc.edges().topo()), dtype=np.int32).reshape(-1, 2)
+        local_edge_to_index = {tuple(sorted((int(edge[0]), int(edge[1])))): idx for idx, edge in enumerate(uipc_edges)}
+
+        edge_indices_np = model.edge_indices.numpy().reshape(-1, 4)
+        edge_props_np = model.edge_bending_properties.numpy()  # ty:ignore[unresolved-attribute]  # pyright: ignore[reportAttributeAccessIssue]
+        if edge_range is None:
+            edge_ids = range(edge_indices_np.shape[0])
+        else:
+            estart, eend = edge_range
+            edge_ids = range(estart, eend)
+
+        bending_view = view(bending_attr)
+        for edge_id in edge_ids:
+            _, _, global_k, global_l = edge_indices_np[edge_id]
+            local_k = global_to_local.get(int(global_k))
+            local_l = global_to_local.get(int(global_l))
+            if local_k is None or local_l is None:
+                continue
+            local_edge_idx = local_edge_to_index.get(tuple(sorted((local_k, local_l))))
+            if local_edge_idx is None:
+                continue
+            bending_view[local_edge_idx] = edge_props_np[edge_id, 0]
+
+    def _estimate_mass_density(
+        self, model: Model, particle_indices: np.ndarray, selected_tri_ids: np.ndarray, thickness: float
+    ) -> float:
         """Estimate surface mass density [kg/m^2] from particle masses and areas.
 
         Falls back to a default of 100 kg/m^3 volumetric density if estimation fails.
@@ -226,13 +329,22 @@ class ClothBuilder:
         if model.particle_mass is not None:
             particle_mass_np = model.particle_mass.numpy()
             total_mass = float(np.sum(particle_mass_np[particle_indices]))
-            if total_mass > 0 and model.tri_count > 0 and model.tri_areas is not None:
-                total_area = float(np.sum(model.tri_areas.numpy()))
+            if total_mass > 0 and selected_tri_ids.size > 0 and model.tri_areas is not None:
+                total_area = float(np.sum(model.tri_areas.numpy()[selected_tri_ids]))
                 if total_area > 0:
                     # Surface density = total_mass / total_area
                     # Volume density = surface_density / thickness
                     return total_mass / total_area / thickness
         return 100.0  # Default: 100 kg/m^3
+
+    @staticmethod
+    def _range_in_particle_range(entity_range: tuple[int, int], particle_range: tuple[int, int] | None) -> bool:
+        """Return whether an entity range belongs to the requested particle slice."""
+        if particle_range is None:
+            return True
+        start, end = entity_range
+        pstart, pend = particle_range
+        return pstart <= start and end <= pend
 
     def _get_thickness_values(self, model: Model, particle_indices: np.ndarray) -> np.ndarray | None:
         """Return per-cloth-particle UIPC shell thickness values [m], if provided.

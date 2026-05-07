@@ -48,6 +48,7 @@ __all__ += [
 # ==================================================================================
 from ._src.sim import (  # noqa: E402
     BodyFlags,
+    ClothRange,
     CollisionPipeline,
     Contacts,
     Control,
@@ -56,6 +57,7 @@ from ._src.sim import (  # noqa: E402
     JointType,
     Model,
     ModelBuilder,
+    SoftBodyRange,
     State,
     eval_fk,
     eval_ik,
@@ -65,6 +67,7 @@ from ._src.sim import (  # noqa: E402
 
 __all__ += [
     "BodyFlags",
+    "ClothRange",
     "CollisionPipeline",
     "Contacts",
     "Control",
@@ -73,6 +76,7 @@ __all__ += [
     "JointType",
     "Model",
     "ModelBuilder",
+    "SoftBodyRange",
     "State",
     "eval_fk",
     "eval_ik",

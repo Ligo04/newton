@@ -318,7 +318,114 @@ def _assert_tet_graph_coloring(test, tet_indices: np.ndarray, colors: np.ndarray
 
 
 class TestSoftBody(unittest.TestCase):
-    pass
+    def test_soft_grid_returns_and_finalizes_entity_ranges(self):
+        builder = ModelBuilder()
+
+        soft_range = builder.add_soft_grid(
+            pos=wp.vec3(0.0, 0.0, 0.0),
+            rot=wp.quat_identity(),
+            vel=wp.vec3(0.0, 0.0, 0.0),
+            dim_x=1,
+            dim_y=1,
+            dim_z=1,
+            cell_x=1.0,
+            cell_y=1.0,
+            cell_z=1.0,
+            density=1000.0,
+            k_mu=1.0e5,
+            k_lambda=1.0e5,
+            k_damp=1.0e-3,
+            label="soft_grid",
+        )
+
+        self.assertEqual(soft_range.label, "soft_grid")
+        self.assertEqual(soft_range.particle_range, (0, builder.particle_count))
+        self.assertEqual(soft_range.tet_range, (0, builder.tet_count))
+        self.assertEqual(soft_range.tri_range, (0, builder.tri_count))
+        self.assertEqual(soft_range.edge_range, (0, builder.edge_count))
+        self.assertEqual(builder.soft_body_ranges, [soft_range])
+
+        model = builder.finalize()
+        self.assertEqual(model.soft_body_ranges, [soft_range])
+
+    def test_soft_mesh_returns_entity_ranges(self):
+        builder = ModelBuilder()
+
+        soft_range = builder.add_soft_mesh(
+            pos=wp.vec3(0.0, 0.0, 0.0),
+            rot=wp.quat_identity(),
+            scale=1.0,
+            vel=wp.vec3(0.0, 0.0, 0.0),
+            vertices=[
+                (0.0, 0.0, 0.0),
+                (1.0, 0.0, 0.0),
+                (0.0, 1.0, 0.0),
+                (0.0, 0.0, 1.0),
+            ],
+            indices=[0, 1, 2, 3],
+            density=1000.0,
+            k_mu=1.0e5,
+            k_lambda=1.0e5,
+            k_damp=1.0e-3,
+            label="soft_mesh",
+        )
+
+        self.assertEqual(soft_range.label, "soft_mesh")
+        self.assertEqual(soft_range.particle_range, (0, builder.particle_count))
+        self.assertEqual(soft_range.tet_range, (0, builder.tet_count))
+        self.assertEqual(soft_range.tri_range, (0, builder.tri_count))
+        self.assertEqual(soft_range.edge_range, (0, builder.edge_count))
+        self.assertEqual(builder.soft_body_ranges, [soft_range])
+
+    def test_add_builder_offsets_soft_body_ranges(self):
+        source = ModelBuilder()
+        source_range = source.add_soft_grid(
+            pos=wp.vec3(0.0, 0.0, 0.0),
+            rot=wp.quat_identity(),
+            vel=wp.vec3(0.0, 0.0, 0.0),
+            dim_x=1,
+            dim_y=1,
+            dim_z=1,
+            cell_x=1.0,
+            cell_y=1.0,
+            cell_z=1.0,
+            density=1000.0,
+            k_mu=1.0e5,
+            k_lambda=1.0e5,
+            k_damp=1.0e-3,
+            label="source",
+        )
+
+        builder = ModelBuilder()
+        prefix_range = builder.add_soft_grid(
+            pos=wp.vec3(0.0, 2.0, 0.0),
+            rot=wp.quat_identity(),
+            vel=wp.vec3(0.0, 0.0, 0.0),
+            dim_x=1,
+            dim_y=1,
+            dim_z=1,
+            cell_x=1.0,
+            cell_y=1.0,
+            cell_z=1.0,
+            density=1000.0,
+            k_mu=1.0e5,
+            k_lambda=1.0e5,
+            k_damp=1.0e-3,
+            label="prefix",
+        )
+        builder.add_builder(source, label_prefix="copy")
+
+        self.assertEqual(len(builder.soft_body_ranges), 2)
+        merged_range = builder.soft_body_ranges[1]
+        self.assertEqual(merged_range.label, f"copy/{source_range.label}")
+        self.assertEqual(merged_range.particle_start, prefix_range.particle_end)
+        self.assertEqual(merged_range.tet_start, prefix_range.tet_end)
+        self.assertEqual(merged_range.tri_start, prefix_range.tri_end)
+        self.assertEqual(merged_range.edge_start, prefix_range.edge_end)
+        self.assertEqual(merged_range.particle_end, prefix_range.particle_end + source_range.particle_end)
+        self.assertEqual(merged_range.tet_end, prefix_range.tet_end + source_range.tet_end)
+        self.assertEqual(merged_range.tri_end, prefix_range.tri_end + source_range.tri_end)
+        self.assertEqual(merged_range.edge_end, prefix_range.edge_end + source_range.edge_end)
 
 
 def test_tet_adjacency_single_tet(test, device):
