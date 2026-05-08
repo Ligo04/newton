@@ -23,6 +23,7 @@ from uipc.core import (
     ContactElement,
     ContactTabular,
     FiniteElementStateAccessorFeature,
+    SanityCheckResult,
     SceneIO,
     SubsceneElement,
 )
@@ -46,6 +47,8 @@ from .converter import (
     _read_from_backend_kernel,
     _spatial_to_vel_mat44_kernel,
     _transform_to_mat44_kernel,
+    _write_fem_particle_positions_to_backend_kernel,
+    _write_fem_particles_to_backend_kernel,
     populate_backend_offsets,
 )
 from .deformable_body import DeformableBodyBuilder
@@ -964,7 +967,7 @@ class SolverUIPC(SolverBase):
 
         self._fem_accessor: FiniteElementStateAccessorFeature = self.world.features().find(
             FiniteElementStateAccessorFeature
-        )
+        )  # ty:ignore[invalid-assignment]
         self._fem_position_buf = None
         self._fem_velocity_buf = None
         self._fem_backend_offsets_wp = None
@@ -1237,8 +1240,8 @@ class SolverUIPC(SolverBase):
 
         # Supported flags: dispatch each to its dedicated handler.
         # JOINT_PROPERTIES and BODY_PROPERTIES cooperate via
-        # ``_state_dirty`` so only a single _push_body_state_to_uipc()
-        # runs even when both flags are set together.
+        # ``_state_dirty`` so only a single state push to UIPC runs even
+        # when both flags are set together.
         self._state_dirty = False
 
         if flags & SolverNotifyFlags.JOINT_PROPERTIES:
@@ -1249,7 +1252,7 @@ class SolverUIPC(SolverBase):
             self._notify_model_properties()
 
         if self._state_dirty:
-            self._sync_body_state_to_uipc()
+            self._sync_state_to_uipc()
         self._state_dirty = False
 
     # ------------------------------------------------------------------
@@ -1262,7 +1265,7 @@ class SolverUIPC(SolverBase):
         Recomputes forward kinematics with :func:`newton.eval_fk` so that
         ``model.body_q`` / ``model.body_qd`` reflect the updated
         ``model.joint_q`` / ``joint_qd`` / ``joint_X_p`` / ``joint_X_c``,
-        then flags the rigid-body state buffers for a push into UIPC.
+        then flags the state buffers for a push into UIPC.
 
         Uses a single on-device Warp launch over all articulations, which
         refreshes ``body_q`` and ``body_qd`` together from the new joint
@@ -1277,8 +1280,9 @@ class SolverUIPC(SolverBase):
     def _notify_body_properties(self) -> None:
         """Handle :attr:`~newton.SolverNotifyFlags.BODY_PROPERTIES`.
 
-        Flags the rigid-body state buffers for a push into UIPC so that
-        ``model.body_q`` / ``model.body_qd`` are mirrored by the backend.
+        Flags Newton-owned state buffers for a push into UIPC so that
+        ``model.body_q`` / ``model.body_qd`` and FEM particle state are
+        mirrored by the backend.
         """
         self._state_dirty = True
 
@@ -1307,7 +1311,14 @@ class SolverUIPC(SolverBase):
             [float(gravity_np[2])],
         ]
 
-    def _sync_body_state_to_uipc(self) -> None:
+    def _sync_state_to_uipc(self) -> None:
+        """Push Newton-owned body and FEM particle state into UIPC."""
+        self._sync_body_state_to_uipc(check_sanity=False)
+        self._sync_particle_state_to_uipc(check_sanity=False)
+        self.world.retrieve()
+        self._raise_if_sanity_check_failed()
+
+    def _sync_body_state_to_uipc(self, *, check_sanity: bool = True) -> None:
         """Push ``model.body_q`` / ``model.body_qd`` into the UIPC backend.
 
         Uses Warp kernels to build the 4x4 transform / velocity matrices
@@ -1408,12 +1419,92 @@ class SolverUIPC(SolverBase):
 
         # Single push into UIPC — triggers one `update_dof_attributes`.
         self._abd_accessor.copy_from(state_geo)
-        self.world.retrieve()
-        if not self.world.sanity_checker().check():
-            warnings.warn(
-                "SolverUIPC: sanity_checker().check() returned False after pushing body state into UIPC.",
-                stacklevel=2,
+        if check_sanity:
+            self.world.retrieve()
+            self._raise_if_sanity_check_failed()
+
+    def _sync_particle_state_to_uipc(self, *, check_sanity: bool = True) -> None:
+        """Push Newton FEM particle state into the UIPC backend."""
+        model = self.model
+        if (
+            model.particle_q is None
+            or self._fem_accessor is None
+            or self._fem_mapped_vertex_count == 0
+            or self._fem_backend_vertex_count == 0
+            or self._fem_backend_offsets_wp is None
+            or self._fem_particle_indices_wp is None
+            or self._fem_position_buf is None
+        ):
+            return
+
+        state_geo = getattr(self, "_master_fem_state_geo", None)
+        if state_geo is None:
+            state_geo = self._fem_accessor.create_geometry()
+            state_geo.vertices().create("position", np.zeros((3, 1), dtype=np.float64))
+            if self._fem_velocity_buf is not None:
+                state_geo.vertices().create("velocity", np.zeros((3, 1), dtype=np.float64))
+            self._master_fem_state_geo = state_geo
+
+        # Seed the master geo from UIPC so unmapped FEM vertices, if any,
+        # round-trip unchanged, then overwrite Newton-owned vertices.
+        self._fem_accessor.copy_to(state_geo)
+
+        position_attr = state_geo.vertices().find("position")
+        assert position_attr is not None
+        position_view = view(position_attr)
+
+        if model.particle_qd is not None and self._fem_velocity_buf is not None:
+            velocity_attr = state_geo.vertices().find("velocity")
+            assert velocity_attr is not None
+            velocity_view = view(velocity_attr)
+            wp.launch(
+                _write_fem_particles_to_backend_kernel,
+                dim=self._fem_mapped_vertex_count,
+                inputs=[
+                    self._fem_backend_offsets_wp,
+                    self._fem_particle_indices_wp,
+                    model.particle_q,
+                    model.particle_qd,
+                    self._fem_position_buf.warp(),
+                    self._fem_velocity_buf.warp(),
+                ],
+                device=model.device,
             )
+            positions_host = self._fem_position_buf.warp().numpy()
+            velocities_host = self._fem_velocity_buf.warp().numpy()
+            position_view[:, :, 0] = positions_host
+            velocity_view[:, :, 0] = velocities_host
+        else:
+            wp.launch(
+                _write_fem_particle_positions_to_backend_kernel,
+                dim=self._fem_mapped_vertex_count,
+                inputs=[
+                    self._fem_backend_offsets_wp,
+                    self._fem_particle_indices_wp,
+                    model.particle_q,
+                    self._fem_position_buf.warp(),
+                ],
+                device=model.device,
+            )
+            positions_host = self._fem_position_buf.warp().numpy()
+            position_view[:, :, 0] = positions_host
+
+        self._fem_accessor.copy_from(state_geo)
+        if check_sanity:
+            self.world.retrieve()
+            self._raise_if_sanity_check_failed()
+
+    def _raise_if_sanity_check_failed(self) -> None:
+        """Raise when UIPC reports an invalid world after a state push."""
+        checker = self.world.sanity_checker()
+        result = checker.check()
+        if result == SanityCheckResult.Success:
+            return
+
+        report = checker.report()
+        raise RuntimeError(
+            f"SolverUIPC: UIPC sanity check reported {result.name} after pushing state into UIPC: {report}"
+        )
 
     @override
     def update_contacts(self, contacts: Contacts) -> None:  # ty:ignore[invalid-method-override]  # pyright: ignore[reportIncompatibleMethodOverride]

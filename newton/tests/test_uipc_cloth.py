@@ -12,15 +12,18 @@ import numpy as np
 import warp as wp
 
 import newton
-from newton._src.solvers.uipc.cloth import ClothBuilder
 
 _HAS_UIPC = importlib.util.find_spec("uipc") is not None
 
 if _HAS_UIPC:
     from uipc import view
 
+    import newton._src.solvers.uipc.cloth as cloth_module
+    from newton._src.solvers.uipc.cloth import ClothBuilder
+
 
 class TestUIPCClothConfiguration(unittest.TestCase):
+    @unittest.skipUnless(_HAS_UIPC, "uipc is not installed")
     def test_cloth_model_aliases(self):
         self.assertEqual(
             ClothBuilder._normalize_cloth_model("strain_limiting"),
@@ -36,6 +39,37 @@ class TestUIPCClothConfiguration(unittest.TestCase):
         )
         with self.assertRaises(ValueError):
             ClothBuilder._normalize_cloth_model("unknown")
+
+    @unittest.skipUnless(_HAS_UIPC, "uipc is not installed")
+    def test_vertex_thickness_scales_volume_from_applied_default(self):
+        class _Vertices:
+            def __init__(self):
+                self.attrs = {
+                    "thickness": np.zeros(3, dtype=np.float64),
+                    "volume": np.full(3, 2.0, dtype=np.float64),
+                }
+
+            def find(self, name):
+                return self.attrs.get(name)
+
+        class _Geometry:
+            def __init__(self):
+                self._vertices = _Vertices()
+
+            def vertices(self):
+                return self._vertices
+
+        geo = _Geometry()
+        thickness_values = np.array([0.0005, 0.001, 0.002], dtype=np.float64)
+        original_view = cloth_module.view
+        try:
+            cloth_module.view = lambda attr: attr
+            ClothBuilder._write_vertex_thickness(geo, thickness_values, applied_thickness=0.001)
+        finally:
+            cloth_module.view = original_view
+
+        np.testing.assert_allclose(geo.vertices().find("thickness"), thickness_values)
+        np.testing.assert_allclose(geo.vertices().find("volume"), np.array([1.0, 2.0, 4.0]))
 
 
 @unittest.skipUnless(_HAS_UIPC, "uipc is not installed")

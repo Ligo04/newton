@@ -4,6 +4,7 @@
 
 ### Added
 
+- Add UIPC cloth poker-cards demo with stacked card patches, UIPC cloth self-contact, and a dynamic soft-transform sphere knock-off.
 - Add linear HDR color output support to `SensorTiledCamera` via `hdr_color_image`.
 - Add composable actuator subsystem with pluggable `Controller` (`ControllerPD`, `ControllerPID`, `ControllerNeuralMLP`, `ControllerNeuralLSTM`), `Clamping` (`ClampingMaxEffort`, `ClampingDCMotor`, `ClampingPositionBased`), and `Delay` components; supports per-DOF delays, CUDA graph capture, and masked environment reset
 - Add UIPC softbody hanging, softbody Franka, and deformable-body demos using Stable Neo-Hookean deformables
@@ -87,6 +88,7 @@
 ### Fixed
 
 - Fix `remesh_convex_hull` raising `QhullError` on degenerate (coincident, collinear, or coplanar) point clouds; it now returns a zero-volume fallback mesh with a `UserWarning`, raises `ValueError` on empty input, and retries Qhull with `QJ` joggle as a last resort on the 3D path
+- Fix `uipc_cloth_franka` to drive the Franka keyframe sequence and convert `clamp_close_activation_val` / `clamp_open_activation_val` into UIPC gripper finger targets.
 - Fix UIPC deformable-body construction for replicated worlds by filtering tetrahedra to each particle slice
 - Fix UIPC deformable-body contact assignment to use the actor contact element
 - Fix `ViewerGL` Step button remaining clickable while the simulation is running; the button is now greyed out when not paused

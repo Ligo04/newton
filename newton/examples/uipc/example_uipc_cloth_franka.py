@@ -6,9 +6,9 @@
 #
 # Franka-guided cloth manipulation with SolverUIPC.  Cloth defaults to
 # StrainLimitingBaraffWitkinShell + DiscreteShellBending; pass
-# ``--cloth-model neo_hookean`` to use NeoHookeanShell.  The grasped cloth
-# patch is controlled through UIPC SoftPositionConstraint targets while the
-# Franka hand follows the same handle with IK-driven position actuators.
+# ``--cloth-model neo_hookean`` to use NeoHookeanShell.  The Franka follows
+# the same end-effector keyframe sequence as ``cloth_franka`` and manipulates
+# the cloth through UIPC contact.
 #
 # Command: python -m newton.examples uipc_cloth_franka
 #
@@ -30,22 +30,20 @@ import newton.utils
 from newton import JointTargetMode
 
 
-def quat_to_vec4(q: wp.quat) -> wp.vec4:
-    return wp.vec4(q[0], q[1], q[2], q[3])
-
-
 @wp.kernel
 def write_joint_targets_kernel(
     ik_solution: wp.array2d[wp.float32],
     joint_targets: wp.array[wp.float32],
-    gripper_value: float,
+    gripper_activation: float,
+    gripper_activation_scale: float,
 ):
     tid = wp.tid()
     if tid == 0:
         for j in range(7):
             joint_targets[j] = ik_solution[0, j]
-        joint_targets[7] = gripper_value
-        joint_targets[8] = gripper_value
+        finger_target = gripper_activation * gripper_activation_scale
+        joint_targets[7] = finger_target
+        joint_targets[8] = finger_target
 
 
 class Example:
@@ -55,15 +53,15 @@ class Example:
         self.sim_time = 0.0
         self.sim_substeps = 1
         self.sim_dt = self.frame_dt
-        self.soft_strength = float(args.soft_strength)
         self.viewer = viewer
+        self.robot_contact_mu = 1.5
 
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
         self._build_franka(builder)
         self._build_table(builder)
         self._build_cloth(builder)
         builder.add_ground_plane()
-
+        # builder.gravity = 0.0
         self.model = builder.finalize()
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
@@ -71,22 +69,26 @@ class Example:
         self.contacts = self.model.contacts()
 
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
-        self._setup_cloth_handle()
         self._setup_ik()
 
         self.solver = newton.solvers.SolverUIPC(
             workspace="/tmp/newton_uipc/cloth_franka",
-            # dump_enable=True,
+            dump_enable=True,
             model=self.model,
             dt=self.sim_dt,
             logger_level=uipc.Logger.Warn,
             cloth_model=args.cloth_model,
-            cloth_soft_position_strength_ratio=self.soft_strength,
+            enable_soft_position_constraint=False,
             auto_sync_inertia=False,
         )
-        self.solver.set_contact(enable=True, d_hat=0.005)
+        self.solver.set_contact(enable=True, d_hat=0.0005)
+        self.solver.configure_scene(
+            {
+                "linear_system": {"precond": {"mas": {"contact_aware": True}}},
+            }
+        )
+        self.solver.configure_contact_tabular(self._configure_contact_tabular)
         self.solver.initialize(self.state_0)
-        self._push_cloth_handle(0.0)
 
         self.joint_targets_flat = wp.zeros_like(self.control.joint_target_pos)
         wp.copy(self.joint_targets_flat, self.model.joint_q)
@@ -108,22 +110,87 @@ class Example:
         )
 
         init_q = [
-            -3.6802115e-03,
-            2.3901723e-02,
-            3.6804110e-03,
-            -2.3683236e00,
-            -1.2918962e-04,
-            2.3922248e00,
-            7.8549200e-01,
+            0.0,
+            0.0,
+            0.0,
+            -1.59695,
+            0.0,
+            2.5307,
+            0.0,
         ]
-        builder.joint_q[:9] = [*init_q, 0.04, 0.04]
+        self.gripper_activation_scale = 0.04
+        clamp_close_activation_val = 0.1
+        clamp_open_activation_val = 0.8
+        builder.joint_q[:9] = [
+            *init_q,
+            clamp_open_activation_val * self.gripper_activation_scale,
+            clamp_open_activation_val * self.gripper_activation_scale,
+        ]
 
         for d in range(9):
             builder.joint_target_pos[d] = builder.joint_q[d]
-            builder.joint_target_ke[d] = 650.0
-            builder.joint_target_kd[d] = 100.0
             builder.joint_target_mode[d] = int(JointTargetMode.POSITION)
-            builder.joint_armature[d] = 1e-2 if d < 7 else 5e-2
+
+        self.robot_key_poses = np.array(
+            [
+                # translation_duration, gripper transform (position [m], quaternion), gripper activation
+                # descend to working height before approaching the cloth
+                [4, 0.31, -0.60, 0.40, 0.8536, -0.3536, 0.3536, -0.1464, clamp_open_activation_val],
+                # top left
+                [2, 0.31, -0.60, 0.20, 0.8536, -0.3536, 0.3536, -0.1464, clamp_open_activation_val],
+                [2, 0.31, -0.60, 0.20, 0.8536, -0.3536, 0.3536, -0.1464, clamp_close_activation_val],
+                [2, 0.26, -0.60, 0.26, 0.8536, -0.3536, 0.3536, -0.1464, clamp_close_activation_val],
+                [2, 0.12, -0.60, 0.31, 0.8536, -0.3536, 0.3536, -0.1464, clamp_close_activation_val],
+                [3, -0.06, -0.60, 0.31, 0.8536, -0.3536, 0.3536, -0.1464, clamp_close_activation_val],
+                [1, -0.06, -0.60, 0.31, 0.8536, -0.3536, 0.3536, -0.1464, clamp_open_activation_val],
+                # bottom left
+                [2, 0.15, -0.33, 0.31, 0.8536, -0.3536, 0.3536, -0.1464, clamp_open_activation_val],
+                [3, 0.15, -0.33, 0.21, 0.8536, -0.3536, 0.3536, -0.1464, clamp_open_activation_val],
+                [3, 0.15, -0.33, 0.21, 0.8536, -0.3536, 0.3536, -0.1464, clamp_close_activation_val],
+                [2, 0.15, -0.33, 0.28, 0.8536, -0.3536, 0.3536, -0.1464, clamp_close_activation_val],
+                [3, -0.02, -0.33, 0.28, 0.8536, -0.3536, 0.3536, -0.1464, clamp_close_activation_val],
+                [1, -0.02, -0.33, 0.28, 0.8536, -0.3536, 0.3536, -0.1464, clamp_open_activation_val],
+                # top right
+                [2, -0.28, -0.60, 0.28, 0.9239, -0.3827, 0.0, 0.0, clamp_open_activation_val],
+                [2, -0.28, -0.60, 0.20, 0.9239, -0.3827, 0.0, 0.0, clamp_open_activation_val],
+                [2, -0.28, -0.60, 0.20, 0.9239, -0.3827, 0.0, 0.0, clamp_close_activation_val],
+                [2, -0.18, -0.60, 0.31, 0.9239, -0.3827, 0.0, 0.0, clamp_close_activation_val],
+                [3, 0.05, -0.60, 0.31, 0.9239, -0.3827, 0.0, 0.0, clamp_close_activation_val],
+                [1, 0.05, -0.60, 0.31, 0.9239, -0.3827, 0.0, 0.0, clamp_open_activation_val],
+                # bottom right
+                [3, -0.18, -0.30, 0.205, 0.9239, -0.3827, 0.0, 0.0, clamp_open_activation_val],
+                [3, -0.18, -0.30, 0.205, 0.9239, -0.3827, 0.0, 0.0, clamp_close_activation_val],
+                [2, -0.03, -0.30, 0.31, 0.9239, -0.3827, 0.0, 0.0, clamp_close_activation_val],
+                [3, -0.03, -0.30, 0.31, 0.9239, -0.3827, 0.0, 0.0, clamp_close_activation_val],
+                [2, -0.03, -0.30, 0.31, 0.9239, -0.3827, 0.0, 0.0, clamp_open_activation_val],
+                # bottom
+                [2, 0.0, -0.20, 0.30, 0.9239, -0.3827, 0.0, 0.0, clamp_open_activation_val],
+                [2, 0.0, -0.20, 0.195, 0.9239, -0.3827, 0.0, 0.0, clamp_open_activation_val],
+                [2, 0.0, -0.20, 0.195, 0.9239, -0.3827, 0.0, 0.0, clamp_close_activation_val],
+                [2, 0.0, -0.20, 0.35, 0.9239, -0.3827, 0.0, 0.0, clamp_close_activation_val],
+                [1, 0.0, -0.30, 0.35, 0.9239, -0.3827, 0.0, 0.0, clamp_close_activation_val],
+                [1.5, 0.0, -0.30, 0.35, 0.9239, -0.3827, 0.0, 0.0, clamp_close_activation_val],
+                [1.5, 0.0, -0.40, 0.35, 0.9239, -0.3827, 0.0, 0.0, clamp_close_activation_val],
+                [1.5, 0.0, -0.40, 0.35, 0.9239, -0.3827, 0.0, 0.0, clamp_open_activation_val],
+                [2, -0.28, -0.60, 0.28, 0.9239, -0.3827, 0.0, 0.0, clamp_open_activation_val],
+            ],
+            dtype=np.float32,
+        )
+        self.targets = self.robot_key_poses[:, 1:]
+        self.robot_key_poses_time = np.cumsum(self.robot_key_poses[:, 0])
+
+    def _configure_contact_tabular(
+        self,
+        contact_tabular,
+        _world_index,
+        ground_elem,
+        env_elem,
+        robo_elem,
+        actor_elem,
+    ) -> None:
+        contact_tabular.insert(env_elem, robo_elem, self.robot_contact_mu, 1.0e9, True)
+        contact_tabular.insert(ground_elem, robo_elem, self.robot_contact_mu, 1.0e9, True)
+        contact_tabular.insert(robo_elem, actor_elem, self.robot_contact_mu, 1.0e9, True)
 
     def _build_table(self, builder: newton.ModelBuilder) -> None:
         table_body = builder.add_link(
@@ -135,7 +202,6 @@ class Example:
         builder.add_shape_box(table_body, hx=0.45, hy=0.45, hz=0.1, cfg=cfg, label="table")
 
     def _build_cloth(self, builder: newton.ModelBuilder) -> None:
-        self.cloth_particle_start = builder.particle_count
         usd_stage = Usd.Stage.Open(newton.examples.get_asset("unisex_shirt.usd"))
         shirt_mesh = newton.usd.get_mesh(usd_stage.GetPrimAtPath("/root/shirt"))
         vertices: list[vec3f] = [wp.vec3(v) for v in shirt_mesh.vertices]
@@ -145,7 +211,7 @@ class Example:
                     name="cloth_thick",
                     dtype=wp.float32,
                     frequency=newton.Model.AttributeFrequency.PARTICLE,
-                    default=0.001,
+                    default=0.005,
                 )
             )
         builder.add_cloth_mesh(
@@ -162,39 +228,22 @@ class Example:
             edge_ke=1.0e-2,
             edge_kd=1.0e-4,
             particle_radius=0.004,
-            custom_attributes_particles={"cloth_thick": [1.0e-4] * len(vertices)},
+            custom_attributes_particles={"cloth_thick": [0.0005] * len(vertices)},
         )
-        self.cloth_particle_end = builder.particle_count
         builder.color()
-
-    def _setup_cloth_handle(self) -> None:
-        particle_q = self.state_0.particle_q.numpy()
-        cloth_indices = np.arange(self.cloth_particle_start, self.cloth_particle_end, dtype=np.int32)
-        cloth_q = particle_q[cloth_indices]
-
-        desired = np.array([0.24, -0.60, 0.63], dtype=np.float64)
-        nearest = np.argsort(np.linalg.norm(cloth_q - desired, axis=1))[:32]
-        self.grasp_particle_indices = cloth_indices[nearest]
-        grasp_positions = particle_q[self.grasp_particle_indices].astype(np.float64)
-        self.handle_start = grasp_positions.mean(axis=0)
-        self.handle_offsets = grasp_positions - self.handle_start
 
     def _setup_ik(self) -> None:
         self.ee_index = next(i for i, lbl in enumerate(self.model.body_label) if lbl.endswith("/fr3_link7"))
-        body_q_np = self.state_0.body_q.numpy()
-        ee_tf = wp.transform(*body_q_np[self.ee_index])
-        self.ee_rotation = wp.transform_get_rotation(ee_tf)
-        self.ee_lift = np.array([0.0, 0.0, 0.14], dtype=np.float64)
 
         self.pos_obj = ik.IKObjectivePosition(
             link_index=self.ee_index,
-            link_offset=wp.vec3(0.0, 0.0, 0.0),
-            target_positions=wp.array([wp.vec3(*(self.handle_start + self.ee_lift))], dtype=wp.vec3),
+            link_offset=wp.vec3(0.0, 0.0, 0.22),
+            target_positions=wp.array([wp.vec3(*self.targets[0][:3].tolist())], dtype=wp.vec3),
         )
         self.rot_obj = ik.IKObjectiveRotation(
             link_index=self.ee_index,
             link_offset_rotation=wp.quat_identity(dtype=wp.float32),
-            target_rotations=wp.array([quat_to_vec4(self.ee_rotation)], dtype=wp.vec4),
+            target_rotations=wp.array([wp.vec4(*self.targets[0][3:7].tolist())], dtype=wp.vec4),
         )
         self.joint_limit_obj = ik.IKObjectiveJointLimit(
             joint_limit_lower=self.model.joint_limit_lower,
@@ -212,54 +261,40 @@ class Example:
             jacobian_mode=ik.IKJacobianType.ANALYTIC,
         )
         self.ik_iters = 24
-        self.gripper_value = 0.01
 
-    def _handle_center(self, time: float) -> np.ndarray:
-        key_times = np.array([0.0, 1.0, 2.5, 4.0, 5.5], dtype=np.float64)
-        key_positions = np.vstack(
-            (
-                self.handle_start,
-                self.handle_start + np.array([0.0, 0.0, 0.08]),
-                self.handle_start + np.array([-0.12, 0.04, 0.16]),
-                self.handle_start + np.array([-0.22, 0.15, 0.14]),
-                self.handle_start + np.array([-0.22, 0.15, 0.14]),
-            )
-        )
-        if time <= key_times[0]:
-            return key_positions[0]
-        if time >= key_times[-1]:
-            return key_positions[-1]
-        segment = int(np.searchsorted(key_times, time) - 1)
-        alpha = (time - key_times[segment]) / (key_times[segment + 1] - key_times[segment])
+    def _target_at_time(self, time: float) -> np.ndarray:
+        if time >= self.robot_key_poses_time[-1]:
+            return self.targets[-1]
+
+        current_interval = int(np.searchsorted(self.robot_key_poses_time, time))
+        t_start = self.robot_key_poses_time[current_interval - 1] if current_interval > 0 else 0.0
+        t_end = self.robot_key_poses_time[current_interval]
+        target_prev = self.targets[current_interval - 1] if current_interval > 0 else self.targets[current_interval]
+        target_cur = self.targets[current_interval]
+        alpha = float(np.clip((time - t_start) / (t_end - t_start), 0.0, 1.0))
         alpha = alpha * alpha * (3.0 - 2.0 * alpha)
-        return (1.0 - alpha) * key_positions[segment] + alpha * key_positions[segment + 1]
-
-    def _push_cloth_handle(self, time: float) -> None:
-        center = self._handle_center(time)
-        self.solver.set_cloth_soft_position_constraints(
-            self.grasp_particle_indices,
-            center + self.handle_offsets,
-            strength_ratio=self.soft_strength,
-        )
+        return (1.0 - alpha) * target_prev + alpha * target_cur
 
     def _solve_ik_and_push_control(self, time: float) -> None:
-        target_pos = self._handle_center(time) + self.ee_lift
-        self.pos_obj.set_target_position(0, wp.vec3(*target_pos))
-        self.rot_obj.set_target_rotation(0, quat_to_vec4(self.ee_rotation))
+        target = self._target_at_time(time)
+        self.pos_obj.set_target_position(0, wp.vec3(*target[:3].tolist()))
+        self.rot_obj.set_target_rotation(0, wp.vec4(*target[3:7].tolist()))
         self.ik_solver.step(self.joint_q_ik, self.joint_q_ik, iterations=self.ik_iters)
         wp.launch(
             write_joint_targets_kernel,
             dim=1,
-            inputs=[self.joint_q_ik, self.joint_targets_flat, self.gripper_value],
+            inputs=[
+                self.joint_q_ik,
+                self.joint_targets_flat,
+                float(target[-1]),
+                self.gripper_activation_scale,
+            ],
         )
         wp.copy(self.control.joint_target_pos, self.joint_targets_flat)
 
     def simulate(self):
-        for substep in range(self.sim_substeps):
-            t = self.sim_time + substep * self.sim_dt
+        for _ in range(self.sim_substeps):
             self.state_0.clear_forces()
-            self._push_cloth_handle(t)
-            # self._solve_ik_and_push_control(t)
             self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
             self.state_0, self.state_1 = self.state_1, self.state_0
 
@@ -295,8 +330,6 @@ if __name__ == "__main__":
         choices=("strain_limiting_baraff_witkin", "strain_limiting", "neo_hookean"),
         help="UIPC cloth membrane model.",
     )
-    parser.add_argument("--soft-strength", type=float, default=200.0, help="SoftPositionConstraint strength ratio.")
-    parser.set_defaults(num_frames=360)
 
     viewer, args = newton.examples.init(parser)
     example = Example(viewer, args)

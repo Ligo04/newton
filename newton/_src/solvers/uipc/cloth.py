@@ -228,20 +228,23 @@ class ClothBuilder:
         mesh_partition(sc, 16)
 
         thickness_values = self._get_thickness_values(model, cloth_particle_indices)
-        thickness = float(np.mean(thickness_values)) if thickness_values is not None else self._default_thickness
+        density_thickness = (
+            float(np.mean(thickness_values)) if thickness_values is not None else self._default_thickness
+        )
+        applied_thickness = self._default_thickness
 
         # Compute mass density from particle masses and mesh area
-        mass_density = self._estimate_mass_density(model, cloth_particle_indices, selected_tri_ids, thickness)
+        mass_density = self._estimate_mass_density(model, cloth_particle_indices, selected_tri_ids, density_thickness)
 
         moduli = ElasticModuli2D.youngs_poisson(1000.0, self._default_poisson_ratio)
         if self._cloth_model == self.CLOTH_MODEL_NEO_HOOKEAN:
             membrane = NeoHookeanShell()
         else:
             membrane = StrainLimitingBaraffWitkinShell()
-        membrane.apply_to(sc, moduli, mass_density=mass_density, thickness=thickness)
+        membrane.apply_to(sc, moduli, mass_density=mass_density, thickness=applied_thickness)
         self._write_tri_elastic_moduli(sc, model, selected_tri_ids)
         if thickness_values is not None:
-            self._write_vertex_thickness(sc, thickness_values, thickness)
+            self._write_vertex_thickness(sc, thickness_values, applied_thickness)
 
         # Apply DiscreteShellBending constitution
         dsb = DiscreteShellBending()

@@ -793,7 +793,25 @@ add_example_test(
 
 
 class TestUIPCSoftbodyExamples(unittest.TestCase):
-    pass
+    def test_uipc_cloth_franka_uses_robot_contact_and_activation_values(self):
+        example_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "examples",
+            "uipc",
+            "example_uipc_cloth_franka.py",
+        )
+        with open(example_path) as f:
+            source = f.read()
+
+        self.assertNotIn("_push_cloth_handle", source)
+        self.assertNotIn("set_cloth_soft_position_constraints", source)
+        self.assertNotIn("--soft-strength", source)
+        self.assertIn("enable_soft_position_constraint=False", source)
+        self.assertIn("configure_contact_tabular", source)
+        self.assertIn("_solve_ik_and_push_control", source)
+        self.assertIn("clamp_close_activation_val = 0.1", source)
+        self.assertIn("clamp_open_activation_val = 0.8", source)
+        self.assertIn("gripper_activation_scale", source)
 
 
 if _HAS_UIPC:
@@ -816,6 +834,20 @@ if _HAS_UIPC:
         name="uipc.example_uipc_softbody_franka",
         devices=cuda_test_devices,
         test_options={"num-frames": 10},
+        use_viewer=True,
+    )
+    add_example_test(
+        TestUIPCSoftbodyExamples,
+        name="uipc.example_uipc_cloth_franka",
+        devices=cuda_test_devices,
+        test_options={"num-frames": 1},
+        use_viewer=True,
+    )
+    add_example_test(
+        TestUIPCSoftbodyExamples,
+        name="uipc.example_uipc_cloth_poker_cards",
+        devices=cuda_test_devices,
+        test_options={"num-frames": 5, "num-cards": 4},
         use_viewer=True,
     )
 

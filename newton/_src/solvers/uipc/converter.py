@@ -316,6 +316,42 @@ def _read_from_backend_kernel(
 
 
 @wp.kernel(enable_backward=False)
+def _write_fem_particles_to_backend_kernel(
+    backend_offsets: wp.array[wp.uint32],
+    particle_indices: wp.array[wp.int32],
+    src_particle_q: wp.array[wp.vec3],
+    src_particle_qd: wp.array[wp.vec3],
+    dst_positions: wp.array[wp.vec3d],
+    dst_velocities: wp.array[wp.vec3d],
+):
+    """Scatter Newton particle positions/velocities into UIPC FEM buffers."""
+    tid = wp.tid()
+    backend_idx = backend_offsets[tid]
+    particle_idx = particle_indices[tid]
+
+    q = src_particle_q[particle_idx]
+    qd = src_particle_qd[particle_idx]
+    dst_positions[backend_idx] = wp.vec3d(wp.float64(q[0]), wp.float64(q[1]), wp.float64(q[2]))
+    dst_velocities[backend_idx] = wp.vec3d(wp.float64(qd[0]), wp.float64(qd[1]), wp.float64(qd[2]))
+
+
+@wp.kernel(enable_backward=False)
+def _write_fem_particle_positions_to_backend_kernel(
+    backend_offsets: wp.array[wp.uint32],
+    particle_indices: wp.array[wp.int32],
+    src_particle_q: wp.array[wp.vec3],
+    dst_positions: wp.array[wp.vec3d],
+):
+    """Scatter Newton particle positions into UIPC FEM buffers."""
+    tid = wp.tid()
+    backend_idx = backend_offsets[tid]
+    particle_idx = particle_indices[tid]
+
+    q = src_particle_q[particle_idx]
+    dst_positions[backend_idx] = wp.vec3d(wp.float64(q[0]), wp.float64(q[1]), wp.float64(q[2]))
+
+
+@wp.kernel(enable_backward=False)
 def _read_fem_particles_from_backend_kernel(
     backend_offsets: wp.array[wp.uint32],
     src_positions: wp.array[wp.vec3d],
