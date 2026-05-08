@@ -6,6 +6,7 @@
 
 - Add UIPC cloth poker-cards demo with stacked card patches, UIPC cloth self-contact, and a dynamic soft-transform sphere knock-off.
 - Add linear HDR color output support to `SensorTiledCamera` via `hdr_color_image`.
+- Add `pyuipc>=0.0.24` as a Python 3.11-3.12 runtime dependency and document UIPC solver parameter mappings.
 - Add composable actuator subsystem with pluggable `Controller` (`ControllerPD`, `ControllerPID`, `ControllerNeuralMLP`, `ControllerNeuralLSTM`), `Clamping` (`ClampingMaxEffort`, `ClampingDCMotor`, `ClampingPositionBased`), and `Delay` components; supports per-DOF delays, CUDA graph capture, and masked environment reset
 - Add UIPC softbody hanging, softbody Franka, and deformable-body demos using Stable Neo-Hookean deformables
 - Add heatmap rendering for scalar arrays logged through `ViewerGL.log_array()`

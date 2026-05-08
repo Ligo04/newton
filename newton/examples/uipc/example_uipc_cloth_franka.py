@@ -81,7 +81,7 @@ class Example:
             enable_soft_position_constraint=False,
             auto_sync_inertia=False,
         )
-        self.solver.set_contact(enable=True, d_hat=0.0005)
+        self.solver.set_contact(enable=True, d_hat=0.001)
         self.solver.configure_scene(
             {
                 "linear_system": {"precond": {"mas": {"contact_aware": True}}},
@@ -211,7 +211,7 @@ class Example:
                     name="cloth_thick",
                     dtype=wp.float32,
                     frequency=newton.Model.AttributeFrequency.PARTICLE,
-                    default=0.005,
+                    default=0.001,
                 )
             )
         builder.add_cloth_mesh(
@@ -228,7 +228,7 @@ class Example:
             edge_ke=1.0e-2,
             edge_kd=1.0e-4,
             particle_radius=0.004,
-            custom_attributes_particles={"cloth_thick": [0.0005] * len(vertices)},
+            custom_attributes_particles={"cloth_thick": [0.001 / 2] * len(vertices)},
         )
         builder.color()
 
