@@ -7947,6 +7947,8 @@ class ModelBuilder:
         custom_attributes_edges: dict[str, Any] | None = None,
         custom_attributes_triangles: dict[str, Any] | None = None,
         custom_attributes_springs: dict[str, Any] | None = None,
+        validate_mesh: bool = False,
+        label: str | None = None,
     ) -> None:
         """Helper to create a cloth model from a regular triangle mesh
 
@@ -8401,6 +8403,8 @@ class ModelBuilder:
         edge_ke: float = 0.0,
         edge_kd: float = 0.0,
         particle_radius: float | None = None,
+        validate_mesh: bool = False,
+        label: str | None = None,
     ) -> None:
         """Helper to create a tetrahedral model from an input tetrahedral mesh.
 
