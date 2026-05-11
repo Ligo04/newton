@@ -210,8 +210,8 @@ class SolverUIPC(SolverBase):
                 Defaults to ``"strain_limiting_baraff_witkin"``.  Pass
                 ``"neo_hookean"`` to use ``NeoHookeanShell`` instead.  In
                 both cases ``DiscreteShellBending`` is added for bending.
-            cloth_thickness: UIPC shell thickness [m] applied to Newton cloth
-                triangles.
+            cloth_thickness: Deprecated and ignored. UIPC cloth thickness now
+                comes from ``particle_radius``.
             cloth_soft_position_strength_ratio: Default UIPC
                 ``SoftPositionConstraint`` strength ratio added to cloth
                 vertices.  Vertices are unconstrained until
@@ -236,9 +236,14 @@ class SolverUIPC(SolverBase):
         self._default_mass_density = default_mass_density
         self._dump_enable = dump_enable
         self._cloth_model = cloth_model
-        self._cloth_thickness = cloth_thickness
         self._cloth_soft_position_strength_ratio = cloth_soft_position_strength_ratio
         self._enable_soft_position_constraint = enable_soft_position_constraint
+        if cloth_thickness != 0.001:
+            warnings.warn(
+                "SolverUIPC(cloth_thickness=...) is deprecated and ignored; cloth thickness now follows particle_radius.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
 
         # Scene config: start from UIPC defaults, apply Newton model overrides.
         if scene_config is None:
@@ -842,7 +847,6 @@ class SolverUIPC(SolverBase):
             model,
             scene,
             self.mapping,
-            default_thickness=self._cloth_thickness,
             cloth_model=self._cloth_model,
             enable_soft_position_constraint=self._enable_soft_position_constraint,
             soft_position_strength_ratio=self._cloth_soft_position_strength_ratio,

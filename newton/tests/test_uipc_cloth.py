@@ -100,16 +100,8 @@ class TestUIPCClothSoftPosition(unittest.TestCase):
         self.assertEqual(len(solver.mapping.cloth_geo_slots), 2)
         self.assertEqual(len(solver.mapping.cloth_particle_indices), 2)
 
-    def test_particle_custom_cloth_thick_sets_uipc_thickness(self):
+    def test_particle_radius_sets_uipc_thickness(self):
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z, gravity=0.0)
-        builder.add_custom_attribute(
-            newton.ModelBuilder.CustomAttribute(
-                name="cloth_thick",
-                dtype=wp.float32,
-                frequency=newton.Model.AttributeFrequency.PARTICLE,
-                default=0.001,
-            )
-        )
         builder.add_cloth_grid(
             pos=wp.vec3(0.0, 0.0, 0.0),
             rot=wp.quat_identity(),
@@ -122,7 +114,7 @@ class TestUIPCClothSoftPosition(unittest.TestCase):
             tri_ke=1.0e3,
             tri_ka=1.0e3,
             tri_kd=0.0,
-            custom_attributes_particles={"cloth_thick": 2.5e-4},
+            particle_radius=2.5e-4,
         )
         model = builder.finalize()
         solver = newton.solvers.SolverUIPC(model, backend="none", dt=1.0 / 60.0)
@@ -280,7 +272,7 @@ class TestUIPCClothSoftPosition(unittest.TestCase):
         self.assertEqual(int(constrained[0]), 1)
         np.testing.assert_allclose(aim[0].reshape(3), target[0])
         self.assertAlmostEqual(float(strength[0]), 42.0)
-        np.testing.assert_allclose(thickness, np.full(model.particle_count, 0.001), rtol=1.0e-6)
+        np.testing.assert_allclose(thickness, np.full(model.particle_count, 0.1), rtol=1.0e-6)
 
         solver.clear_cloth_soft_position_constraints([0])
         self.assertEqual(int(constrained[0]), 0)

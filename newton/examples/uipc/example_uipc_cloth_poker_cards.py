@@ -61,15 +61,6 @@ class Example:
 
         # Build the model (using meters)
         builder = newton.ModelBuilder(gravity=-9.8)  # m/s²
-        if not builder.has_custom_attribute("cloth_thick"):
-            builder.add_custom_attribute(
-                newton.ModelBuilder.CustomAttribute(
-                    name="cloth_thick",
-                    dtype=wp.float32,
-                    frequency=newton.Model.AttributeFrequency.PARTICLE,
-                    default=0.001,
-                )
-            )
 
         # Add a static cube for cards to stack on
         body_cube = builder.add_body(
@@ -143,7 +134,7 @@ class Example:
         edge_kd = 1.0e-2  # Bending damping
 
         # Particle radius for collision (in meters)
-        particle_radius = 0.0008
+        particle_radius = 0.0004
 
         # Add cards
         for i in range(self.num_cards):
@@ -181,7 +172,6 @@ class Example:
                 edge_ke=edge_ke,
                 edge_kd=edge_kd,
                 particle_radius=particle_radius,
-                custom_attributes_particles={"cloth_thick": [particle_radius / 2.0] * num_particles_per_card},
             )
 
         # Add ground plane

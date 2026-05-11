@@ -4,7 +4,9 @@
 ###########################################################################
 # Example UIPC Cloth Franka
 #
-# Franka-guided cloth manipulation with SolverUIPC.  Cloth defaults to
+# Franka-guided cloth manipulation with SolverUIPC.  Cloth shell thickness
+# is taken directly from ``particle_radius`` so UIPC thickness and Newton
+# particle contact radius stay aligned.  Cloth defaults to
 # StrainLimitingBaraffWitkinShell + DiscreteShellBending; pass
 # ``--cloth-model neo_hookean`` to use NeoHookeanShell.  The Franka follows
 # the same end-effector keyframe sequence as ``cloth_franka`` and manipulates
@@ -205,15 +207,6 @@ class Example:
         usd_stage = Usd.Stage.Open(newton.examples.get_asset("unisex_shirt.usd"))
         shirt_mesh = newton.usd.get_mesh(usd_stage.GetPrimAtPath("/root/shirt"))
         vertices: list[vec3f] = [wp.vec3(v) for v in shirt_mesh.vertices]
-        if not builder.has_custom_attribute("cloth_thick"):
-            builder.add_custom_attribute(
-                newton.ModelBuilder.CustomAttribute(
-                    name="cloth_thick",
-                    dtype=wp.float32,
-                    frequency=newton.Model.AttributeFrequency.PARTICLE,
-                    default=0.001,
-                )
-            )
         builder.add_cloth_mesh(
             vertices=vertices,
             indices=shirt_mesh.indices,
@@ -227,8 +220,7 @@ class Example:
             tri_kd=1.0e-4,
             edge_ke=1.0e-2,
             edge_kd=1.0e-4,
-            particle_radius=0.004,
-            custom_attributes_particles={"cloth_thick": [0.001 / 2] * len(vertices)},
+            particle_radius=0.0005,
         )
         builder.color()
 

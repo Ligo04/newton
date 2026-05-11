@@ -40,6 +40,7 @@ class ClothBuilder:
         - Poisson's ratio defaults to 0.3
         - Bending stiffness from ``edge_bending_properties`` or default
         - ``particle_mass`` -> mass density [kg/m^2]
+        - ``particle_radius`` -> UIPC shell thickness [m]
 
     By default the membrane model is UIPC's
     ``StrainLimitingBaraffWitkinShell``.  Pass ``"neo_hookean"`` through
@@ -48,7 +49,6 @@ class ClothBuilder:
 
     CLOTH_MODEL_STRAIN_LIMITING_BARAFF_WITKIN = "strain_limiting_baraff_witkin"
     CLOTH_MODEL_NEO_HOOKEAN = "neo_hookean"
-    CLOTH_THICKNESS_ATTRIBUTE = "cloth_thick"
 
     def __init__(
         self,
@@ -350,45 +350,21 @@ class ClothBuilder:
         return pstart <= start and end <= pend
 
     def _get_thickness_values(self, model: Model, particle_indices: np.ndarray) -> np.ndarray | None:
-        """Return per-cloth-particle UIPC shell thickness values [m], if provided.
+        """Return per-cloth-particle UIPC shell thickness values [m].
 
-        Newton examples pass cloth thickness through the ``cloth_thick``
-        particle custom attribute:
-
-        .. code-block:: python
-
-            builder.add_custom_attribute(
-                newton.ModelBuilder.CustomAttribute(
-                    name="cloth_thick",
-                    dtype=wp.float32,
-                    frequency=newton.Model.AttributeFrequency.PARTICLE,
-                )
-            )
-            builder.add_cloth_mesh(
-                ...,
-                custom_attributes_particles={"cloth_thick": [1.0e-4] * len(vertices)},
-            )
-
-        If the attribute is absent, the builder falls back to
-        ``default_thickness``.
+        Thickness is derived directly from ``model.particle_radius`` so cloth
+        shell thickness and particle collision radius stay identical. The
+        constructor fallback thickness is only used when particle radius data
+        is unavailable.
         """
-        thickness_attr = getattr(model, self.CLOTH_THICKNESS_ATTRIBUTE, None)
-        if thickness_attr is None:
+        particle_radius = model.particle_radius
+        if particle_radius is None:
             return None
 
-        frequency = model.attribute_frequency.get(self.CLOTH_THICKNESS_ATTRIBUTE)
-        if frequency != Model.AttributeFrequency.PARTICLE:
-            raise ValueError(
-                f"Custom attribute {self.CLOTH_THICKNESS_ATTRIBUTE!r} must have PARTICLE frequency, got {frequency}."
-            )
-
-        thickness_np = np.asarray(thickness_attr.numpy(), dtype=np.float64).reshape(-1)
-        values = thickness_np[particle_indices]
+        radius_np = np.asarray(particle_radius.numpy(), dtype=np.float64).reshape(-1)
+        values = radius_np[particle_indices]
         if np.any(values < 0.0):
-            raise ValueError(
-                f"Custom attribute {self.CLOTH_THICKNESS_ATTRIBUTE!r} must be non-negative for all UIPC cloth particles."
-            )
-        values = np.where(values > 0.0, values, self._default_thickness)
+            raise ValueError("particle_radius must be non-negative for all UIPC cloth particles.")
         return values
 
     @staticmethod

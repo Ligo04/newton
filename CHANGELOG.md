@@ -92,6 +92,8 @@
 
 ### Fixed
 
+- Fix UIPC cloth shell thickness to follow `particle_radius` so cloth collision thickness and particle contact radius stay aligned.
+- Deprecate `SolverUIPC.cloth_thickness`; UIPC cloth thickness now follows `particle_radius`.
 - Fix `remesh_convex_hull` raising `QhullError` on degenerate (coincident, collinear, or coplanar) point clouds; it now returns a zero-volume fallback mesh with a `UserWarning`, raises `ValueError` on empty input, and retries Qhull with `QJ` joggle as a last resort on the 3D path
 - Fix `uipc_cloth_franka` to drive the Franka keyframe sequence and convert `clamp_close_activation_val` / `clamp_open_activation_val` into UIPC gripper finger targets.
 - Fix UIPC deformable-body construction for replicated worlds by filtering tetrahedra to each particle slice
