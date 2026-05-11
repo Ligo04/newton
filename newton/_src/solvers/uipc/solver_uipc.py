@@ -165,7 +165,6 @@ class SolverUIPC(SolverBase):
         require_profile: bool = False,
         auto_sync_inertia: bool = True,
         cloth_model: str = "strain_limiting_baraff_witkin",
-        cloth_thickness: float = 0.001,
         cloth_soft_position_strength_ratio: float = 100.0,
         enable_soft_position_constraint: bool = True,
     ):
@@ -210,8 +209,6 @@ class SolverUIPC(SolverBase):
                 Defaults to ``"strain_limiting_baraff_witkin"``.  Pass
                 ``"neo_hookean"`` to use ``NeoHookeanShell`` instead.  In
                 both cases ``DiscreteShellBending`` is added for bending.
-            cloth_thickness: Deprecated and ignored. UIPC cloth thickness now
-                comes from ``particle_radius``.
             cloth_soft_position_strength_ratio: Default UIPC
                 ``SoftPositionConstraint`` strength ratio added to cloth
                 vertices.  Vertices are unconstrained until
@@ -238,12 +235,6 @@ class SolverUIPC(SolverBase):
         self._cloth_model = cloth_model
         self._cloth_soft_position_strength_ratio = cloth_soft_position_strength_ratio
         self._enable_soft_position_constraint = enable_soft_position_constraint
-        if cloth_thickness != 0.001:
-            warnings.warn(
-                "SolverUIPC(cloth_thickness=...) is deprecated and ignored; cloth thickness now follows particle_radius.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
 
         # Scene config: start from UIPC defaults, apply Newton model overrides.
         if scene_config is None:

@@ -28,7 +28,6 @@
 | `require_profile` | `False` | UIPC timer / report | 开启后记录 step profile，可由 `save_performance_report()` 导出。 |
 | `auto_sync_inertia` | `True` | 初始化后的 ABD inertia 同步 | 初始化后把 UIPC ABD 最终质量、COM、惯量同步回 Newton model。 |
 | `cloth_model` | `"strain_limiting_baraff_witkin"` | `ClothBuilder` membrane constitution | 可选 `"strain_limiting_baraff_witkin"` 或 `"neo_hookean"`。 |
-| `cloth_thickness` | `0.001` | Deprecated / ignored | 旧的布料厚度参数，当前由 `model.particle_radius` 决定。 |
 | `cloth_soft_position_strength_ratio` | `100.0` | cloth `SoftPositionConstraint` | 布料软位置约束默认强度比例。 |
 | `enable_soft_position_constraint` | `True` | cloth / deformable vertices | 是否给布料和软体顶点添加 dormant `SoftPositionConstraint` 属性。 |
 
@@ -91,7 +90,6 @@
 | `model.tri_indices` | UIPC trimesh faces | 按 `cloth_ranges` 或 legacy heuristic 选取并重映射 | 布料三角面拓扑。闭合三角网格会报错，建议闭合体使用软体或刚体。 |
 | `model.cloth_ranges` | 分组构建 cloth object | 有 range 时逐组构建 | 避免多个 cloth 混成一个 UIPC geometry。 |
 | `cloth_model` | membrane constitution | 默认 `StrainLimitingBaraffWitkinShell`；可选 `NeoHookeanShell` | 两种 membrane 后续都会写入 `mu/lambda` 三角属性。 |
-| `cloth_thickness` | deprecated / ignored | `0.001 m` | 旧参数，仅保留兼容入口。 |
 | `model.particle_radius` | vertex `thickness` 和 `volume` 修正 | 直接读取 cloth 粒子的 `particle_radius`；负值报错；缺失时回退默认厚度 | 布料 thickness 与粒子碰撞半径保持一致。 |
 | `model.particle_mass` + `model.tri_areas` | membrane `mass_density` | `sum(particle_mass) / sum(tri_area) / thickness`；失败时 `100.0` | UIPC shell 使用体密度 [kg/m^3]。 |
 | `model.tri_materials[:, 0]` (`tri_ke`) | UIPC triangle `mu` | 当前实现原样写入 | 虽然注释提到 Young's modulus，但实际代码把该列写到 `mu`。 |
@@ -129,5 +127,5 @@
 - 布料的 `tri_ke/tri_ka` 当前实现是直接写入 UIPC triangle `mu/lambda`，不是在 UIPC builder 中再转换为 Young's modulus / Poisson ratio。
 - 软体的 `tet_materials` 会做 StableNeoHookean 所需的参数变换：`mu = (4/3) * k_mu`，`lambda = k_lambda + (5/6) * k_mu`。
 - `SoftPositionConstraint` 只有在 `enable_soft_position_constraint=True` 时才会添加属性；目标位置、启用标记和强度比例属于运行时约束数据，不在本表展开为公开配置项。
-- UIPC cloth 的 shell thickness 现在直接来源于 `model.particle_radius`，因此 cloth 粒子半径和 UIPC 厚度是同一参数；`cloth_thickness` 仅作兼容占位。
+- UIPC cloth 的 shell thickness 现在直接来源于 `model.particle_radius`，因此 cloth 粒子半径和 UIPC 厚度是同一参数。
 - UIPC 全局 contact 默认关闭；即使 contact tabular 已经配置 pair，也只有 `scene_config["contact"]["enable"]` 打开后才会启用接触。
