@@ -62,23 +62,17 @@ uvx --with virtualenv asv run --launch-method spawn main^!
 <claude-mem-context>
 # Memory Context
 
-# [newton] recent context, 2026-05-08 11:06am GMT+8
+# [newton] recent context, 2026-05-11 2:35pm GMT+8
 
 Legend: 🎯session 🔴bugfix 🟣feature 🔄refactor ✅change 🔵discovery ⚖️decision 🚨security_alert 🔐security_note
 Format: ID TIME TYPE TITLE
 Fetch details: get_observations([IDs]) | Search: mem-search skill
 
-Stats: 50 obs (15,194t read) | 480,441t work | 97% savings
+Stats: 50 obs (15,851t read) | 624,492t work | 97% savings
 
 ### May 7, 2026
-1987 12:22p ✅ API docs regenerated after SoftBodyRange addition
-1988 12:23p 🟣 add_soft_grid and add_soft_mesh gain label param and return SoftBodyRange
-1989 " 🔵 Broader UIPC deformable body overhaul in same branch
-1990 12:25p 🟣 add_builder gains label_prefix param; test added for add_soft_mesh range
-1991 12:26p 🟣 11/11 TestSoftBody tests pass with label_prefix and add_soft_mesh coverage
 1992 12:27p 🟣 ClothRange dataclass added to Newton simulation model
 1993 " 🟣 ClothRange exported through full newton package hierarchy
-1994 " 🟣 Three ClothRange tests added to test_cloth.py
 1995 12:29p 🟣 65/65 TestCloth tests pass including all three new ClothRange tests
 1996 12:30p ✅ API docs regenerated; newton.rst now 38 symbols after ClothRange addition
 S579 How does deformable_body.py distinguish soft bodies — full implementation of per-body UIPC geometry building using SoftBodyRange/ClothRange now applied to both UIPC solvers (May 7, 12:33 PM)
@@ -132,6 +126,12 @@ S589 Refactor newton/examples/uipc/example_uipc_cloth_franka.py: replace soft-co
 2074 " ⚖️ Robot Component Should Use free_joint for Movement
 2073 10:47a 🔵 OMX Explore Shell Execution Blocked by bwrap Sandbox in Newton Repo
 2078 10:50a 🔵 OMX Explore shell backend blocked by bwrap sandbox in Newton-Isaac/newton
+2079 2:41p 🔵 Studied: Adjustable Constrained Soft-Tissue Dynamics (Wang, Zheng, Barbic 2020)
+2080 " ✅ Paper archived to ~/claude-papers study library
+2081 " 🔵 claude-papers library structure confirmed at ~/claude-papers/
+2082 2:42p ✅ meta.json created for Wang-Zheng-Barbic 2020 in claude-papers library
+2083 " ✅ README.md study guide written for Wang-Zheng-Barbic 2020
+2084 2:43p ✅ summary.md created for Wang-Zheng-Barbic 2020 study materials
 
-Access 480k tokens of past work via get_observations([IDs]) or mem-search skill.
+Access 624k tokens of past work via get_observations([IDs]) or mem-search skill.
 </claude-mem-context>
