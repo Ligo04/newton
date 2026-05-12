@@ -673,6 +673,9 @@ If you installed from source with uv, substitute `uv run` for `python` in the co
       </a>
     </td>
     <td align="center" width="33%">
+      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/uipc/example_uipc_softbody_dropping_to_cloth.py">
+        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_softbody_dropping_to_cloth.jpg" alt="UIPC Softbody Dropping to Cloth">
+      </a>
     </td>
   </tr>
   <tr>
@@ -683,6 +686,7 @@ If you installed from source with uv, substitute `uv run` for `python` in the co
       <code>python -m newton.examples softbody_dropping_to_cloth</code>
     </td>
     <td align="center" width="33%">
+      <code>python -m newton.examples uipc_softbody_dropping_to_cloth</code>
     </td>
   </tr>
   <tr>

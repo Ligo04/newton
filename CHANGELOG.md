@@ -9,6 +9,7 @@
 - Add `pyuipc>=0.0.24` as a Python 3.11-3.12 runtime dependency and document UIPC solver parameter mappings.
 - Add composable actuator subsystem with pluggable `Controller` (`ControllerPD`, `ControllerPID`, `ControllerNeuralMLP`, `ControllerNeuralLSTM`), `Clamping` (`ClampingMaxEffort`, `ClampingDCMotor`, `ClampingPositionBased`), and `Delay` components; supports per-DOF delays, CUDA graph capture, and masked environment reset
 - Add UIPC softbody hanging, softbody Franka, and deformable-body demos using Stable Neo-Hookean deformables
+- Add UIPC softbody-dropping-to-cloth demo with deformable-body and cloth contact.
 - Add heatmap rendering for scalar arrays logged through `ViewerGL.log_array()`
 - Add Blender-style orbit, pan, and dolly controls to the GL viewer using middle-mouse drag combinations
 - Add `SolverXPBD.update_contacts()` to populate `contacts.force` with per-contact spatial forces (linear force and torque) derived from XPBD constraint impulses
@@ -94,6 +95,7 @@
 
 ### Fixed
 
+- Fix UIPC soft-body and cloth builders to honor authored density metadata from Newton ranges, avoiding unexpectedly heavy deformables in UIPC scenes.
 - Fix UIPC cloth shell thickness to follow `particle_radius` so cloth collision thickness and particle contact radius stay aligned.
 - Fix `remesh_convex_hull` raising `QhullError` on degenerate (coincident, collinear, or coplanar) point clouds; it now returns a zero-volume fallback mesh with a `UserWarning`, raises `ValueError` on empty input, and retries Qhull with `QJ` joggle as a last resort on the 3D path
 - Fix `uipc_cloth_franka` to drive the Franka keyframe sequence and convert `clamp_close_activation_val` / `clamp_open_activation_val` into UIPC gripper finger targets.

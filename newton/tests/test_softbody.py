@@ -343,6 +343,7 @@ class TestSoftBody(unittest.TestCase):
         self.assertEqual(soft_range.tet_range, (0, builder.tet_count))
         self.assertEqual(soft_range.tri_range, (0, builder.tri_count))
         self.assertEqual(soft_range.edge_range, (0, builder.edge_count))
+        self.assertEqual(soft_range.density, 1000.0)
         self.assertEqual(builder.soft_body_ranges, [soft_range])
 
         model = builder.finalize()
@@ -375,6 +376,7 @@ class TestSoftBody(unittest.TestCase):
         self.assertEqual(soft_range.tet_range, (0, builder.tet_count))
         self.assertEqual(soft_range.tri_range, (0, builder.tri_count))
         self.assertEqual(soft_range.edge_range, (0, builder.edge_count))
+        self.assertEqual(soft_range.density, 1000.0)
         self.assertEqual(builder.soft_body_ranges, [soft_range])
 
     def test_add_builder_offsets_soft_body_ranges(self):

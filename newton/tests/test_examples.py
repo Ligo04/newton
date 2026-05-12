@@ -22,6 +22,7 @@ import types
 import unittest
 from typing import Any
 
+import numpy as np
 import warp as wp
 
 import newton.tests.unittest_utils
@@ -37,6 +38,9 @@ _HAS_UIPC = importlib.util.find_spec("uipc") is not None
 
 if _HAS_UIPC:
     from newton.examples.uipc.example_uipc_cloth_franka import Example as UIPCClothFrankaExample
+    from newton.examples.uipc.example_uipc_softbody_dropping_to_cloth import (
+        Example as UIPCSoftbodyDroppingToClothExample,
+    )
 
 
 def _build_command_line_options(test_options: dict[str, Any]) -> list:
@@ -797,6 +801,62 @@ add_example_test(
 
 
 class TestUIPCSoftbodyExamples(unittest.TestCase):
+    def test_uipc_softbody_dropping_to_cloth_uses_uipc_solver(self):
+        example_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "examples",
+            "uipc",
+            "example_uipc_softbody_dropping_to_cloth.py",
+        )
+        with open(example_path) as f:
+            source = f.read()
+
+        self.assertIn("SolverUIPC", source)
+        self.assertIn("fix_left=True", source)
+        self.assertIn("fix_right=True", source)
+        self.assertIn("enable_soft_position_constraint=False", source)
+        self.assertIn("self.graph = None", source)
+        self.assertIn("parser.set_defaults(num_frames=120)", source)
+
+    def test_uipc_softbody_dropping_to_cloth_smoke(self):
+        if not _HAS_UIPC:
+            self.skipTest("Requires uipc")
+        if not cuda_test_devices:
+            self.skipTest("Requires a CUDA test device")
+
+        class DummyViewer:
+            def __init__(self):
+                self._paused = False
+
+            def set_model(self, model):
+                pass
+
+            def set_camera(self, **kwargs):
+                pass
+
+            def begin_frame(self, *args, **kwargs):
+                pass
+
+            def log_state(self, *args, **kwargs):
+                pass
+
+            def log_contacts(self, *args, **kwargs):
+                pass
+
+            def end_frame(self):
+                pass
+
+            def apply_forces(self, state):
+                pass
+
+        with wp.ScopedDevice(cuda_test_devices[0]):
+            example = UIPCSoftbodyDroppingToClothExample(DummyViewer(), types.SimpleNamespace())
+            example.step()
+            particle_q = example.state_0.particle_q.numpy()
+
+        self.assertTrue(np.all(np.isfinite(particle_q)))
+        self.assertLess(float(np.linalg.norm(particle_q.max(axis=0) - particle_q.min(axis=0))), 20.0)
+
     def test_uipc_cloth_franka_uses_robot_contact_and_activation_values(self):
         example_path = os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -900,6 +960,13 @@ if _HAS_UIPC:
         name="uipc.example_uipc_softbody_franka",
         devices=cuda_test_devices,
         test_options={"num-frames": 10},
+        use_viewer=True,
+    )
+    add_example_test(
+        TestUIPCSoftbodyExamples,
+        name="uipc.example_uipc_softbody_dropping_to_cloth",
+        devices=cuda_test_devices,
+        test_options={"num-frames": 1},
         use_viewer=True,
     )
     add_example_test(

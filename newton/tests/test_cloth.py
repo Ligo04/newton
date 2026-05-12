@@ -1195,6 +1195,7 @@ class TestCloth(unittest.TestCase):
         self.assertEqual(cloth_range.tri_range, (0, builder.tri_count))
         self.assertEqual(cloth_range.edge_range, (0, builder.edge_count))
         self.assertEqual(cloth_range.spring_range, (0, builder.spring_count))
+        self.assertEqual(cloth_range.surface_density, 4.0)
         self.assertEqual(builder.cloth_ranges, [cloth_range])
 
         model = builder.finalize()

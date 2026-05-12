@@ -86,6 +86,39 @@ class TestUIPCDeformableBuilder(unittest.TestCase):
         self.assertEqual(len(solver.mapping.deformable_rest_geo_slots), len(stiffness_values))
         self.assertEqual(len(solver.mapping.deformable_particle_indices), len(stiffness_values))
 
+    def test_authored_soft_density_is_used_by_uipc(self):
+        builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+        builder.add_soft_grid(
+            pos=wp.vec3(0.0, 0.0, 0.6),
+            rot=wp.quat_identity(),
+            vel=wp.vec3(0.0, 0.0, 0.0),
+            dim_x=2,
+            dim_y=2,
+            dim_z=2,
+            cell_x=0.1,
+            cell_y=0.1,
+            cell_z=0.1,
+            density=123.0,
+            k_mu=5.0e4,
+            k_lambda=5.0e4,
+            k_damp=1.0e-6,
+            label="density",
+        )
+
+        model = builder.finalize()
+        solver = newton.solvers.SolverUIPC(
+            model=model,
+            backend="none",
+            dt=1.0 / 60.0,
+            logger_level=uipc.Logger.Warn,
+        )
+        solver.initialize(model.state())
+
+        geo = solver.mapping.deformable_geo_slots[0].geometry()
+        mass_density_attr = geo.meta().find("mass_density")
+        self.assertIsNotNone(mass_density_attr)
+        self.assertAlmostEqual(float(uipc.view(mass_density_attr)[0]), 123.0)
+
     def test_disconnected_soft_grids_with_same_material_use_authored_ranges(self):
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
         for i in range(2):

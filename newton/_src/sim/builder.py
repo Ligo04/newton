@@ -3081,6 +3081,7 @@ class ModelBuilder:
                     edge_end=cloth_range.edge_end + start_edge_idx,
                     spring_start=cloth_range.spring_start + start_spring_idx,
                     spring_end=cloth_range.spring_end + start_spring_idx,
+                    surface_density=cloth_range.surface_density,
                 )
             )
 
@@ -3097,6 +3098,7 @@ class ModelBuilder:
                     tri_end=soft_range.tri_end + start_triangle_idx,
                     edge_start=soft_range.edge_start + start_edge_idx,
                     edge_end=soft_range.edge_end + start_edge_idx,
+                    density=soft_range.density,
                 )
             )
 
@@ -8090,6 +8092,7 @@ class ModelBuilder:
             edge_end=len(self.edge_indices),
             spring_start=start_spring,
             spring_end=len(self.spring_indices) // 2,
+            surface_density=density,
         )
         self.cloth_ranges.append(cloth_range)
         return cloth_range
@@ -8373,6 +8376,7 @@ class ModelBuilder:
             tri_end=len(self.tri_indices),
             edge_start=start_edge,
             edge_end=len(self.edge_indices),
+            density=density,
         )
         self.soft_body_ranges.append(soft_range)
         return soft_range
@@ -8614,6 +8618,7 @@ class ModelBuilder:
             tri_end=len(self.tri_indices),
             edge_start=start_edge,
             edge_end=len(self.edge_indices),
+            density=density,
         )
         self.soft_body_ranges.append(soft_range)
         return soft_range

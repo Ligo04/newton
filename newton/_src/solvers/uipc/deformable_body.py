@@ -68,14 +68,19 @@ class DeformableBodyBuilder:
                     model, tet_range=soft_range.tet_range
                 )
                 self._build_tet_set(
-                    contact_elem, selected_particle_indices, local_tets, selected_tet_ids, subscene_elem
+                    contact_elem,
+                    selected_particle_indices,
+                    local_tets,
+                    selected_tet_ids,
+                    subscene_elem,
+                    soft_range.density,
                 )
             return
 
         selected_particle_indices, local_tets, selected_tet_ids = self._select_tetrahedra(
             model, particle_range=particle_range
         )
-        self._build_tet_set(contact_elem, selected_particle_indices, local_tets, selected_tet_ids, subscene_elem)
+        self._build_tet_set(contact_elem, selected_particle_indices, local_tets, selected_tet_ids, subscene_elem, None)
 
     def _build_tet_set(
         self,
@@ -84,12 +89,20 @@ class DeformableBodyBuilder:
         local_tets: np.ndarray,
         selected_tet_ids: np.ndarray,
         subscene_elem: SubsceneElement | None,
+        authored_density: float | None,
     ) -> None:
         """Build one UIPC geometry for a selected tetrahedron set."""
         if selected_particle_indices.size == 0 or local_tets.size == 0:
             return
 
-        self._build_geometry(contact_elem, selected_particle_indices, local_tets, selected_tet_ids, subscene_elem)
+        self._build_geometry(
+            contact_elem,
+            selected_particle_indices,
+            local_tets,
+            selected_tet_ids,
+            subscene_elem,
+            authored_density,
+        )
 
     def _build_geometry(
         self,
@@ -98,6 +111,7 @@ class DeformableBodyBuilder:
         local_tets: np.ndarray,
         selected_tet_ids: np.ndarray,
         subscene_elem: SubsceneElement | None,
+        authored_density: float | None,
     ) -> None:
         """Build one UIPC deformable geometry from an authored tet group."""
         model = self._model
@@ -117,7 +131,9 @@ class DeformableBodyBuilder:
         sc = flip_inward_triangles(sc)
         mesh_partition(sc, 16)
 
-        mass_density = self._estimate_mass_density(model, selected_particle_indices, local_tets, deformable_verts)
+        mass_density = self._estimate_mass_density(
+            model, selected_particle_indices, local_tets, deformable_verts, authored_density
+        )
         snk = StableNeoHookean()
         snk.apply_to(sc, ElasticModuli.youngs_poisson(1000.0, 0.45), mass_density=mass_density)
         self._write_tet_elastic_moduli(sc, model, selected_tet_ids)
@@ -226,8 +242,11 @@ class DeformableBodyBuilder:
         particle_indices: np.ndarray,
         local_tets: np.ndarray,
         vertices: np.ndarray,
+        authored_density: float | None,
     ) -> float:
         """Estimate mass density [kg/m^3] from particle masses and tet volume."""
+        if authored_density is not None:
+            return float(authored_density)
         if model.particle_mass is None or particle_indices.size == 0 or local_tets.size == 0:
             return self._default_mass_density
 

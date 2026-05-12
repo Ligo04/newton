@@ -8,6 +8,7 @@ from __future__ import annotations
 from typing import Any
 
 import numpy as np
+import uipc.builtin as uipc_builtin
 from uipc import view
 from uipc.constitution import (
     DiscreteShellBending,
@@ -111,11 +112,12 @@ class ClothBuilder:
                     selected_tri_ids,
                     cloth_range.edge_range,
                     subscene_elem,
+                    cloth_range.surface_density,
                 )
             return
 
         selected_particles, cloth_faces, selected_tri_ids = self._select_legacy_cloth(model, particle_range)
-        self._build_geometry(contact_elem, selected_particles, cloth_faces, selected_tri_ids, None, subscene_elem)
+        self._build_geometry(contact_elem, selected_particles, cloth_faces, selected_tri_ids, None, subscene_elem, None)
 
     def _select_range_cloth(self, model: Model, cloth_range: Any) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Return particles, local faces, and triangle IDs for one authored cloth range."""
@@ -199,6 +201,7 @@ class ClothBuilder:
         selected_tri_ids: np.ndarray,
         edge_range: tuple[int, int] | None,
         subscene_elem: SubsceneElement | None,
+        authored_surface_density: float | None,
     ) -> None:
         """Build one UIPC cloth geometry."""
         if cloth_particle_indices.size == 0 or cloth_faces.size == 0:
@@ -234,7 +237,13 @@ class ClothBuilder:
         applied_thickness = self._default_thickness
 
         # Compute mass density from particle masses and mesh area
-        mass_density = self._estimate_mass_density(model, cloth_particle_indices, selected_tri_ids, density_thickness)
+        mass_density = self._estimate_mass_density(
+            model,
+            cloth_particle_indices,
+            selected_tri_ids,
+            density_thickness,
+            authored_surface_density,
+        )
 
         moduli = ElasticModuli2D.youngs_poisson(1000.0, self._default_poisson_ratio)
         if self._cloth_model == self.CLOTH_MODEL_NEO_HOOKEAN:
@@ -250,6 +259,10 @@ class ClothBuilder:
         dsb = DiscreteShellBending()
         dsb.apply_to(sc, self._default_bending_stiffness)
         self._write_edge_bending_stiffness(sc, model, cloth_particle_indices, edge_range)
+
+        fixed_local_indices = self._fixed_particle_indices(model, cloth_particle_indices)
+        if fixed_local_indices.size > 0:
+            self._mark_fixed_vertices(sc, fixed_local_indices)
 
         # Add dormant soft-position attributes.  Vertices remain unconstrained
         # until SolverUIPC.set_cloth_soft_position_constraints() toggles
@@ -322,13 +335,36 @@ class ClothBuilder:
                 continue
             bending_view[local_edge_idx] = edge_props_np[edge_id, 0]
 
+    def _fixed_particle_indices(self, model: Model, particle_indices: np.ndarray) -> np.ndarray:
+        """Return local cloth vertex indices that should remain kinematic."""
+        if model.particle_mass is None or particle_indices.size == 0:
+            return np.empty(0, dtype=np.int32)
+
+        particle_mass_np = model.particle_mass.numpy()[particle_indices]
+        return np.flatnonzero(np.asarray(particle_mass_np <= 0.0, dtype=bool)).astype(np.int32)
+
+    @staticmethod
+    def _mark_fixed_vertices(sc: Any, local_indices: np.ndarray) -> None:
+        """Mirror fixed Newton cloth particles into UIPC's ``is_fixed`` marker."""
+        fixed_attr = sc.vertices().find(uipc_builtin.is_fixed)
+        if fixed_attr is None:
+            fixed_attr = sc.vertices().create(uipc_builtin.is_fixed, np.zeros(sc.vertices().size(), dtype=np.int32))
+        view(fixed_attr)[local_indices] = 1
+
     def _estimate_mass_density(
-        self, model: Model, particle_indices: np.ndarray, selected_tri_ids: np.ndarray, thickness: float
+        self,
+        model: Model,
+        particle_indices: np.ndarray,
+        selected_tri_ids: np.ndarray,
+        thickness: float,
+        authored_surface_density: float | None,
     ) -> float:
         """Estimate surface mass density [kg/m^2] from particle masses and areas.
 
         Falls back to a default of 100 kg/m^3 volumetric density if estimation fails.
         """
+        if authored_surface_density is not None:
+            return float(authored_surface_density) / thickness
         if model.particle_mass is not None:
             particle_mass_np = model.particle_mass.numpy()
             total_mass = float(np.sum(particle_mass_np[particle_indices]))

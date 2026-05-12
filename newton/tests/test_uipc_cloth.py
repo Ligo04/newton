@@ -12,10 +12,13 @@ import numpy as np
 import warp as wp
 
 import newton
+from newton.tests.unittest_utils import get_selected_cuda_test_devices
 
 _HAS_UIPC = importlib.util.find_spec("uipc") is not None
+_CUDA_TEST_DEVICES = get_selected_cuda_test_devices(mode="basic")
 
 if _HAS_UIPC:
+    import uipc.builtin as uipc_builtin
     from uipc import view
 
     import newton._src.solvers.uipc.cloth as cloth_module
@@ -100,6 +103,90 @@ class TestUIPCClothSoftPosition(unittest.TestCase):
         self.assertEqual(len(solver.mapping.cloth_geo_slots), 2)
         self.assertEqual(len(solver.mapping.cloth_particle_indices), 2)
 
+    def test_fixed_cloth_grid_edges_mark_uipc_vertices_fixed(self):
+        dim_x = 4
+        dim_y = 3
+        builder = newton.ModelBuilder(up_axis=newton.Axis.Z, gravity=0.0)
+        builder.add_cloth_grid(
+            pos=wp.vec3(0.0, 0.0, 0.0),
+            rot=wp.quat_identity(),
+            vel=wp.vec3(0.0, 0.0, 0.0),
+            dim_x=dim_x,
+            dim_y=dim_y,
+            cell_x=0.1,
+            cell_y=0.1,
+            mass=0.01,
+            tri_ke=1.0e3,
+            tri_ka=1.0e3,
+            tri_kd=0.0,
+            fix_left=True,
+            fix_right=True,
+        )
+        model = builder.finalize()
+        solver = newton.solvers.SolverUIPC(
+            model,
+            backend="none",
+            dt=1.0 / 60.0,
+            enable_soft_position_constraint=False,
+        )
+        solver.initialize(model.state())
+
+        geo = solver.mapping.cloth_geo_slots[0].geometry()
+        fixed_attr = geo.vertices().find(uipc_builtin.is_fixed)
+        self.assertIsNotNone(fixed_attr)
+        fixed = np.asarray(view(fixed_attr), dtype=np.int32).reshape(-1)
+
+        expected_fixed = np.zeros((dim_y + 1, dim_x + 1), dtype=np.int32)
+        expected_fixed[:, 0] = 1
+        expected_fixed[:, dim_x] = 1
+        np.testing.assert_array_equal(fixed, expected_fixed.reshape(-1))
+
+    def test_fixed_cloth_grid_edges_remain_fixed_after_step(self):
+        if not _CUDA_TEST_DEVICES:
+            self.skipTest("Requires a CUDA test device")
+
+        dim_x = 4
+        dim_y = 3
+        with wp.ScopedDevice(_CUDA_TEST_DEVICES[0]):
+            builder = newton.ModelBuilder(up_axis=newton.Axis.Z, gravity=-9.81)
+            builder.add_cloth_grid(
+                pos=wp.vec3(0.0, 0.0, 1.0),
+                rot=wp.quat_identity(),
+                vel=wp.vec3(0.0, 0.0, 0.0),
+                dim_x=dim_x,
+                dim_y=dim_y,
+                cell_x=0.1,
+                cell_y=0.1,
+                mass=0.01,
+                tri_ke=1.0e3,
+                tri_ka=1.0e3,
+                tri_kd=0.0,
+                fix_left=True,
+                fix_right=True,
+            )
+            model = builder.finalize()
+            state_0 = model.state()
+            state_1 = model.state()
+            solver = newton.solvers.SolverUIPC(
+                model,
+                backend="cuda",
+                dt=1.0 / 60.0,
+                enable_soft_position_constraint=False,
+            )
+            solver.initialize(state_0)
+            initial_q = state_0.particle_q.numpy()
+
+            solver.step(state_0, state_1, model.control(), model.contacts(), 1.0 / 60.0)
+            final_q = state_1.particle_q.numpy()
+
+        fixed_mask = np.zeros((dim_y + 1, dim_x + 1), dtype=bool)
+        fixed_mask[:, 0] = True
+        fixed_mask[:, dim_x] = True
+        fixed_mask = fixed_mask.reshape(-1)
+
+        np.testing.assert_allclose(final_q[fixed_mask], initial_q[fixed_mask], atol=1.0e-5)
+        self.assertLess(float(np.min(final_q[~fixed_mask, 2] - initial_q[~fixed_mask, 2])), -1.0e-5)
+
     def test_particle_radius_sets_uipc_thickness(self):
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z, gravity=0.0)
         builder.add_cloth_grid(
@@ -121,6 +208,9 @@ class TestUIPCClothSoftPosition(unittest.TestCase):
         solver.initialize(model.state())
 
         geo = solver.mapping.cloth_geo_slots[0].geometry()
+        mass_density_attr = geo.meta().find("mass_density")
+        self.assertIsNotNone(mass_density_attr)
+        self.assertAlmostEqual(float(view(mass_density_attr)[0]), 9000.0, places=3)
         thickness = view(geo.vertices().find("thickness"))
         np.testing.assert_allclose(thickness, np.full(model.particle_count, 2.5e-4), rtol=1.0e-6)
 

@@ -45,6 +45,8 @@ class ClothRange:
     """Start spring index."""
     spring_end: int
     """End spring index."""
+    surface_density: float | None = None
+    """Authored surface density [kg/m^2] if available."""
 
     @property
     def particle_range(self) -> tuple[int, int]:
@@ -89,6 +91,8 @@ class SoftBodyRange:
     """Start bending edge index."""
     edge_end: int
     """End bending edge index."""
+    density: float | None = None
+    """Authored volume density [kg/m^3] if available."""
 
     @property
     def particle_range(self) -> tuple[int, int]:
