@@ -8260,10 +8260,7 @@ class ModelBuilder:
             edge_ke: Bending edge stiffness used when ``add_surface_mesh_edges`` is True. Defaults to 0.0.
             edge_kd: Bending edge damping used when ``add_surface_mesh_edges`` is True. Defaults to 0.0.
             particle_radius: particle's contact radius (controls rigidbody-particle contact distance)
-            label: Optional name reserved for forwarding to mesh-quality
-                diagnostics. Currently unused by ``add_soft_grid`` (the
-                generated grid is degenerate-free by construction); kept
-                for signature consistency with the other ``add_*`` helpers.
+            label: Optional name stored with the generated soft-body range.
 
         Note:
             The generated surface triangles and optional edges are for collision purposes.
@@ -8271,7 +8268,6 @@ class ModelBuilder:
             elastic forces. Set the triangle stiffness parameters above to non-zero values if you
             want the surface to behave like a thin skin.
         """
-        del label  # currently unused; kept on the signature for API parity
         start_vertex = len(self.particle_q)
         start_tet = len(self.tet_indices)
         start_edge = len(self.edge_indices)
