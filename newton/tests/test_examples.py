@@ -18,6 +18,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
 from typing import Any
 
@@ -33,6 +34,9 @@ from newton.tests.unittest_utils import (
 )
 
 _HAS_UIPC = importlib.util.find_spec("uipc") is not None
+
+if _HAS_UIPC:
+    from newton.examples.uipc.example_uipc_cloth_franka import Example as UIPCClothFrankaExample
 
 
 def _build_command_line_options(test_options: dict[str, Any]) -> list:
@@ -811,7 +815,69 @@ class TestUIPCSoftbodyExamples(unittest.TestCase):
         self.assertIn("_solve_ik_and_push_control", source)
         self.assertIn("clamp_close_activation_val = 0.1", source)
         self.assertIn("clamp_open_activation_val = 0.8", source)
-        self.assertIn("gripper_activation_scale", source)
+        self.assertIn("gripper_activation_scale = 0.04", source)
+        self.assertIn("set_gripper_q", source)
+        self.assertIn("finger_pos_buf", source)
+        self.assertIn("joint_label", source)
+        self.assertIn("JointTargetMode.POSITION", source)
+        self.assertIn("parser.set_defaults(num_frames=3850)", source)
+
+    def test_uipc_cloth_franka_delays_actions_by_25_frames(self):
+        example_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "examples",
+            "uipc",
+            "example_uipc_cloth_franka.py",
+        )
+        with open(example_path) as f:
+            source = f.read()
+
+        self.assertIn("self.action_delay_frames = 25", source)
+        self.assertIn("self.action_delay = self.action_delay_frames * self.frame_dt", source)
+        self.assertIn("self.frame < self.action_delay_frames", source)
+        self.assertIn("wp.copy(self.control.joint_target_pos, self.model.joint_q)", source)
+        self.assertIn("self.state_0.body_q.numpy()[self.ee_index]", source)
+        self.assertIn("def _target_at_time(self, time: float, is_delayed: bool)", source)
+        self.assertIn("parser.set_defaults(num_frames=3850)", source)
+
+    def test_uipc_cloth_franka_closes_fingers_in_close_segment(self):
+        if not _HAS_UIPC:
+            self.skipTest("Requires uipc")
+        if not cuda_test_devices:
+            self.skipTest("Requires a CUDA test device")
+
+        class DummyViewer:
+            def __init__(self):
+                self._paused = False
+
+            def set_model(self, model):
+                pass
+
+            def set_camera(self, **kwargs):
+                pass
+
+            def begin_frame(self, *args, **kwargs):
+                pass
+
+            def log_state(self, *args, **kwargs):
+                pass
+
+            def end_frame(self):
+                pass
+
+        with wp.ScopedDevice(cuda_test_devices[0]):
+            example = UIPCClothFrankaExample(
+                DummyViewer(),
+                types.SimpleNamespace(cloth_model="strain_limiting_baraff_witkin"),
+            )
+            finger_open = example.state_0.joint_q.numpy()[7:9].copy()
+            example.sim_time = 7.9
+            example.frame = example.action_delay_frames
+            example.step()
+            finger_closed = example.state_0.joint_q.numpy()[7:9]
+
+        self.assertLess(float(finger_closed.max()), float(finger_open.max()))
+        self.assertLess(float(finger_closed.max()), 0.04)
 
 
 if _HAS_UIPC:

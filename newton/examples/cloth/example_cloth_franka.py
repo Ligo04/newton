@@ -430,7 +430,7 @@ class Example:
         self.target = self.targets[0]
 
         self.robot_key_poses_time = np.cumsum(self.robot_key_poses[:, 0])
-        self.endeffector_id = builder.body_count - 3
+        self.endeffector_id = next(i for i, lbl in enumerate(builder.body_label) if lbl.endswith("/fr3_link7"))
         self.endeffector_offset = wp.transform(
             [
                 0.0,

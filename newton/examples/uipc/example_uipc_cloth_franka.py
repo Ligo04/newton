@@ -33,30 +33,24 @@ from newton import JointTargetMode
 
 
 @wp.kernel
-def write_joint_targets_kernel(
-    ik_solution: wp.array2d[wp.float32],
-    joint_targets: wp.array[wp.float32],
-    gripper_activation: float,
-    gripper_activation_scale: float,
-):
-    tid = wp.tid()
-    if tid == 0:
-        for j in range(7):
-            joint_targets[j] = ik_solution[0, j]
-        finger_target = gripper_activation * gripper_activation_scale
-        joint_targets[7] = finger_target
-        joint_targets[8] = finger_target
+def set_gripper_q(joint_q: wp.array2d[float], finger_pos: wp.array[float], idx0: int, idx1: int):
+    joint_q[0, idx0] = finger_pos[0]
+    joint_q[0, idx1] = finger_pos[0]
 
 
 class Example:
     def __init__(self, viewer, args):
         self.fps = 60
         self.frame_dt = 1.0 / self.fps
+        self.action_delay_frames = 25
+        self.action_delay = self.action_delay_frames * self.frame_dt
         self.sim_time = 0.0
+        self.frame = 0
         self.sim_substeps = 1
         self.sim_dt = self.frame_dt
         self.viewer = viewer
         self.robot_contact_mu = 1.5
+        self.gripper_activation_scale = 0.04
 
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
         self._build_franka(builder)
@@ -104,13 +98,16 @@ class Example:
         asset_path = newton.utils.download_asset("franka_emika_panda")
         builder.add_urdf(
             str(asset_path / "urdf" / "fr3_franka_hand.urdf"),
-            xform=wp.transform((0.0, -1.20, 0.02), wp.quat_identity()),
+            xform=wp.transform(
+                (-0.5, -0.5, 0.0),
+                wp.quat_identity(),
+            ),
             floating=False,
+            scale=1,  # URDF is in meters, scale to cm
             enable_self_collisions=False,
             collapse_fixed_joints=True,
             force_show_colliders=False,
         )
-
         init_q = [
             0.0,
             0.0,
@@ -120,7 +117,6 @@ class Example:
             2.5307,
             0.0,
         ]
-        self.gripper_activation_scale = 0.04
         clamp_close_activation_val = 0.1
         clamp_open_activation_val = 0.8
         builder.joint_q[:9] = [
@@ -128,7 +124,6 @@ class Example:
             clamp_open_activation_val * self.gripper_activation_scale,
             clamp_open_activation_val * self.gripper_activation_scale,
         ]
-
         for d in range(9):
             builder.joint_target_pos[d] = builder.joint_q[d]
             builder.joint_target_mode[d] = int(JointTargetMode.POSITION)
@@ -179,7 +174,21 @@ class Example:
             dtype=np.float32,
         )
         self.targets = self.robot_key_poses[:, 1:]
+        self.transition_duration = self.robot_key_poses[:, 0]
+        self.target = self.targets[0]
+
         self.robot_key_poses_time = np.cumsum(self.robot_key_poses[:, 0])
+        self.endeffector_id = next(i for i, lbl in enumerate(builder.body_label) if lbl.endswith("/fr3_link7"))
+        self.finger_idx0 = next(i for i, lbl in enumerate(builder.joint_label) if lbl.endswith("/fr3_finger_joint1"))
+        self.finger_idx1 = next(i for i, lbl in enumerate(builder.joint_label) if lbl.endswith("/fr3_finger_joint2"))
+        self.endeffector_offset = wp.transform(
+            [
+                0.0,
+                0.0,
+                22.0,
+            ],
+            wp.quat_identity(),
+        )
 
     def _configure_contact_tabular(
         self,
@@ -201,7 +210,7 @@ class Example:
             label="uipc_cloth_franka_table",
         )
         cfg = newton.ModelBuilder.ShapeConfig(mu=0.8, ke=1.0e4, kd=1.0e1)
-        builder.add_shape_box(table_body, hx=0.45, hy=0.45, hz=0.1, cfg=cfg, label="table")
+        builder.add_shape_box(table_body, hx=0.40, hy=0.40, hz=0.1, cfg=cfg, label="table")
 
     def _build_cloth(self, builder: newton.ModelBuilder) -> None:
         usd_stage = Usd.Stage.Open(newton.examples.get_asset("unisex_shirt.usd"))
@@ -211,21 +220,36 @@ class Example:
             vertices=vertices,
             indices=shirt_mesh.indices,
             rot=wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), np.pi),
-            pos=wp.vec3(0.0, 0.7, 0.45),
+            pos=wp.vec3(0.0, 0.70, 0.45),
             vel=wp.vec3(0.0, 0.0, 0.0),
-            density=0.2,
+            density=0.02,
             scale=0.01,
-            tri_ke=2.0e4,
-            tri_ka=2.0e4,
-            tri_kd=1.0e-4,
-            edge_ke=1.0e-2,
-            edge_kd=1.0e-4,
+            tri_ke=1.0e4,
+            tri_ka=1.0e4,
+            tri_kd=1.5e-6,
+            edge_ke=5,
+            edge_kd=1e-2,
             particle_radius=0.0005,
         )
         builder.color()
 
     def _setup_ik(self) -> None:
-        self.ee_index = next(i for i, lbl in enumerate(self.model.body_label) if lbl.endswith("/fr3_link7"))
+        self.ee_index = self.endeffector_id
+        ee_tf = self.state_0.body_q.numpy()[self.ee_index]
+        self.n_coords = self.model.joint_coord_count
+        self.initial_target = np.array(
+            [
+                float(ee_tf[0]),
+                float(ee_tf[1]),
+                float(ee_tf[2]),
+                float(ee_tf[3]),
+                float(ee_tf[4]),
+                float(ee_tf[5]),
+                float(ee_tf[6]),
+                0.8,
+            ],
+            dtype=np.float32,
+        )
 
         self.pos_obj = ik.IKObjectivePosition(
             link_index=self.ee_index,
@@ -245,6 +269,7 @@ class Example:
 
         joint_q_np = self.model.joint_q.numpy().astype(np.float32).reshape(1, self.model.joint_coord_count)
         self.joint_q_ik = wp.array(joint_q_np, dtype=wp.float32)
+        self.finger_pos_buf = wp.zeros(1, dtype=float)
         self.ik_solver = ik.IKSolver(
             model=self.model,
             n_problems=1,
@@ -254,7 +279,11 @@ class Example:
         )
         self.ik_iters = 24
 
-    def _target_at_time(self, time: float) -> np.ndarray:
+    def _target_at_time(self, time: float, is_delayed: bool) -> np.ndarray:
+        if is_delayed:
+            return self.initial_target
+
+        time -= self.action_delay
         if time >= self.robot_key_poses_time[-1]:
             return self.targets[-1]
 
@@ -267,32 +296,35 @@ class Example:
         alpha = alpha * alpha * (3.0 - 2.0 * alpha)
         return (1.0 - alpha) * target_prev + alpha * target_cur
 
-    def _solve_ik_and_push_control(self, time: float) -> None:
-        target = self._target_at_time(time)
+    def _solve_ik_and_push_control(self, time: float, is_delayed: bool) -> None:
+        if is_delayed:
+            wp.copy(self.control.joint_target_pos, self.model.joint_q)
+            return
+
+        target = self._target_at_time(time, is_delayed)
         self.pos_obj.set_target_position(0, wp.vec3(*target[:3].tolist()))
         self.rot_obj.set_target_rotation(0, wp.vec4(*target[3:7].tolist()))
         self.ik_solver.step(self.joint_q_ik, self.joint_q_ik, iterations=self.ik_iters)
+        self.finger_pos_buf.fill_(float(target[-1]) * self.gripper_activation_scale)
         wp.launch(
-            write_joint_targets_kernel,
+            set_gripper_q,
             dim=1,
-            inputs=[
-                self.joint_q_ik,
-                self.joint_targets_flat,
-                float(target[-1]),
-                self.gripper_activation_scale,
-            ],
+            inputs=[self.joint_q_ik, self.finger_pos_buf, self.finger_idx0, self.finger_idx1],
         )
+        wp.copy(self.joint_targets_flat, self.joint_q_ik, dest_offset=0, src_offset=0, count=self.n_coords)
         wp.copy(self.control.joint_target_pos, self.joint_targets_flat)
 
     def simulate(self):
         for _ in range(self.sim_substeps):
             self.state_0.clear_forces()
+            self._solve_ik_and_push_control(self.sim_time, self.frame < self.action_delay_frames)
             self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
             self.state_0, self.state_1 = self.state_1, self.state_0
 
     def step(self):
         self.simulate()
         self.sim_time += self.frame_dt
+        self.frame += 1
 
     def render(self):
         self.viewer.begin_frame(self.sim_time)
@@ -316,6 +348,7 @@ class Example:
 
 if __name__ == "__main__":
     parser = newton.examples.create_parser()
+    parser.set_defaults(num_frames=3850)
     parser.add_argument(
         "--cloth-model",
         default="strain_limiting_baraff_witkin",

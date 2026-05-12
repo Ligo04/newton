@@ -118,8 +118,8 @@ class Example:
         self.n_coords = self.model.joint_coord_count
         self.n_dofs = self.model.joint_dof_count
         self.ik_joint_q = wp.array(self.model.joint_q, shape=(1, self.n_coords))
-        self.finger_idx0 = self.n_coords - 2
-        self.finger_idx1 = self.n_coords - 1
+        self.finger_idx0 = next(i for i, lbl in enumerate(self.model.joint_label) if lbl.endswith("/fr3_finger_joint1"))
+        self.finger_idx1 = next(i for i, lbl in enumerate(self.model.joint_label) if lbl.endswith("/fr3_finger_joint2"))
         self.finger_pos_buf = wp.zeros(1, dtype=float)
         self.target_joint_q = wp.zeros(self.n_coords, dtype=float)
 
@@ -167,7 +167,7 @@ class Example:
             builder.joint_target_mode[d] = int(JointTargetMode.POSITION)
 
         gripper_open = 1.0
-        gripper_close = 0.5
+        gripper_close = 0.1
         self.robot_key_poses = np.array(
             [
                 # approach: move above the duck
@@ -194,7 +194,7 @@ class Example:
         self.target = self.targets[0]
 
         self.robot_key_poses_time = np.cumsum(self.robot_key_poses[:, 0])
-        self.endeffector_id = builder.body_count - 3
+        self.endeffector_id = next(i for i, lbl in enumerate(builder.body_label) if lbl.endswith("/fr3_link7"))
 
     def update_ik_targets(self):
         """Interpolate keyframes and update IK targets."""
