@@ -4,6 +4,7 @@
 
 ### Added
 
+- Add `uipc_cloth_franka_stable_pd_force` demo using `ControllerStablePD` EFFORT actuators for Franka contact-based cloth manipulation.
 - Add UIPC cloth poker-cards demo with stacked card patches, UIPC cloth self-contact, and a dynamic soft-transform sphere knock-off.
 - Add linear HDR color output support to `SensorTiledCamera` via `hdr_color_image`.
 - Add `pyuipc>=0.0.24` as a Python 3.11-3.12 runtime dependency and document UIPC solver parameter mappings.

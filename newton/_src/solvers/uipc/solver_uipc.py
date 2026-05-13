@@ -21,6 +21,7 @@ from uipc import view
 from uipc.core import (
     AffineBodyStateAccessorFeature,
     ContactElement,
+    ContactSystemFeature,
     ContactTabular,
     FiniteElementStateAccessorFeature,
     SanityCheckResult,
@@ -40,6 +41,7 @@ from ..flags import SolverNotifyFlags
 from ..solver import SolverBase
 from .articulation_builder import ArticulationBuilder
 from .cloth import ClothBuilder
+from .contact_forces import ContactForceReadback, retrieve_contact_forces
 from .converter import (
     UIpcMappingInfo,
     _read_fem_particle_positions_from_backend_kernel,
@@ -1087,9 +1089,56 @@ class SolverUIPC(SolverBase):
             state_out.body_f.zero_()
         if state_out.particle_f is not None:
             state_out.particle_f.zero_()
+        self._current_state_out = state_out
+        if contacts is not None:
+            self.update_contacts(contacts)
 
         self._step_count += 1
         self._articulation_builder.increment_step()
+
+    def get_contact_forces(self) -> ContactForceReadback:
+        """Retrieve per-body, per-primitive contact forces from UIPC.
+
+        Must be called after :meth:`step` (i.e. after ``world.retrieve()``).
+        Returns a :class:`ContactForceReadback` with per-body, per-primitive,
+        per-channel (normal/friction) force data.
+
+        Body keys:
+            - Non-negative int: rigid body index (ABD).
+            - ``-1 - mesh_idx``: cloth mesh.
+            - ``-(10000 + mesh_idx)``: deformable mesh.
+
+        Returns:
+            ContactForceReadback with ``data[body_key][prim_type][channel]``.
+        """
+        readback, _ = self._retrieve_contact_data()
+        return readback
+
+    def _retrieve_contact_data(self) -> tuple[ContactForceReadback, dict[int, int]]:
+        """Retrieve contact forces and vertex-to-particle map.
+
+        Returns:
+            (readback, vertex_to_particle) tuple.
+        """
+        if not self._initialized:
+            raise RuntimeError("get_contact_forces() requires initialize() first.")
+
+        csf: ContactSystemFeature | None = self.world.features().find(ContactSystemFeature)  # ty:ignore[invalid-assignment]
+        if csf is None:
+            return ContactForceReadback(), {}
+
+        model = self.model
+        body_q_np = model.body_q.numpy() if model.body_q is not None else None
+        body_com_np = model.body_com.numpy() if model.body_com is not None else None
+
+        return retrieve_contact_forces(
+            csf=csf,
+            mapping=self.mapping,
+            abd_accessor=self._abd_accessor,
+            fem_accessor=self._fem_accessor,
+            body_q_np=body_q_np,
+            body_com_np=body_com_np,
+        )
 
     def export_surface_obj(self, path: str) -> None:
         """Export the current scene surface geometry as a Wavefront OBJ file.
@@ -1274,7 +1323,6 @@ class SolverUIPC(SolverBase):
 
     def _notify_body_properties(self) -> None:
         """Handle :attr:`~newton.SolverNotifyFlags.BODY_PROPERTIES`.
-
         Flags Newton-owned state buffers for a push into UIPC so that
         ``model.body_q`` / ``model.body_qd`` and FEM particle state are
         mirrored by the backend.
@@ -1503,8 +1551,71 @@ class SolverUIPC(SolverBase):
 
     @override
     def update_contacts(self, contacts: Contacts) -> None:  # ty:ignore[invalid-method-override]  # pyright: ignore[reportIncompatibleMethodOverride]
-        """Update a Contacts object. No-op -- UIPC handles contacts internally."""
-        pass
+        """Write UIPC contact forces into Newton state and Contacts.
+
+        Populates ``state.body_f`` with per-rigid-body total contact wrench
+        and ``state.particle_f`` with per-particle contact forces for
+        cloth/deformable bodies. Per-body spatial forces are also written
+        into ``contacts.force`` if allocated.
+        """
+        state_out: State | None = getattr(self, "_current_state_out", None)
+        readback, vertex_to_particle = self._retrieve_contact_data()
+        if not readback.data:
+            return
+
+        model = self.model
+        body_count = model.body_count
+
+        if state_out is not None:
+            # Write body_f (spatial_vector: [fx, fy, fz, tx, ty, tz])
+            if state_out.body_f is not None and body_count > 0:
+                body_f_np = state_out.body_f.numpy()
+                for body_idx in readback.data:
+                    if body_idx < 0 or body_idx >= body_count:
+                        continue
+                    f, tau = readback.body_total(body_idx)
+                    body_f_np[body_idx, 0] = f[0]
+                    body_f_np[body_idx, 1] = f[1]
+                    body_f_np[body_idx, 2] = f[2]
+                    body_f_np[body_idx, 3] = tau[0]
+                    body_f_np[body_idx, 4] = tau[1]
+                    body_f_np[body_idx, 5] = tau[2]
+                state_out.body_f.assign(body_f_np)
+
+            # Write particle_f for FEM bodies (cloth + deformable)
+            if state_out.particle_f is not None and vertex_to_particle:
+                particle_f_np = state_out.particle_f.numpy()
+                for body_idx in readback.data:
+                    if body_idx >= 0:
+                        continue
+                    body = readback.data[body_idx]
+                    for prim_dict in body.values():
+                        for pbf in prim_dict.values():
+                            for v_idx, f_vec in zip(pbf.vertex_indices, pbf.forces, strict=True):
+                                p_idx = vertex_to_particle.get(int(v_idx))
+                                if p_idx is not None and p_idx < particle_f_np.shape[0]:
+                                    particle_f_np[p_idx] += f_vec
+                state_out.particle_f.assign(particle_f_np)
+
+        # Write Contacts.force if allocated (spatial_vector per contact slot)
+        if contacts.force is not None:
+            force_np = contacts.force.numpy()
+            slot = 0
+            for body_idx in sorted(readback.data):
+                if body_idx < 0 or body_idx >= body_count:
+                    continue
+                if slot >= force_np.shape[0]:
+                    break
+                f, tau = readback.body_total(body_idx)
+                force_np[slot, 0] = f[0]
+                force_np[slot, 1] = f[1]
+                force_np[slot, 2] = f[2]
+                force_np[slot, 3] = tau[0]
+                force_np[slot, 4] = tau[1]
+                force_np[slot, 5] = tau[2]
+                slot += 1
+            contacts.force.assign(force_np)
+            contacts.rigid_contact_count.assign(np.array([slot], dtype=np.int32))
 
     # ------------------------------------------------------------------
     # GPU batch sync methods

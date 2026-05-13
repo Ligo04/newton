@@ -38,6 +38,9 @@ _HAS_UIPC = importlib.util.find_spec("uipc") is not None
 
 if _HAS_UIPC:
     from newton.examples.uipc.example_uipc_cloth_franka import Example as UIPCClothFrankaExample
+    from newton.examples.uipc.example_uipc_cloth_franka_stable_pd_force import (
+        Example as StablePDForceExample,
+    )
     from newton.examples.uipc.example_uipc_softbody_dropping_to_cloth import (
         Example as UIPCSoftbodyDroppingToClothExample,
     )
@@ -939,6 +942,101 @@ class TestUIPCSoftbodyExamples(unittest.TestCase):
         self.assertLess(float(finger_closed.max()), float(finger_open.max()))
         self.assertLess(float(finger_closed.max()), 0.04)
 
+    def test_uipc_cloth_franka_stable_pd_force_holds_initial_pose_with_feedforward(self):
+        if not _HAS_UIPC:
+            self.skipTest("Requires uipc")
+        if not cuda_test_devices:
+            self.skipTest("Requires a CUDA test device")
+
+        class DummyViewer:
+            def __init__(self):
+                self._paused = False
+
+            def set_model(self, model):
+                pass
+
+            def set_camera(self, **kwargs):
+                pass
+
+            def begin_frame(self, *args, **kwargs):
+                pass
+
+            def log_state(self, *args, **kwargs):
+                pass
+
+            def end_frame(self):
+                pass
+
+        with wp.ScopedDevice(cuda_test_devices[0]):
+            example = StablePDForceExample(
+                DummyViewer(),
+                types.SimpleNamespace(cloth_model="strain_limiting_baraff_witkin"),
+            )
+            example._solve_ik_and_push_control(example.sim_time, is_delayed=True)
+            example._apply_stable_pd_force_control()
+            joint_f = example.control.joint_f.numpy()
+
+        self.assertGreater(float(np.max(np.abs(joint_f[:7]))), 1.0e-3)
+
+    def test_uipc_cloth_franka_stable_pd_force_generates_nonzero_joint_force(self):
+        if not _HAS_UIPC:
+            self.skipTest("Requires uipc")
+        if not cuda_test_devices:
+            self.skipTest("Requires a CUDA test device")
+
+        class DummyViewer:
+            def __init__(self):
+                self._paused = False
+
+            def set_model(self, model):
+                pass
+
+            def set_camera(self, **kwargs):
+                pass
+
+            def begin_frame(self, *args, **kwargs):
+                pass
+
+            def log_state(self, *args, **kwargs):
+                pass
+
+            def end_frame(self):
+                pass
+
+        with wp.ScopedDevice(cuda_test_devices[0]):
+            example = StablePDForceExample(
+                DummyViewer(),
+                types.SimpleNamespace(cloth_model="strain_limiting_baraff_witkin"),
+            )
+            example.sim_time = 7.9
+            example.frame = example.action_delay_frames
+            example._solve_ik_and_push_control(example.sim_time, is_delayed=False)
+            example._apply_stable_pd_force_control()
+            joint_f = example.control.joint_f.numpy()
+
+        self.assertGreater(float(np.max(np.abs(joint_f))), 1.0e-3)
+
+    def test_uipc_cloth_franka_stable_pd_force_uses_effort_actuators(self):
+        example_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "examples",
+            "uipc",
+            "example_uipc_cloth_franka_stable_pd_force.py",
+        )
+        with open(example_path) as f:
+            source = f.read()
+
+        self.assertIn("ControllerStablePD", source)
+        self.assertIn("ClampingMaxEffort", source)
+        self.assertIn("JointTargetMode.EFFORT", source)
+        self.assertIn("control.joint_f.zero_()", source)
+        self.assertIn("eval_mass_matrix", source)
+        self.assertIn("bias_forces", source)
+        self.assertIn("_solve_ik_and_push_control", source)
+        self.assertIn("configure_contact_tabular", source)
+        self.assertNotIn("JointTargetMode.POSITION", source)
+        self.assertNotIn("set_cloth_soft_position_constraints", source)
+
 
 if _HAS_UIPC:
     add_example_test(
@@ -972,6 +1070,13 @@ if _HAS_UIPC:
     add_example_test(
         TestUIPCSoftbodyExamples,
         name="uipc.example_uipc_cloth_franka",
+        devices=cuda_test_devices,
+        test_options={"num-frames": 1},
+        use_viewer=True,
+    )
+    add_example_test(
+        TestUIPCSoftbodyExamples,
+        name="uipc.example_uipc_cloth_franka_stable_pd_force",
         devices=cuda_test_devices,
         test_options={"num-frames": 1},
         use_viewer=True,

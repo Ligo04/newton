@@ -384,6 +384,22 @@ If you installed from source with uv, substitute `uv run` for `python` in the co
     </td>
   </tr>
   <tr>
+    <td align="center" width="33%">
+      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/uipc/example_uipc_cloth_franka_stable_pd_force.py">
+        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_cloth_franka.jpg" alt="UIPC Cloth Franka Stable-PD Force">
+      </a>
+    </td>
+    <td align="center" width="33%"></td>
+    <td align="center" width="33%"></td>
+  </tr>
+  <tr>
+    <td align="center" width="33%">
+      <code>python -m newton.examples uipc_cloth_franka_stable_pd_force</code>
+    </td>
+    <td align="center" width="33%"></td>
+    <td align="center" width="33%"></td>
+  </tr>
+  <tr>
     <td colspan="3"><h3>Inverse Kinematics Examples</h3></td>
   </tr>
   <tr>
