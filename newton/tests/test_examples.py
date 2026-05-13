@@ -1088,6 +1088,21 @@ if _HAS_UIPC:
         test_options={"num-frames": 5, "num-cards": 4},
         use_viewer=True,
     )
+    add_example_test(
+        TestUIPCSoftbodyExamples,
+        name="uipc.example_uipc_sensor_contact",
+        devices=cuda_test_devices,
+        test_options={"num-frames": 60},
+        use_viewer=True,
+    )
+    add_example_test(
+        TestUIPCSoftbodyExamples,
+        name="uipc.example_uipc_sensor_contact",
+        devices=cuda_test_devices,
+        test_options={"num-frames": 60, "solver": "mujoco"},
+        use_viewer=True,
+        test_suffix="mujoco",
+    )
 
 
 class TestKaminoExamples(unittest.TestCase):

@@ -447,6 +447,12 @@ class UIpcMappingInfo:
     deformable_rest_geo_slots: list[Any] = field(default_factory=list)
     deformable_particle_indices: list[Any] = field(default_factory=list)  # np.ndarray per mesh
 
+    # GPU lookup tables for contact force scatter (populated by build_gpu_vertex_maps)
+    vertex_to_body_wp: wp.array | None = None  # (max_global_vertex,) int32
+    vertex_to_particle_wp: wp.array | None = None  # (max_global_vertex,) int32
+    body_to_first_shape_wp: wp.array | None = None  # (body_count,) int32
+    max_global_vertex: int = 0
+
 
 # ---------------------------------------------------------------------------
 # Build mesh for a Newton body
