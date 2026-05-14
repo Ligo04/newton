@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import atexit
 import os
 import warnings
 import weakref
@@ -199,10 +198,10 @@ class SolverUIPC(SolverBase):
             require_profile: Enable UIPC timer collection for performance
                 reports. When ``True``, each :meth:`step` records timer data
                 that can later be exported via :meth:`save_performance_report`.
-                Additionally, an ``atexit`` hook is registered that invokes
-                :meth:`save_performance_report` once on normal interpreter
-                shutdown, so users do not need to call it explicitly. The
-                hook is a no-op if the report was already saved manually.
+                A weak-reference destructor hook automatically invokes
+                :meth:`save_performance_report` when the solver is
+                garbage-collected or at interpreter shutdown, so users do
+                not need to call it explicitly.
             auto_sync_inertia: If ``True`` (default), :meth:`initialize`
                 finishes by calling :meth:`sync_model_inertia_from_uipc`
                 so the Newton model's ``body_mass`` / ``body_com`` /
@@ -266,32 +265,27 @@ class SolverUIPC(SolverBase):
         self._stats: USimulationStats | None = USimulationStats() if require_profile else None
         self._auto_report_saved: bool = False
 
-        # Register an atexit hook so the performance report is written on
-        # normal interpreter shutdown even if the user forgets to call
-        # save_performance_report() explicitly. A weakref avoids keeping the
-        # solver (and its CUDA resources) alive solely for the hook.
+        # weakref.finalize fires when the solver is GC'd (e.g. viewer closed
+        # → example freed → solver freed) OR at interpreter shutdown —
+        # whichever comes first.  The atexit approach failed because the
+        # solver is often a temporary whose ref dies before atexit fires.
         if require_profile:
-            self_ref = weakref.ref(self)
 
-            def _auto_save_performance_report() -> None:
-                solver = self_ref()
-                if solver is None:
-                    return
-                if solver._auto_report_saved:
-                    return
-                if solver._stats is None or solver._stats.num_frames == 0:
+            def _auto_save(stats: USimulationStats, workspace: str) -> None:
+                if stats.num_frames == 0:
                     return
                 try:
-                    solver.save_performance_report()
+                    output_dir = os.path.join(workspace, "perf_report")
+                    result = stats.summary_report(output_dir=output_dir, workspace=workspace)
+                    if result is not None:
+                        print(f"[SolverUIPC] Performance report saved to: {result}", flush=True)
                 except Exception as exc:
                     warnings.warn(
-                        f"SolverUIPC atexit: save_performance_report() failed: {exc}",
+                        f"SolverUIPC: save_performance_report() failed: {exc}",
                         stacklevel=1,
                     )
-                finally:
-                    solver._auto_report_saved = True
 
-            atexit.register(_auto_save_performance_report)
+            self._finalizer = weakref.finalize(self, _auto_save, self._stats, self._workspace)
 
         # User-registered callbacks (set via configure_* methods)
         self._contact_tabular_fn: Callable | None = None
@@ -1225,12 +1219,10 @@ class SolverUIPC(SolverBase):
 
         result = self._stats.summary_report(**kwargs)  # ty:ignore[invalid-argument-type]  # pyright: ignore[reportArgumentType]
         self._auto_report_saved = True
+        if hasattr(self, "_finalizer"):
+            self._finalizer.detach()
         result_str = str(result) if result is not None else None
         if result_str is not None:
-            # Print to stdout so users can see where the report landed even
-            # when this method is invoked implicitly (e.g. from atexit hooks
-            # or NewtonManager.clear() teardown). flush=True guards against
-            # buffering when called late in interpreter shutdown.
             print(f"[SolverUIPC] Performance report saved to: {result_str}", flush=True)
         return result_str
 
