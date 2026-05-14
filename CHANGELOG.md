@@ -18,7 +18,7 @@
 ### Added
 
 - Add linear HDR color output support to `SensorTiledCamera` via `hdr_color_image`.
-- Add `pyuipc>=0.0.24` as a Python 3.11-3.12 runtime dependency and document UIPC solver parameter mappings.
+- Add `pyuipc>=0.0.24` as a Python 3.10-3.13 runtime dependency and document UIPC solver parameter mappings.
 - Add an optional `kernel_block_dim` argument to `SensorTiledCamera.update()` for tuning the Warp ray-tracer's `render_megakernel` launch shape.
 - Add composable actuator subsystem with pluggable `Controller` (`ControllerPD`, `ControllerPID`, `ControllerNeuralMLP`, `ControllerNeuralLSTM`), `Clamping` (`ClampingMaxEffort`, `ClampingDCMotor`, `ClampingPositionBased`), and `Delay` components; supports per-DOF delays, CUDA graph capture, and masked environment reset
 - Add UIPC softbody hanging, softbody Franka, and deformable-body demos using Stable Neo-Hookean deformables

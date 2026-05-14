@@ -31,7 +31,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "warp-lang>=1.13.0",
-    "pyuipc>=0.0.24; python_version > '3.10' and python_version < '3.13'",
+    "pyuipc>=0.0.24; python_version >= '3.10' and python_version <= '3.13'",
 ]
 
 [project.optional-dependencies]
