@@ -474,12 +474,12 @@ class ArticulationBuilder:
             if lower is not None and upper is not None:
                 lowers.append(lower)
                 uppers.append(upper)
-                limit_strengths.append(100.0)
+                limit_strengths.append(self._extract_limit_strength(j, model.joint_qd_start, model.joint_limit_ke))
                 has_any_limit = True
             else:
                 lowers.append(-1e18)
                 uppers.append(1e18)
-                limit_strengths.append(100.0)
+                limit_strengths.append(self._extract_limit_strength(j, model.joint_qd_start, model.joint_limit_ke))
 
             init_angles.append(float(joint_q_np[q_start]) if joint_q_np is not None else 0.0)
             art.register_joint(j, q_start, qd_start)
@@ -639,12 +639,12 @@ class ArticulationBuilder:
             if lower is not None and upper is not None:
                 lowers.append(lower)
                 uppers.append(upper)
-                limit_strengths.append(100.0)
+                limit_strengths.append(self._extract_limit_strength(j, model.joint_qd_start, model.joint_limit_ke))
                 has_any_limit = True
             else:
                 lowers.append(-1e18)
                 uppers.append(1e18)
-                limit_strengths.append(100.0)
+                limit_strengths.append(self._extract_limit_strength(j, model.joint_qd_start, model.joint_limit_ke))
 
             art.register_joint(j, q_start, qd_start)
             anim_dispatch.append((art, j, edge_idx))
@@ -1017,6 +1017,18 @@ class ArticulationBuilder:
         lower = float(joint_limit_lower.numpy()[qd_start]) if joint_limit_lower is not None else None
         upper = float(joint_limit_upper.numpy()[qd_start]) if joint_limit_upper is not None else None
         return lower, upper
+
+    @staticmethod
+    def _extract_limit_strength(
+        j: int,
+        joint_qd_start: wp.array,
+        joint_limit_ke: wp.array | None,
+    ) -> float:
+        """Extract UIPC joint-limit strength from Newton's per-DOF limit stiffness."""
+        if joint_limit_ke is None:
+            return 100.0
+        qd_start = int(joint_qd_start.numpy()[j])
+        return float(joint_limit_ke.numpy()[qd_start])
 
     # ------------------------------------------------------------------
     # Per-step interface (called by SolverUIPC.step)
