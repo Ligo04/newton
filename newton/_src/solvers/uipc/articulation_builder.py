@@ -120,17 +120,26 @@ class ArticulationBuilder:
         if model.joint_count == 0:
             return
 
-        # Validate required model arrays
-        required = (
-            model.joint_type,
-            model.joint_parent,
-            model.joint_child,
-            model.joint_X_p,
-            model.joint_axis,
-            model.joint_q_start,
-            model.joint_qd_start,
-        )
-        if any(a is None for a in required):
+        # Validate required model arrays. Keep local bindings so type checkers
+        # can narrow the Optional array attributes after the explicit guard.
+        joint_type = model.joint_type
+        joint_parent = model.joint_parent
+        joint_child = model.joint_child
+        joint_X_p = model.joint_X_p
+        joint_X_c = model.joint_X_c
+        joint_axis = model.joint_axis
+        joint_q_start = model.joint_q_start
+        joint_qd_start = model.joint_qd_start
+        if (
+            joint_type is None
+            or joint_parent is None
+            or joint_child is None
+            or joint_X_p is None
+            or joint_X_c is None
+            or joint_axis is None
+            or joint_q_start is None
+            or joint_qd_start is None
+        ):
             return
 
         jstart, jend = joint_range[0], joint_range[1]
@@ -156,11 +165,11 @@ class ArticulationBuilder:
             self.articulations[a] = Articulation(name=label, dt=self._dt, device=self._device)
 
         # Pre-fetch numpy arrays
-        joint_X_p_np = model.joint_X_p.numpy()
-        joint_X_c_np = model.joint_X_c.numpy()
-        joint_type_np = model.joint_type.numpy()
-        joint_parent_np = model.joint_parent.numpy()
-        joint_child_np = model.joint_child.numpy()
+        joint_X_p_np = joint_X_p.numpy()
+        joint_X_c_np = joint_X_c.numpy()
+        joint_type_np = joint_type.numpy()
+        joint_parent_np = joint_parent.numpy()
+        joint_child_np = joint_child.numpy()
 
         # -- Pre-pass: create proxy meshes for shapeless bodies ----------------
         # Shapeless bodies (e.g. URDF frame-only links ``fr3_link8``) get
@@ -405,9 +414,15 @@ class ArticulationBuilder:
         init_angles: list[float] = []
         has_any_limit = False
 
-        joint_axis_np = model.joint_axis.numpy()
-        joint_qd_start_np = model.joint_qd_start.numpy()
-        joint_q_start_np = model.joint_q_start.numpy()
+        joint_axis = model.joint_axis
+        joint_qd_start = model.joint_qd_start
+        joint_q_start = model.joint_q_start
+        if joint_axis is None or joint_qd_start is None or joint_q_start is None:
+            return
+
+        joint_axis_np = joint_axis.numpy()
+        joint_qd_start_np = joint_qd_start.numpy()
+        joint_q_start_np = joint_q_start.numpy()
         # Revolute-only: UIPC's ``angle`` edge attribute measures rotation
         # *relative to the build-time body configuration*, so we seed
         # ``init_angle`` with the build-time Newton angle ``joint_q`` so
@@ -580,9 +595,15 @@ class ArticulationBuilder:
         limit_strengths: list[float] = []
         has_any_limit = False
 
-        joint_axis_np = model.joint_axis.numpy()
-        joint_qd_start_np = model.joint_qd_start.numpy()
-        joint_q_start_np = model.joint_q_start.numpy()
+        joint_axis = model.joint_axis
+        joint_qd_start = model.joint_qd_start
+        joint_q_start = model.joint_q_start
+        if joint_axis is None or joint_qd_start is None or joint_q_start is None:
+            return
+
+        joint_axis_np = joint_axis.numpy()
+        joint_qd_start_np = joint_qd_start.numpy()
+        joint_q_start_np = joint_q_start.numpy()
 
         anim_dispatch: list[tuple[Articulation, int, int]] = []
         for edge_idx, jdata in enumerate(joints):
@@ -744,7 +765,9 @@ class ArticulationBuilder:
             r_positions.append(child_pivot)
             child_slots.append(c_slot)
             child_ids.append(c_id)
-            parent_slots.append(p_slot)  # pyright: ignore[reportArgumentType]
+            if p_slot is None:
+                raise RuntimeError(f"Missing parent geometry slot for fixed joint {j}.")
+            parent_slots.append(p_slot)
             parent_ids.append(p_id)
             strengths.append(100.0)
             joint_indices.append(j)
@@ -783,8 +806,13 @@ class ArticulationBuilder:
         strengths: list[float] = []
         joint_indices: list[int] = []
 
-        joint_X_p_np = model.joint_X_p.numpy()
-        joint_X_c_np = model.joint_X_c.numpy() if model.joint_X_c is not None else None
+        joint_X_p = model.joint_X_p
+        joint_X_c = model.joint_X_c
+        if joint_X_p is None:
+            return
+
+        joint_X_p_np = joint_X_p.numpy()
+        joint_X_c_np = joint_X_c.numpy() if joint_X_c is not None else None
 
         for jdata in joints:
             j: int = jdata["j"]

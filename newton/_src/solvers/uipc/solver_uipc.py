@@ -894,9 +894,11 @@ class SolverUIPC(SolverBase):
         articulation_bodies: set[int] = set()
         free_joint_bodies: set[int] = set()
         ball_joint_bodies: set[int] = set()
-        if model.joint_child is not None:
-            joint_child_np = model.joint_child.numpy()
-            joint_type_np = model.joint_type.numpy() if model.joint_type is not None else None
+        joint_child = model.joint_child
+        joint_type = model.joint_type
+        if joint_child is not None:
+            joint_child_np = joint_child.numpy()
+            joint_type_np = joint_type.numpy() if joint_type is not None else None
             for j in range(model.joint_count):
                 child = int(joint_child_np[j])
                 if child < 0:
@@ -910,8 +912,9 @@ class SolverUIPC(SolverBase):
                 else:
                     articulation_bodies.add(child)
             # Also include parent bodies that are part of articulations
-            if model.joint_parent is not None:
-                joint_parent_np = model.joint_parent.numpy()
+            joint_parent = model.joint_parent
+            if joint_parent is not None:
+                joint_parent_np = joint_parent.numpy()
                 for j in range(model.joint_count):
                     parent = int(joint_parent_np[j])
                     if parent >= 0:
@@ -924,17 +927,29 @@ class SolverUIPC(SolverBase):
 
         # Host-side indexing for per-world ranges (multi-world only)
         if model.world_count > 1:
-            body_ws = model.body_world_start.numpy()  # ty:ignore[unresolved-attribute]  # pyright: ignore[reportOptionalMemberAccess]
-            joint_ws = model.joint_world_start.numpy()  # ty:ignore[unresolved-attribute]  # pyright: ignore[reportOptionalMemberAccess]
-            particle_ws = model.particle_world_start.numpy() if model.particle_world_start is not None else None
+            body_world_start = model.body_world_start
+            joint_world_start = model.joint_world_start
+            particle_world_start = model.particle_world_start
+            if body_world_start is None or joint_world_start is None:
+                raise RuntimeError("Multi-world UIPC initialization requires body and joint world ranges.")
+
+            body_ws = body_world_start.numpy()
+            joint_ws = joint_world_start.numpy()
+            particle_ws = particle_world_start.numpy() if particle_world_start is not None else None
         else:
             body_ws = None
             joint_ws = None
             particle_ws = None
 
         if state is None:
+            joint_q = model.joint_q
+            joint_qd = model.joint_qd
+            if model.joint_count > 0:
+                if joint_q is None or joint_qd is None:
+                    raise RuntimeError("UIPC initialization requires joint_q and joint_qd for articulated models.")
             state: State = model.state()
-            newton.eval_fk(model, model.joint_q, model.joint_qd, state)  # ty:ignore[invalid-argument-type]  # pyright: ignore[reportArgumentType]
+            if model.joint_count > 0:
+                newton.eval_fk(model, joint_q, joint_qd, state)
         if model.body_q is not None and state.body_q is not None:
             wp.copy(model.body_q, state.body_q)
         if state.body_qd is not None and model.body_qd is not None:
@@ -1371,9 +1386,14 @@ class SolverUIPC(SolverBase):
         coordinates and velocities.
         """
         model = self.model
+        joint_q = model.joint_q
+        joint_qd = model.joint_qd
+        if model.joint_count > 0:
+            if joint_q is None or joint_qd is None:
+                raise RuntimeError("UIPC joint property notification requires joint_q and joint_qd.")
         state = self.model.state()
-        if model.joint_q is not None and model.joint_qd is not None:
-            newton.eval_fk(model, model.joint_q, model.joint_qd, state)
+        if model.joint_count > 0:
+            newton.eval_fk(model, joint_q, joint_qd, state)
         self._state_dirty = True
 
     def _notify_body_properties(self) -> None:
