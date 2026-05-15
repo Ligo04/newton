@@ -9,11 +9,12 @@ from typing import Any
 
 import numpy as np
 import uipc.builtin as uipc_builtin
-from uipc import view
 from uipc.constitution import ElasticModuli, SoftPositionConstraint, StableNeoHookean
 from uipc.core import ContactElement, SubsceneElement
 from uipc.geometry import flip_inward_triangles, label_surface, label_triangle_orient, mesh_partition
 from uipc.geometry import tetmesh as uipc_tetmesh
+
+from newton._src.solvers.uipc.utils import _view_attr
 
 from ...sim import Model
 from .converter import UIpcMappingInfo
@@ -223,8 +224,8 @@ class DeformableBodyBuilder:
         snh_mu = (4.0 / 3.0) * tet_materials_np[:, 0]
         snh_lambda = tet_materials_np[:, 1] + (5.0 / 6.0) * tet_materials_np[:, 0]
 
-        mu_view = view(mu_attr)
-        lambda_view = view(lambda_attr)
+        mu_view = _view_attr(mu_attr)
+        lambda_view = _view_attr(lambda_attr)
         mu_view[:] = np.asarray(snh_mu, dtype=mu_view.dtype)
         lambda_view[:] = np.asarray(snh_lambda, dtype=lambda_view.dtype)
 
@@ -272,4 +273,4 @@ class DeformableBodyBuilder:
         fixed_attr = sc.vertices().find(uipc_builtin.is_fixed)
         if fixed_attr is None:
             fixed_attr = sc.vertices().create(uipc_builtin.is_fixed, np.zeros(sc.vertices().size(), dtype=np.int32))
-        view(fixed_attr)[local_indices] = 1
+        _view_attr(fixed_attr)[local_indices] = 1

@@ -14,9 +14,10 @@ from typing import Any
 
 import numpy as np
 import warp as wp
-from uipc import view
 from uipc.core import Animation
 from uipc.geometry import SimplicialComplex, SimplicialComplexSlot
+
+from newton._src.solvers.uipc.utils import _view_attr
 
 from ...sim import JointTargetMode, JointType
 
@@ -370,18 +371,18 @@ class Articulation:
         external_torque = self.target_force.numpy()[local]
         aim_angle = self.target_position.numpy()[local]
 
-        view(geo.edges().find("driving/is_constrained"))[edge_idx] = int(driving)  # ty:ignore[no-matching-overload]  # pyright: ignore[reportArgumentType]
-        view(geo.edges().find("external_torque/is_constrained"))[edge_idx] = int(force_only)  # ty:ignore[no-matching-overload]  # pyright: ignore[reportArgumentType]
+        _view_attr(geo.edges().find("driving/is_constrained"))[edge_idx] = int(driving)
+        _view_attr(geo.edges().find("external_torque/is_constrained"))[edge_idx] = int(force_only)
 
         # Force/torque control
         if force_only:
-            view(geo.edges().find("external_torque"))[edge_idx] = external_torque  # ty:ignore[no-matching-overload]  # pyright: ignore[reportArgumentType]
+            _view_attr(geo.edges().find("external_torque"))[edge_idx] = external_torque
 
         # Position/velocity driving — ``aim_angle`` is in Newton absolute
         # space thanks to the ``init_angle`` edge offset, so write the
         # Newton target directly.
         if driving:
-            view(geo.edges().find("aim_angle"))[edge_idx] = aim_angle  # ty:ignore[no-matching-overload]  # pyright: ignore[reportArgumentType]
+            _view_attr(geo.edges().find("aim_angle"))[edge_idx] = aim_angle
 
     def prismatic_joint_anim(
         self,
@@ -418,14 +419,14 @@ class Articulation:
         external_force = self.target_force.numpy()[local]
         aim_distance = self.target_position.numpy()[local]
 
-        view(geo.edges().find("driving/is_constrained"))[edge_idx] = int(driving)  # ty:ignore[no-matching-overload]  # pyright: ignore[reportArgumentType]
-        view(geo.edges().find("external_force/is_constrained"))[edge_idx] = int(force_only)  # ty:ignore[no-matching-overload]  # pyright: ignore[reportArgumentType]
+        _view_attr(geo.edges().find("driving/is_constrained"))[edge_idx] = int(driving)
+        _view_attr(geo.edges().find("external_force/is_constrained"))[edge_idx] = int(force_only)
 
         if force_only:
-            view(geo.edges().find("external_force"))[edge_idx] = external_force  # ty:ignore[no-matching-overload]  # pyright: ignore[reportArgumentType]
+            _view_attr(geo.edges().find("external_force"))[edge_idx] = external_force
 
         if driving:
-            view(geo.edges().find("aim_distance"))[edge_idx] = aim_distance  # ty:ignore[no-matching-overload]  # pyright: ignore[reportArgumentType]
+            _view_attr(geo.edges().find("aim_distance"))[edge_idx] = aim_distance
 
     # ------------------------------------------------------------------
     # Per-step control caching & state readback
@@ -567,9 +568,9 @@ class Articulation:
             edge_idx = self._joint_edge_idx[newton_j]
             geo: SimplicialComplex = self.joint_geo_slots[newton_j].geometry()
             if self._joint_is_revolute[newton_j]:
-                pos_np[local] = float(view(geo.edges().find("angle"))[edge_idx])
+                pos_np[local] = float(_view_attr(geo.edges().find("angle"))[edge_idx])
             else:
-                pos_np[local] = float(view(geo.edges().find("distance"))[edge_idx])
+                pos_np[local] = float(_view_attr(geo.edges().find("distance"))[edge_idx])
 
     def read_post_retrieve(self) -> None:
         """Re-read edge attributes after ``world.retrieve()`` and finite-difference.
@@ -595,9 +596,9 @@ class Articulation:
             geo: SimplicialComplex = self.joint_geo_slots[newton_j].geometry()
 
             if self._joint_is_revolute[newton_j]:
-                curr_val: float = float(view(geo.edges().find("angle"))[edge_idx])
+                curr_val: float = float(_view_attr(geo.edges().find("angle"))[edge_idx])
             else:
-                curr_val = float(view(geo.edges().find("distance"))[edge_idx])
+                curr_val = float(_view_attr(geo.edges().find("distance"))[edge_idx])
 
             pre_val = pos_np[local]
             vel_np[local] = (curr_val - pre_val) / self._dt

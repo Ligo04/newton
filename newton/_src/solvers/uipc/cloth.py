@@ -9,7 +9,6 @@ from typing import Any
 
 import numpy as np
 import uipc.builtin as uipc_builtin
-from uipc import view
 from uipc.constitution import (
     DiscreteShellBending,
     ElasticModuli2D,
@@ -20,6 +19,8 @@ from uipc.constitution import (
 from uipc.core import ContactElement, SubsceneElement
 from uipc.geometry import is_trimesh_closed, label_surface, mesh_partition
 from uipc.geometry import trimesh as uipc_trimesh
+
+from newton._src.solvers.uipc.utils import _view_attr
 
 from ...sim import Model
 from .converter import UIpcMappingInfo
@@ -291,8 +292,8 @@ class ClothBuilder:
         if mu_attr is None or lambda_attr is None:
             raise RuntimeError("Cloth membrane apply_to() did not create triangle mu/lambda attributes.")
 
-        mu_view = view(mu_attr)
-        lambda_view = view(lambda_attr)
+        mu_view = _view_attr(mu_attr)
+        lambda_view = _view_attr(lambda_attr)
         mu_view[:] = np.asarray(tri_materials_np[:, 0], dtype=mu_view.dtype)
         lambda_view[:] = np.asarray(tri_materials_np[:, 1], dtype=lambda_view.dtype)
 
@@ -312,7 +313,7 @@ class ClothBuilder:
             raise RuntimeError("DiscreteShellBending.apply_to() did not create edge bending_stiffness attributes.")
 
         global_to_local = {int(global_idx): local_idx for local_idx, global_idx in enumerate(particle_indices)}
-        uipc_edges = np.asarray(view(sc.edges().topo()), dtype=np.int32).reshape(-1, 2)
+        uipc_edges = np.asarray(_view_attr(sc.edges().topo()), dtype=np.int32).reshape(-1, 2)
         local_edge_to_index = {tuple(sorted((int(edge[0]), int(edge[1])))): idx for idx, edge in enumerate(uipc_edges)}
 
         edge_indices_np = model.edge_indices.numpy().reshape(-1, 4)
@@ -323,7 +324,7 @@ class ClothBuilder:
             estart, eend = edge_range
             edge_ids = range(estart, eend)
 
-        bending_view = view(bending_attr)
+        bending_view = _view_attr(bending_attr)
         for edge_id in edge_ids:
             _, _, global_k, global_l = edge_indices_np[edge_id]
             local_k = global_to_local.get(int(global_k))
@@ -349,7 +350,7 @@ class ClothBuilder:
         fixed_attr = sc.vertices().find(uipc_builtin.is_fixed)
         if fixed_attr is None:
             fixed_attr = sc.vertices().create(uipc_builtin.is_fixed, np.zeros(sc.vertices().size(), dtype=np.int32))
-        view(fixed_attr)[local_indices] = 1
+        _view_attr(fixed_attr)[local_indices] = 1
 
     def _estimate_mass_density(
         self,
@@ -408,11 +409,11 @@ class ClothBuilder:
         """Write per-vertex thickness and keep shell volume consistent."""
         thickness_attr = sc.vertices().find("thickness")
         if thickness_attr is not None:
-            view(thickness_attr)[:] = np.asarray(thickness_values, dtype=np.float64)
+            _view_attr(thickness_attr)[:] = np.asarray(thickness_values, dtype=np.float64)
 
         volume_attr = sc.vertices().find("volume")
         if volume_attr is not None:
-            volume = view(volume_attr)
+            volume = _view_attr(volume_attr)
             volume[:] = np.asarray(volume, dtype=np.float64) * (thickness_values / applied_thickness)
 
     @classmethod

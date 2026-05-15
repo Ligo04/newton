@@ -17,7 +17,6 @@ from typing import Any
 import numpy as np
 import uipc.builtin as uipc_builtin
 import warp as wp
-from uipc import view
 from uipc.constitution import (
     AffineBodyConstitution,
     AffineBodyDrivingPrismaticJoint,
@@ -35,6 +34,8 @@ from uipc.constitution import (
 from uipc.core import Animation, Object
 from uipc.geometry import SimplicialComplex, SimplicialComplexSlot
 from uipc.unit import MPa
+
+from newton._src.solvers.uipc.utils import _view_attr
 
 from ...math import normalize_with_norm
 from ...sim import Control, JointType, Model, State
@@ -346,10 +347,10 @@ class ArticulationBuilder:
         volume = 1e-9
         sc = self._abd.create_proxy(self._kappa, mass, mass_center, inertia, volume)
 
-        view(sc.transforms())[:] = transform
+        _view_attr(sc.transforms())[:] = transform
 
         if is_fixed:
-            view(sc.instances().find(uipc_builtin.is_fixed))[:] = 1  # type: ignore  # pyright: ignore[reportArgumentType]
+            _view_attr(sc.instances().find(uipc_builtin.is_fixed))[:] = 1
 
         # Apply contact / subscene so the proxy participates in the same
         # contact group and subscene as other robot bodies.
@@ -524,7 +525,7 @@ class ArticulationBuilder:
         # ``distance`` is already absolute.
         if joint_q_np is not None:
             init_angles_np = np.array(init_angles, dtype=np.float64)
-            init_angle_view: np.ndarray = view(jm.edges().find("init_angle"))  # ty:ignore[no-matching-overload]  # pyright: ignore[reportArgumentType]
+            init_angle_view: np.ndarray = _view_attr(jm.edges().find("init_angle"))
             init_angle_view[:] = init_angles_np
 
         jobj: Object = self._scene.objects().create("joints_revolute")
@@ -729,7 +730,7 @@ class ArticulationBuilder:
 
             if parent_body == -1:
                 # World-attached FIXED joint → just pin the child directly.
-                view(c_slot.geometry().instances().find(uipc_builtin.is_fixed))[c_id] = 1  # pyright: ignore[reportArgumentType, reportCallIssue]
+                _view_attr(c_slot.geometry().instances().find(uipc_builtin.is_fixed))[c_id] = 1
                 continue
 
             l_positions.append(parent_pivot)
@@ -855,8 +856,8 @@ class ArticulationBuilder:
         Raises:
             RuntimeError: If the world-space positions do not match.
         """
-        p_tf: np.ndarray = view(p_slot.geometry().transforms())[p_id]
-        c_tf: np.ndarray = view(c_slot.geometry().transforms())[c_id]
+        p_tf: np.ndarray = _view_attr(p_slot.geometry().transforms())[p_id]
+        c_tf: np.ndarray = _view_attr(c_slot.geometry().transforms())[c_id]
 
         def to_world(tf: np.ndarray, p: np.ndarray) -> np.ndarray:
             return (tf @ np.append(p, 1.0))[:3]
@@ -916,8 +917,8 @@ class ArticulationBuilder:
         Raises:
             RuntimeError: If axes are not parallel or anchors not collinear.
         """
-        p_tf: np.ndarray = view(p_slot.geometry().transforms())[p_id]
-        c_tf: np.ndarray = view(c_slot.geometry().transforms())[c_id]
+        p_tf: np.ndarray = _view_attr(p_slot.geometry().transforms())[p_id]
+        c_tf: np.ndarray = _view_attr(c_slot.geometry().transforms())[c_id]
 
         def to_world(tf: np.ndarray, p: np.ndarray) -> np.ndarray:
             return (tf @ np.append(p, 1.0))[:3]
@@ -976,8 +977,8 @@ class ArticulationBuilder:
         Raises:
             RuntimeError: If the world-space positions do not match.
         """
-        p_tf: np.ndarray = view(p_slot.geometry().transforms())[p_id]
-        c_tf: np.ndarray = view(c_slot.geometry().transforms())[c_id]
+        p_tf: np.ndarray = _view_attr(p_slot.geometry().transforms())[p_id]
+        c_tf: np.ndarray = _view_attr(c_slot.geometry().transforms())[c_id]
 
         def to_world(tf: np.ndarray, p: np.ndarray) -> np.ndarray:
             return (tf @ np.append(p, 1.0))[:3]

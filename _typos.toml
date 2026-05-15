@@ -5,3 +5,5 @@ abd = "abd"
 Shepperd = "Shepperd"
 # Level of Detail — standard 3D graphics term (viser LOD simplification)
 LOD = "LOD"
+# Loop variable for y-index
+iy = "iy"

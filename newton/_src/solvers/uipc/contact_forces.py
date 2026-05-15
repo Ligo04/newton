@@ -17,9 +17,10 @@ from dataclasses import dataclass, field
 import numpy as np
 import uipc.builtin as uipc_builtin
 import warp as wp
-from uipc import view
 from uipc.core import ContactSystemFeature
 from uipc.geometry import Geometry
+
+from newton._src.solvers.uipc.utils import _view_attr
 
 from .converter import UIpcMappingInfo
 
@@ -51,8 +52,8 @@ def _read_gradient(csf: ContactSystemFeature, key: str) -> tuple[np.ndarray, np.
     if i_attr is None or grad_attr is None:
         return None
 
-    i_view = view(i_attr)  # ty:ignore[no-matching-overload]
-    grad_view = view(grad_attr)  # ty:ignore[no-matching-overload]
+    i_view = _view_attr(i_attr)
+    grad_view = _view_attr(grad_attr)
 
     num_instances = i_view.shape[0]
     if num_instances == 0:
@@ -214,7 +215,7 @@ def _build_vertex_to_body_np(mapping: UIpcMappingInfo) -> np.ndarray | None:
         offset_attr = geo.meta().find(uipc_builtin.global_vertex_offset)
         if offset_attr is None:
             continue
-        base_offset = int(view(offset_attr)[0])  # ty:ignore[no-matching-overload]
+        base_offset = int(_view_attr(offset_attr)[0])
         n_verts = geo.vertices().size()
         instance_id = mapping.body_instance_ids.get(body_idx, 0)
         start = base_offset + instance_id * n_verts
@@ -256,7 +257,7 @@ def build_gpu_vertex_maps(mapping: UIpcMappingInfo, body_count: int, device: wp.
         offset_attr = geo.meta().find(uipc_builtin.global_vertex_offset)
         if offset_attr is None:
             continue
-        base_offset = int(view(offset_attr)[0])  # ty:ignore[no-matching-overload]
+        base_offset = int(_view_attr(offset_attr)[0])
         n_verts = geo.vertices().size()
         instance_id = mapping.body_instance_ids.get(body_idx, 0)
         start = base_offset + instance_id * n_verts
@@ -273,7 +274,7 @@ def build_gpu_vertex_maps(mapping: UIpcMappingInfo, body_count: int, device: wp.
         offset_attr = geo.meta().find("backend_fem_vertex_offset") or geo.meta().find(uipc_builtin.global_vertex_offset)
         if offset_attr is None:
             continue
-        base_offset = int(view(offset_attr)[0])
+        base_offset = int(_view_attr(offset_attr)[0])
         pi = np.asarray(particle_indices, dtype=np.int32)
         end = base_offset + len(pi)
         particle_vertex_ranges.append((pi, base_offset, end))

@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import importlib.util
 import unittest
+from typing import ClassVar
+from unittest.mock import patch
 
 import numpy as np
 import warp as wp
@@ -19,6 +21,8 @@ if _HAS_UIPC:
     import uipc
     from uipc.core import SanityCheckResult
 
+    from newton._src.solvers.uipc import articulation_builder as articulation_builder_module
+    from newton._src.solvers.uipc.converter import UIpcMappingInfo
     from newton._src.solvers.uipc.solver_uipc import SolverUIPC
 
 
@@ -100,6 +104,49 @@ class TestUIPCFEMSyncToBackend(unittest.TestCase):
 
 @unittest.skipUnless(_HAS_UIPC, "uipc is not installed")
 class TestUIPCFreeJointSoftTransformConstraint(unittest.TestCase):
+    def test_free_joint_applies_soft_transform_once_per_shared_geometry(self):
+        class _Geometry:
+            pass
+
+        class _Slot:
+            def __init__(self, geometry):
+                self._geometry = geometry
+
+            def geometry(self):
+                return self._geometry
+
+        class _SoftTransformConstraint:
+            applied_geometries: ClassVar[list] = []
+
+            def apply_to(self, geometry):
+                self.applied_geometries.append(geometry)
+
+        builder = newton.ModelBuilder(gravity=0.0)
+        body_a = builder.add_link()
+        body_b = builder.add_link()
+        joint_a = builder.add_joint_free(child=body_a)
+        joint_b = builder.add_joint_free(child=body_b)
+        builder.add_articulation([joint_a])
+        builder.add_articulation([joint_b])
+        model = builder.finalize()
+
+        shared_geometry = _Geometry()
+        shared_slot = _Slot(shared_geometry)
+        mapping = UIpcMappingInfo()
+        mapping.body_geo_slots[body_a] = shared_slot
+        mapping.body_geo_slots[body_b] = shared_slot
+
+        articulation_builder = articulation_builder_module.ArticulationBuilder(
+            model=model,
+            scene=None,
+            mapping=mapping,
+            dt=1.0 / 60.0,
+        )
+        with patch.object(articulation_builder_module, "SoftTransformConstraint", _SoftTransformConstraint):
+            articulation_builder.build_joints(contact_elem=None, joint_range=(0, model.joint_count))
+
+        self.assertEqual(_SoftTransformConstraint.applied_geometries, [shared_geometry])
+
     def test_free_joint_enables_dynamic_aim_target(self):
         builder = newton.ModelBuilder(gravity=0.0)
         body = builder.add_link(is_kinematic=False)

@@ -37,6 +37,7 @@ from newton.tests.unittest_utils import (
 _HAS_UIPC = importlib.util.find_spec("uipc") is not None
 
 if _HAS_UIPC:
+    from newton.examples.uipc.example_uipc_brick_stacking import Example as UIPCBrickStackingExample
     from newton.examples.uipc.example_uipc_cloth_franka import Example as UIPCClothFrankaExample
     from newton.examples.uipc.example_uipc_cloth_franka_stable_pd_force import (
         Example as StablePDForceExample,
@@ -800,6 +801,68 @@ add_example_test(
 
 
 class TestUIPCSoftbodyExamples(unittest.TestCase):
+    def test_uipc_brick_stacking_matches_core_original_behaviors(self):
+        example_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "examples",
+            "uipc",
+            "example_uipc_brick_stacking.py",
+        )
+        with open(example_path) as f:
+            source = f.read()
+
+        self.assertIn("class TaskType(enum.IntEnum)", source)
+        self.assertIn("set_target_pose_kernel", source)
+        self.assertIn("advance_task_kernel", source)
+        self.assertIn("Smoothstep easing", source)
+        self.assertIn("XY alignment correction", source)
+        self.assertIn("(round_1, round_1_times, red, green, 1)", source)
+        self.assertIn("(round_2, round_2_times, red, blue, 2)", source)
+        self.assertIn("_add_board_floor", source)
+        self.assertIn("_solve_approach_ik", source)
+        self.assertIn("Task sequence incomplete", source)
+        self.assertIn("Green-Blue height gap", source)
+        self.assertIn("Red-Blue height gap", source)
+        self.assertIn("parser.set_defaults(num_frames=1800)", source)
+
+    def test_uipc_brick_stacking_initial_pose_is_red_approach(self):
+        if not _HAS_UIPC:
+            self.skipTest("Requires uipc")
+        if not cuda_test_devices:
+            self.skipTest("Requires a CUDA test device")
+
+        class DummyViewer:
+            def __init__(self):
+                self._paused = False
+
+            def set_model(self, model):
+                pass
+
+            def set_camera(self, **kwargs):
+                pass
+
+            def begin_frame(self, *args, **kwargs):
+                pass
+
+            def log_state(self, *args, **kwargs):
+                pass
+
+            def log_contacts(self, *args, **kwargs):
+                pass
+
+            def end_frame(self):
+                pass
+
+        with wp.ScopedDevice(cuda_test_devices[0]):
+            example = UIPCBrickStackingExample(DummyViewer(), types.SimpleNamespace(test=True))
+            body_q = example.state_0.body_q.numpy()
+            red_pos = body_q[example.brick_bodies[0]][:3]
+            ee_pos = body_q[example.ee_index][:3]
+
+        target_pos = red_pos + np.array([0.0, 0.0, float(example.offset_approach[2])], dtype=np.float32)
+        self.assertLess(float(np.linalg.norm(ee_pos - target_pos)), 0.025)
+        self.assertEqual(len([label for label in example.model.body_label if label.startswith("board_floor_")]), 8)
+
     def test_uipc_softbody_dropping_to_cloth_uses_uipc_solver(self):
         example_path = os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))),

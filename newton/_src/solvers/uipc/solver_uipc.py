@@ -16,7 +16,6 @@ import uipc
 import uipc.adapter.warp
 import warp as wp
 from uipc import Logger as ULogger
-from uipc import view
 from uipc.core import (
     AffineBodyStateAccessorFeature,
     ContactElement,
@@ -32,10 +31,11 @@ from uipc.stats import SimulationStats as USimulationStats
 from uipc.unit import GPa, MPa
 
 import newton
+from newton._src.solvers.uipc.utils import _view_attr
 
 from ...core.types import override
 from ...sim import Contacts, Control, Model, State
-from ...sim.enums import JointType
+from ...sim.enums import BodyFlags, JointType
 from ..flags import SolverNotifyFlags
 from ..solver import SolverBase
 from .articulation_builder import ArticulationBuilder
@@ -315,6 +315,10 @@ class SolverUIPC(SolverBase):
         self._cloth_builder: ClothBuilder
         self._deformable_builder: DeformableBodyBuilder
 
+        # Body → ContactElement mapping (populated during initialize)
+        self._body_contact_elem: dict[int, ContactElement] = {}
+        self._contact_tabular_ref: ContactTabular | None = None
+
     # ------------------------------------------------------------------
     # Pre-initialization configuration
     # ------------------------------------------------------------------
@@ -477,6 +481,31 @@ class SolverUIPC(SolverBase):
             raise RuntimeError("Cannot configure contact tabular after initialization.")
         self._contact_tabular_fn = fn
 
+    def is_contact_enabled(self, body_a: int, body_b: int) -> bool:
+        """Query whether contact is enabled between two bodies.
+
+        Must be called **after** :meth:`initialize`.
+
+        Use ``-1`` for the ground plane.
+
+        Args:
+            body_a: Index of the first body, or ``-1`` for ground plane.
+            body_b: Index of the second body, or ``-1`` for ground plane.
+
+        Returns:
+            ``True`` if contact is enabled between the two bodies.
+
+        Raises:
+            RuntimeError: If the solver has not been initialized.
+            KeyError: If a body index was not assigned a contact element.
+        """
+        if not self._initialized:
+            raise RuntimeError("Solver must be initialized before querying contact state.")
+        elem_a = self._ground_contact_elem if body_a == -1 else self._body_contact_elem[body_a]
+        elem_b = self._ground_contact_elem if body_b == -1 else self._body_contact_elem[body_b]
+        model = self._contact_tabular_ref.at(elem_a.id(), elem_b.id())  # pyright: ignore[reportOptionalMemberAccess]
+        return model.is_enabled()
+
     def configure_subscene_tabular(self, fn: Callable) -> None:
         """Register a callback to customize subscene contact configuration.
 
@@ -631,7 +660,7 @@ class SolverUIPC(SolverBase):
             if attr is None:
                 out[name] = None
                 continue
-            v = np.asarray(view(attr)[0], dtype=np.float64)  # ty:ignore[no-matching-overload]  # pyright: ignore[reportArgumentType]
+            v = np.asarray(_view_attr(attr)[0], dtype=np.float64)
             out[name] = float(v) if shape is None else v.reshape(shape).copy()
         return out
 
@@ -798,8 +827,10 @@ class SolverUIPC(SolverBase):
 
         # Contact tabular — shared ground + per-world env / robot element pairs
         contact_tabular: ContactTabular = self.scene.contact_tabular()
+        self._contact_tabular_ref = contact_tabular
         # Ground element is shared across all worlds
         ground_elem: ContactElement = contact_tabular.default_element()
+        self._ground_contact_elem = ground_elem
         env_elems: list[ContactElement] = []
         robo_elems: list[ContactElement] = []
         actor_elems: list[ContactElement] = []
@@ -886,6 +917,11 @@ class SolverUIPC(SolverBase):
                     if parent >= 0:
                         articulation_bodies.add(parent)
 
+        # Kinematic free-joint bodies are environment, not actors
+        if model.body_flags is not None and free_joint_bodies:
+            body_flags_np = model.body_flags.numpy()
+            free_joint_bodies -= {b for b in free_joint_bodies if int(body_flags_np[b]) & int(BodyFlags.KINEMATIC)}
+
         # Host-side indexing for per-world ranges (multi-world only)
         if model.world_count > 1:
             body_ws = model.body_world_start.numpy()  # ty:ignore[unresolved-attribute]  # pyright: ignore[reportOptionalMemberAccess]
@@ -931,6 +967,16 @@ class SolverUIPC(SolverBase):
                 no_instance_bodies=ball_joint_bodies | self._no_instance_bodies,
                 custom_inertia_bodies=self._custom_inertia_bodies,
             )
+            for b in range(body_range[0], body_range[1]):
+                self._body_contact_elem[b] = self._rigid_body_builder._resolve_contact_elem(
+                    b,
+                    env_elems[world_index],
+                    robo_elems[world_index],
+                    actor_elems[world_index],
+                    articulation_bodies,
+                    free_joint_bodies,
+                    body_element_overrides,
+                )
             self._rigid_body_builder.build_static_colliders(env_elems[world_index], se)
             self._articulation_builder.build_joints(robo_elems[world_index], joint_range, se)
             if self._cloth_builder.has_cloth:
@@ -983,7 +1029,7 @@ class SolverUIPC(SolverBase):
                 offset_attr = geo.meta().find("backend_fem_vertex_offset") or geo.meta().find("global_vertex_offset")
                 if offset_attr is None:
                     continue
-                backend_offset = int(view(offset_attr)[0])
+                backend_offset = int(_view_attr(offset_attr)[0])
                 if backend_offset < 0:
                     continue
                 particle_indices_np = np.asarray(particle_indices, dtype=np.int32)
@@ -1503,12 +1549,12 @@ class SolverUIPC(SolverBase):
 
         position_attr = state_geo.vertices().find("position")
         assert position_attr is not None
-        position_view = view(position_attr)
+        position_view = _view_attr(position_attr)
 
         if model.particle_qd is not None and self._fem_velocity_buf is not None:
             velocity_attr = state_geo.vertices().find("velocity")
             assert velocity_attr is not None
-            velocity_view = view(velocity_attr)
+            velocity_view = _view_attr(velocity_attr)
             wp.launch(
                 _write_fem_particles_to_backend_kernel,
                 dim=self._fem_mapped_vertex_count,
@@ -1853,14 +1899,14 @@ class SolverUIPC(SolverBase):
                 )
 
             local_indices_np = np.asarray(local_indices, dtype=np.int64)
-            view(constrained_attr)[local_indices_np] = int(enabled)
-            view(aim_attr)[local_indices_np] = np.asarray(local_targets, dtype=np.float64).reshape(-1, 3, 1)
+            _view_attr(constrained_attr)[local_indices_np] = int(enabled)
+            _view_attr(aim_attr)[local_indices_np] = np.asarray(local_targets, dtype=np.float64).reshape(-1, 3, 1)
 
             if strength_ratio is not None:
                 strength_attr = geo.vertices().find("strength_ratio")
                 if strength_attr is None:
                     raise RuntimeError(f"UIPC {geometry_name} soft-position strength_ratio attribute is missing.")
-                view(strength_attr)[local_indices_np] = float(strength_ratio)
+                _view_attr(strength_attr)[local_indices_np] = float(strength_ratio)
 
             found_any = True
 
@@ -1917,7 +1963,7 @@ class SolverUIPC(SolverBase):
             constrained_attr = geo_slot.geometry().vertices().find("is_constrained")
             if constrained_attr is None:
                 continue
-            constrained = view(constrained_attr)
+            constrained = _view_attr(constrained_attr)
             if requested is None:
                 constrained[:] = 0
                 continue

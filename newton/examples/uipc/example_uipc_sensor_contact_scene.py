@@ -71,11 +71,14 @@ class Example:
         import uipc  # noqa: PLC0415
 
         self.solver = newton.solvers.SolverUIPC(
-            self.model,
+            workspace="/tmp/newton_uipc/uipc_sensor_contact_scene_0.01",
+            model=self.model,
             dt=self.sim_dt,
             logger_level=uipc.Logger.Warn,
+            require_profile=True,
+            dump_enable=True,
         )
-        self.solver.set_contact(True, 0.001)
+        self.solver.set_contact(True, d_hat=0.01)
         self.solver.initialize()
 
         self.contacts = Contacts(
