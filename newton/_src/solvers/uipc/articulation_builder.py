@@ -287,9 +287,16 @@ class ArticulationBuilder:
             self._build_fixed_joints_batch(fixed_joints)
         if ball_joints:
             self._build_ball_joints_batch(ball_joints, model)
+        applied_free_joint_geometry_ids: set[int] = set()
         for jdata in free_joints:
+            geometry = jdata["child_slot"].geometry()
+            geometry_id = id(geometry)
+            if geometry_id in applied_free_joint_geometry_ids:
+                continue
+
+            applied_free_joint_geometry_ids.add(geometry_id)
             stc = SoftTransformConstraint()
-            stc.apply_to(jdata["child_slot"].geometry())
+            stc.apply_to(geometry)
 
         # Finalise all articulations that have active joints
         for art in self.articulations.values():
