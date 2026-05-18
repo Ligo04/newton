@@ -57,22 +57,22 @@ def _cache_control_kernel(
 
     # Position driving (POSITION or POSITION_VELOCITY)
     if mode == JointTargetMode.POSITION or mode == JointTargetMode.POSITION_VELOCITY:
-        out_is_constrained[local] = 1
+        out_is_constrained[local] = 1  # ty:ignore[invalid-assignment]
         if has_target_pos != 0:
-            out_target_pos[local] = wp.float64(target_pos[q_idx])
+            out_target_pos[local] = wp.float64(target_pos[q_idx])  # ty:ignore[invalid-assignment]
     else:
-        out_is_constrained[local] = 0
+        out_is_constrained[local] = 0  # ty:ignore[invalid-assignment]
 
     # Velocity target
     if has_target_vel != 0:
-        out_target_vel[local] = wp.float64(target_vel[qd_idx])
+        out_target_vel[local] = wp.float64(target_vel[qd_idx])  # ty:ignore[invalid-assignment]
 
     # Force/torque control (EFFORT mode)
     if mode == JointTargetMode.EFFORT and has_joint_f != 0:
-        out_target_force[local] = wp.float64(joint_f[qd_idx])
-        out_is_force_constrained[local] = 1
+        out_target_force[local] = wp.float64(joint_f[qd_idx])  # ty:ignore[invalid-assignment]
+        out_is_force_constrained[local] = 1  # ty:ignore[invalid-assignment]
     else:
-        out_is_force_constrained[local] = 0
+        out_is_force_constrained[local] = 0  # ty:ignore[invalid-assignment]
 
 
 @wp.kernel
@@ -86,9 +86,9 @@ def _write_readback_kernel(
     has_qd: int,
 ):
     local = wp.tid()
-    joint_q_out[local_q_start[local]] = wp.float32(joint_position[local])
+    joint_q_out[local_q_start[local]] = wp.float32(joint_position[local])  # ty:ignore[invalid-assignment]
     if has_qd != 0:
-        joint_qd_out[local_qd_start[local]] = wp.float32(joint_velocity[local])
+        joint_qd_out[local_qd_start[local]] = wp.float32(joint_velocity[local])  # ty:ignore[invalid-assignment]
 
 
 # -- Placeholder for empty warp arrays passed to kernels -------------------

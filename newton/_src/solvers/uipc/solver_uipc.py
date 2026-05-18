@@ -285,7 +285,7 @@ class SolverUIPC(SolverBase):
                         stacklevel=1,
                     )
 
-            self._finalizer = weakref.finalize(self, _auto_save, self._stats, self._workspace)
+            self._finalizer = weakref.finalize(self, _auto_save, self._stats, self._workspace)  # ty:ignore[invalid-argument-type]
 
         # User-registered callbacks (set via configure_* methods)
         self._contact_tabular_fn: Callable | None = None
@@ -503,7 +503,7 @@ class SolverUIPC(SolverBase):
             raise RuntimeError("Solver must be initialized before querying contact state.")
         elem_a = self._ground_contact_elem if body_a == -1 else self._body_contact_elem[body_a]
         elem_b = self._ground_contact_elem if body_b == -1 else self._body_contact_elem[body_b]
-        model = self._contact_tabular_ref.at(elem_a.id(), elem_b.id())  # pyright: ignore[reportOptionalMemberAccess]
+        model = self._contact_tabular_ref.at(elem_a.id(), elem_b.id())  # pyright: ignore[reportOptionalMemberAccess]  # ty:ignore[unresolved-attribute]
         return model.is_enabled()
 
     def configure_subscene_tabular(self, fn: Callable) -> None:
@@ -949,7 +949,7 @@ class SolverUIPC(SolverBase):
                     raise RuntimeError("UIPC initialization requires joint_q and joint_qd for articulated models.")
             state: State = model.state()
             if model.joint_count > 0:
-                newton.eval_fk(model, joint_q, joint_qd, state)
+                newton.eval_fk(model, joint_q, joint_qd, state)  # ty:ignore[invalid-argument-type]
         if model.body_q is not None and state.body_q is not None:
             wp.copy(model.body_q, state.body_q)
         if state.body_qd is not None and model.body_qd is not None:
@@ -1206,7 +1206,7 @@ class SolverUIPC(SolverBase):
     def _ground_shape_index(self) -> int:
         """Return the first ground shape index, or -1 when no ground shape exists."""
         model = self.model
-        shape_body = model.shape_body.numpy()
+        shape_body = model.shape_body.numpy()  # ty:ignore[unresolved-attribute]
         for s in range(model.shape_count):
             if shape_body[s] == -1:
                 return s
@@ -1393,7 +1393,7 @@ class SolverUIPC(SolverBase):
                 raise RuntimeError("UIPC joint property notification requires joint_q and joint_qd.")
         state = self.model.state()
         if model.joint_count > 0:
-            newton.eval_fk(model, joint_q, joint_qd, state)
+            newton.eval_fk(model, joint_q, joint_qd, state)  # ty:ignore[invalid-argument-type]
         self._state_dirty = True
 
     def _notify_body_properties(self) -> None:
