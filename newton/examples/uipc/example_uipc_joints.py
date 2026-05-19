@@ -226,6 +226,7 @@ class Example:
         self.solver = newton.solvers.SolverUIPC(
             self.model,
             workspace="/tmp/newton_uipc/joints",
+            dump_enable=True,
             dt=self.sim_dt,
             logger_level=uipc.Logger.Error,
         )

@@ -803,6 +803,10 @@ class Example:
         self.simulate()
         self.sim_time += self.frame_dt
 
+        curr = self.state_0.joint_q.numpy()[7:9]
+        tgt = self.control.joint_target_pos.numpy()[7:9]
+        print(f"prismatic curr={curr[0]:.6f},{curr[1]:.6f} target={tgt[0]:.6f},{tgt[1]:.6f}")
+
     def test_post_step(self):
         task_idx = int(self.task_idx.numpy()[0])
         body_q = self.state_0.body_q.numpy()

@@ -407,7 +407,6 @@ class ArticulationBuilder:
         child_ids: list[int] = []
         strengths: list[float] = []
         drive_strengths: list[float] = []
-        ext_forces: list[float] = []
         lowers: list[float] = []
         uppers: list[float] = []
         limit_strengths: list[float] = []
@@ -483,9 +482,10 @@ class ArticulationBuilder:
             parent_ids.append(p_id)
             child_slots.append(c_slot)
             child_ids.append(c_id)
-            strengths.append(100.0)
-            drive_strengths.append(100.0)
-            ext_forces.append(0.0)
+            target_ke = self._extract_target_strength(j, model.joint_qd_start, model.joint_target_ke)
+            print(f"target_ke: {target_ke}")
+            strengths.append(target_ke)
+            drive_strengths.append(target_ke)
 
             # Limits
             lower, upper = self._extract_limits(
@@ -528,10 +528,7 @@ class ArticulationBuilder:
             jm,
             np.array(drive_strengths, dtype=np.float64),
         )
-        AffineBodyRevoluteJointExternalForce().apply_to(
-            jm,
-            np.array(ext_forces, dtype=np.float64),
-        )
+        AffineBodyRevoluteJointExternalForce().apply_to(jm)
         if has_any_limit:
             AffineBodyRevoluteJointLimit().apply_to(
                 jm,
@@ -589,7 +586,6 @@ class ArticulationBuilder:
         child_ids: list[int] = []
         strengths: list[float] = []
         drive_strengths: list[float] = []
-        ext_forces: list[float] = []
         lowers: list[float] = []
         uppers: list[float] = []
         limit_strengths: list[float] = []
@@ -654,9 +650,9 @@ class ArticulationBuilder:
             parent_ids.append(p_id)
             child_slots.append(c_slot)
             child_ids.append(c_id)
-            strengths.append(100.0)
-            drive_strengths.append(100.0)
-            ext_forces.append(0.0)
+            target_ke = self._extract_target_strength(j, model.joint_qd_start, model.joint_target_ke)
+            strengths.append(target_ke)
+            drive_strengths.append(target_ke)
 
             # Limits
             lower, upper = self._extract_limits(
@@ -698,10 +694,7 @@ class ArticulationBuilder:
             jm,
             np.array(drive_strengths, dtype=np.float64),
         )
-        AffineBodyPrismaticJointExternalForce().apply_to(
-            jm,
-            np.array(ext_forces, dtype=np.float64),
-        )
+        AffineBodyPrismaticJointExternalForce().apply_to(jm)
         if has_any_limit:
             AffineBodyPrismaticJointLimit().apply_to(
                 jm,
@@ -1065,6 +1058,19 @@ class ArticulationBuilder:
             return 100.0
         qd_start = int(joint_qd_start.numpy()[j])
         return float(joint_limit_ke.numpy()[qd_start])
+
+    @staticmethod
+    def _extract_target_strength(
+        j: int,
+        joint_qd_start: wp.array,
+        joint_target_ke: wp.array | None,
+    ) -> float:
+        """Extract UIPC joint drive strength from Newton's per-DOF target stiffness."""
+        if joint_target_ke is None:
+            return 100.0
+        qd_start = int(joint_qd_start.numpy()[j])
+        val = float(joint_target_ke.numpy()[qd_start])
+        return val if val else 100.0
 
     # ------------------------------------------------------------------
     # Per-step interface (called by SolverUIPC.step)
