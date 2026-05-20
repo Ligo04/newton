@@ -20,6 +20,7 @@
 
 - Fix `uipc_brick_stacking` board floor placement so its studs remain visible above the table instead of being embedded by the UIPC mesh-centering transform.
 - Fix `uipc_brick_stacking` to follow the original brick-stacking sequence, start from the red-brick IK approach pose, add the board floor, and use the Warp-kernel FSM.
+- Fix MJCF `xyaxes` parsing to treat the second vector as Y and derive Z from X cross Y.
 - Fix `SolverMuJoCo` returning `State.joint_qd` in world frame for root `FREE` joints with non-identity `parent_xform`, violating the documented parent-frame contract and corrupting derived `body_qd`.
 - Fix `basic_conveyor` example emitting a spurious inertia validation warning at finalize.
 
