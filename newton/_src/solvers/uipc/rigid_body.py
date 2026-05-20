@@ -38,6 +38,7 @@ class _BodyInfo:
     mass_density: float
     contact_elem: Any
     is_kinematic: bool
+    kappa: float
 
 
 def _compute_shape_key(model: Model, body_idx: int) -> tuple[Any, ...] | None:
@@ -284,6 +285,7 @@ class RigidBodyBuilder:
         body_element_overrides: dict[int, ContactElement] | None = None,
         no_instance_bodies: set[int] | None = None,
         custom_inertia_bodies: set[int] | None = None,
+        body_kappa: np.ndarray | None = None,
     ) -> None:
         """Convert Newton rigid bodies to UIPC AffineBody geometries.
 
@@ -327,6 +329,11 @@ class RigidBodyBuilder:
                 attributes), and the geometry is built through the explicit
                 :meth:`AffineBodyConstitution.apply_to` overload that takes a
                 12x12 mass matrix plus a volume override.
+            body_kappa: Optional per-body ABD stiffness values [Pa]. Values
+                less than or equal to zero use this builder's global default.
+                Bodies with different effective kappa values cannot share the
+                same UIPC ``SimplicialComplex`` and are therefore split into
+                separate instancing groups.
         """
         model = self._model
         if model.body_count == 0:
@@ -365,18 +372,21 @@ class RigidBodyBuilder:
                 body_element_overrides,
             )
             is_kin = (body_flags_np[b] & int(BodyFlags.KINEMATIC)) != 0
-            body_infos.append(_BodyInfo(b, sk, tf, 0.0, elem, is_kin))
+            kappa = self._kappa
+            if body_kappa is not None and float(body_kappa[b]) > 0.0:
+                kappa = float(body_kappa[b])
+            body_infos.append(_BodyInfo(b, sk, tf, 0.0, elem, is_kin, kappa))
 
-        # --- Phase B: Group by (shape_key, contact element) -----------------
+        # --- Phase B: Group by (shape_key, contact element, kappa) ----------
         from collections import OrderedDict  # noqa: PLC0415
 
         groups: OrderedDict[tuple[Any, ...], list[_BodyInfo]] = OrderedDict()
         for info in body_infos:
             if info.body_idx in no_inst:
                 # Force unique group for excluded bodies
-                key = (info.shape_key, id(info.contact_elem), info.body_idx)
+                key = (info.shape_key, id(info.contact_elem), info.kappa, info.body_idx)
             else:
-                key = (info.shape_key, id(info.contact_elem))
+                key = (info.shape_key, id(info.contact_elem), info.kappa)
             groups.setdefault(key, []).append(info)
 
         # --- Phase C: Create instanced geometries ---------------------------
@@ -435,7 +445,7 @@ class RigidBodyBuilder:
                 # path when mass/com/inertia coincide).
                 AffineBodyConstitution().apply_to(
                     sc,
-                    self._kappa,
+                    ref.kappa,
                     mass_matrix,
                     float(mesh_vol),
                 )
@@ -443,7 +453,7 @@ class RigidBodyBuilder:
                 # Constitution with first body's mass density as default
                 AffineBodyConstitution().apply_to(
                     sc=sc,
-                    kappa=self._kappa,
+                    kappa=ref.kappa,
                     mass_density=ref.mass_density,
                 )
 

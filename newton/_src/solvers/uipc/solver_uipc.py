@@ -28,13 +28,13 @@ from uipc.core import (
 )
 from uipc.core import Scene as UScene
 from uipc.stats import SimulationStats as USimulationStats
-from uipc.unit import GPa, MPa
+from uipc.unit import GPa
 
 import newton
 from newton._src.solvers.uipc.utils import _view_attr
 
 from ...core.types import override
-from ...sim import Contacts, Control, Model, State
+from ...sim import Contacts, Control, Model, ModelBuilder, State
 from ...sim.enums import BodyFlags, JointType
 from ..flags import SolverNotifyFlags
 from ..solver import SolverBase
@@ -144,6 +144,27 @@ class SolverUIPC(SolverBase):
 
     _uipc = None
 
+    @override
+    @classmethod
+    def register_custom_attributes(cls, builder: ModelBuilder) -> None:
+        """Register UIPC-specific custom Model attributes.
+
+        ``uipc:abd_kappa`` is a per-body override for the
+        :class:`~uipc.constitution.AffineBodyConstitution` stiffness parameter
+        [Pa].  A negative value leaves the solver-level ``kappa`` default in
+        effect for that body.
+        """
+        builder.add_custom_attribute(
+            ModelBuilder.CustomAttribute(
+                name="abd_kappa",
+                frequency=Model.AttributeFrequency.BODY,
+                assignment=Model.AttributeAssignment.MODEL,
+                dtype=wp.float32,
+                default=-1.0,
+                namespace="uipc",
+            )
+        )
+
     @classmethod
     def import_uipc(cls):
         """Import the UIPC dependencies and cache them as a class variable."""
@@ -159,6 +180,32 @@ class SolverUIPC(SolverBase):
                 ) from e
         return cls._uipc
 
+    @staticmethod
+    def _body_kappa_from_model(model: Model) -> np.ndarray | None:
+        """Return optional per-body ABD stiffness overrides from ``model.uipc``.
+
+        The ``uipc:abd_kappa`` custom attribute uses negative values as the
+        "inherit solver default" sentinel. Positive values override the
+        solver-level ``kappa`` for the corresponding body.
+        """
+        uipc_attrs = getattr(model, "uipc", None)
+        if uipc_attrs is None or not hasattr(uipc_attrs, "abd_kappa"):
+            return None
+
+        abd_kappa = uipc_attrs.abd_kappa
+        if isinstance(abd_kappa, wp.array):
+            values = abd_kappa.numpy()
+        else:
+            values = np.asarray(abd_kappa)
+        values = np.asarray(values, dtype=np.float64).reshape(-1)
+        if values.shape[0] != model.body_count:
+            raise RuntimeError(
+                f"uipc:abd_kappa must have one value per body; got {values.shape[0]} for {model.body_count} bodies."
+            )
+        if not np.all(np.isfinite(values)):
+            raise ValueError("uipc:abd_kappa values must be finite.")
+        return values
+
     def __init__(
         self,
         model: Model,
@@ -166,7 +213,7 @@ class SolverUIPC(SolverBase):
         workspace: str = "/tmp/newton_uipc",
         dt: float = 1.0 / 60.0,
         scene_config: dict[str, Any] | None = None,  # pyright: ignore[reportRedeclaration]
-        kappa: float = 100 * MPa,
+        kappa: float = 1 * GPa,
         default_mass_density: float = 1000.0,
         logger_level=ULogger.Warn,
         dump_enable: bool = False,
@@ -805,6 +852,7 @@ class SolverUIPC(SolverBase):
         self.world = uipc.World(self.engine)
         self.scene = uipc.Scene(self._scene_config)
         print(f"scene_config:{self._scene_config}")
+        body_kappa = self._body_kappa_from_model(model)
 
         # Subscene tabular for multi-world contact isolation — set up BEFORE
         # contact elements so that elements can be created within subscenes.
@@ -867,7 +915,9 @@ class SolverUIPC(SolverBase):
 
         # Create one builder per type (reused across worlds)
         self._rigid_body_builder = RigidBodyBuilder(model, scene, self.mapping, self._kappa, self._default_mass_density)
-        self._articulation_builder = ArticulationBuilder(model, scene, self.mapping, self._dt, kappa=self._kappa)
+        self._articulation_builder = ArticulationBuilder(
+            model, scene, self.mapping, self._dt, kappa=self._kappa, body_kappa=body_kappa
+        )
         self._cloth_builder = ClothBuilder(
             model,
             scene,
@@ -981,6 +1031,7 @@ class SolverUIPC(SolverBase):
                 body_element_overrides,
                 no_instance_bodies=ball_joint_bodies | self._no_instance_bodies,
                 custom_inertia_bodies=self._custom_inertia_bodies,
+                body_kappa=body_kappa,
             )
             for b in range(body_range[0], body_range[1]):
                 self._body_contact_elem[b] = self._rigid_body_builder._resolve_contact_elem(

@@ -15,6 +15,7 @@
 #
 ###########################################################################
 
+import argparse
 import enum
 
 import numpy as np
@@ -32,6 +33,7 @@ BRICK_HEIGHT = 0.0096
 
 BRICK_SCALE = 1.0
 BRICK_DENSITY = 565.0  # ABS plastic [kg/m³]
+BRICK_ABD_KAPPA = 10.0 * uipc.unit.GPa
 
 
 BRICK_HX = 2.0 * PITCH
@@ -42,7 +44,7 @@ STUD_RADIUS = 0.0024
 STUD_HEIGHT = 0.0017
 WALL_THICKNESS = 0.0012
 TOP_THICKNESS = 0.001
-TUBE_OUTER_RADIUS = 0.003255
+TUBE_OUTER_RADIUS = 0.002755
 TUBE_HEIGHT = BRICK_HEIGHT - TOP_THICKNESS
 CYLINDER_SEGMENTS = 48
 
@@ -362,6 +364,7 @@ class Example:
         self.sim_dt = self.frame_dt / self.sim_substeps
         self.viewer = viewer
         self.test_mode = getattr(args, "test", False)
+        self.enable_contact = getattr(args, "enable_contact", True)
 
         self.uipc_gap = 0.001
         self.ee_index = -1
@@ -377,6 +380,7 @@ class Example:
         self.robot_base_pos = self.table_top_center + wp.vec3(-0.5, 0.0, 0.0)
 
         self.brick_height_scaled = BRICK_HEIGHT * BRICK_SCALE
+        self.brick_stack_height = self.brick_height_scaled + self.uipc_gap
         self.brick_width_scaled = 2 * PITCH * BRICK_SCALE
         self.brick_length_scaled = 4 * PITCH * BRICK_SCALE
         # Targets are specified at the Franka hand link. The finger pads sit
@@ -385,7 +389,7 @@ class Example:
         self.offset_approach = wp.vec3(0.0, 0.0, 0.025)
         self.offset_lift = wp.vec3(0.0, -0.001, 0.042)
         self.grasp_z_offset = wp.vec3(0.0, 0.0, 0.012)
-        self.drop_z_offset = wp.vec3(0.0, 0.0, -0.001)
+        self.drop_z_offset = wp.vec3(0.0, 0.0, 0.0)
 
         self._setup_brick_layout()
 
@@ -399,6 +403,7 @@ class Example:
         init_joints = self._solve_approach_ik()
 
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+        newton.solvers.SolverUIPC.register_custom_attributes(builder)
         self._build_franka(builder)
         self._configure_franka(builder, init_joints)
         self.ee_index = self._find_body(builder, "fr3_hand_tcp")
@@ -415,11 +420,12 @@ class Example:
 
         self.solver = newton.solvers.SolverUIPC(
             workspace="/tmp/newton_uipc/brick_stacking",
+            dump_enable=True,
             model=self.model,
             dt=self.sim_dt,
             logger_level=uipc.Logger.Warn,
         )
-        self.solver.set_contact(enable=True, d_hat=self.uipc_gap)
+        self.solver.set_contact(enable=self.enable_contact, d_hat=self.uipc_gap)
         self.solver.configure_contact_tabular(self._configure_contact_tabular)
 
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
@@ -443,20 +449,35 @@ class Example:
     def create_parser(cls):
         parser = newton.examples.create_parser()
         parser.set_defaults(num_frames=1800)
+        parser.add_argument(
+            "--enable-contact",
+            action=argparse.BooleanOptionalAction,
+            default=True,
+            help="Enable UIPC contact handling. Use --no-enable-contact to disable contact.",
+        )
         return parser
 
     def _setup_brick_layout(self):
         sqrt2_2 = float(np.sqrt(2.0) / 2.0)
         self.rot_90z = wp.quat(0.0, 0.0, sqrt2_2, sqrt2_2)
-        bh = BRICK_HZ
-        table_brick_z = self.table_top_z + bh + self.uipc_gap
-        self.board_floor_z = self.table_top_z - 0.8 * BRICK_HEIGHT
-        # Match original: red at (0, +0.06), green at (+0.05, -0.04), blue at (-0.05, -0.04)
-        ttx, tty = 0.0, -0.5
+        bh = 0.5 * self.brick_height_scaled
+
+        blue_x = self.table_top_center[0] - 0.05
+        blue_y = self.table_top_center[1] - 0.04
+        self.board_floor_z = self.table_top_center[2] - 0.8 * self.brick_height_scaled
+
+        # Match the original example's XY layout and position expressions.
+        # UIPC attaches the bottom-origin mesh at ``-bh`` so body transforms
+        # remain brick centers; add ``bh`` plus ``uipc_gap`` where needed to
+        # preserve the original bottom-origin placement.
         self.brick_positions = [
-            wp.vec3(ttx + 0.0, tty + 0.06, table_brick_z),
-            wp.vec3(ttx + 0.05, tty - 0.04, table_brick_z),
-            wp.vec3(ttx - 0.05, tty - 0.04, self.table_top_z + BRICK_HZ + self.uipc_gap),
+            self.table_top_center + wp.vec3(0.0, 0.06, bh + self.uipc_gap),
+            self.table_top_center + wp.vec3(0.05, -0.04, bh + self.uipc_gap),
+            wp.vec3(
+                blue_x,
+                blue_y,
+                self.table_top_center[2] + 0.2 * self.brick_height_scaled + bh + self.uipc_gap,
+            ),
         ]
         self.brick_rotations = [self.rot_90z, self.rot_90z, wp.quat_identity()]
         self.brick_colors = [(0.8, 0.1, 0.1), (0.1, 0.7, 0.1), (0.1, 0.2, 0.8)]
@@ -527,16 +548,22 @@ class Example:
         """Add eight gray kinematic bricks as a board floor under the stack."""
         board_center = self.brick_positions[2]
         floor_z = self.board_floor_z
-        x_step = 2.0 * BRICK_HY
-        y_step = 2.0 * BRICK_HX
+        # ``board_floor_z`` follows the original example and denotes the mesh
+        # bottom. UIPC bricks attach the bottom-origin mesh with ``-BRICK_HZ``
+        # so dynamic body poses stay centered; lift the board body by BRICK_HZ
+        # to keep the visible board top and studs above the table.
+        floor_center_z = floor_z + BRICK_HZ
+        floor_rot = self.rot_90z
+        bw = self.brick_width_scaled
+        bl = self.brick_length_scaled
         gray_mesh = self._build_brick_mesh((0.35, 0.35, 0.35))
         self.board_floor_bodies = []
-        for ix, dx in enumerate((-1.5 * x_step, -0.5 * x_step, 0.5 * x_step, 1.5 * x_step)):
-            for iy, dy in enumerate((-0.5 * y_step, 0.5 * y_step)):
+        for ix, dx in enumerate((-1.5 * bw, -0.5 * bw, 0.5 * bw, 1.5 * bw)):
+            for iy, dy in enumerate((-0.5 * bl, 0.5 * bl)):
                 body = builder.add_body(
                     xform=wp.transform(
-                        wp.vec3(float(board_center[0]) + dx, float(board_center[1]) + dy, floor_z),
-                        self.rot_90z,
+                        wp.vec3(float(board_center[0]) + dx, float(board_center[1]) + dy, floor_center_z),
+                        floor_rot,
                     ),
                     label=f"board_floor_{ix}_{iy}",
                     is_kinematic=True,
@@ -555,6 +582,7 @@ class Example:
             body = builder.add_body(
                 xform=wp.transform(self.brick_positions[i], self.brick_rotations[i]),
                 label=self.brick_labels[i],
+                custom_attributes={"uipc:abd_kappa": BRICK_ABD_KAPPA},
             )
             brick_mesh = self._build_brick_mesh(self.brick_colors[i])
             builder.add_shape_mesh(
@@ -741,7 +769,7 @@ class Example:
                 self.offset_lift,
                 self.grasp_z_offset,
                 self.drop_z_offset,
-                self.brick_height_scaled,
+                self.brick_stack_height,
                 self.home_pos,
                 self.task_init_body_q,
                 self.state_0.body_q,
@@ -803,10 +831,6 @@ class Example:
         self.simulate()
         self.sim_time += self.frame_dt
 
-        curr = self.state_0.joint_q.numpy()[7:9]
-        tgt = self.control.joint_target_pos.numpy()[7:9]
-        print(f"prismatic curr={curr[0]:.6f},{curr[1]:.6f} target={tgt[0]:.6f},{tgt[1]:.6f}")
-
     def test_post_step(self):
         task_idx = int(self.task_idx.numpy()[0])
         body_q = self.state_0.body_q.numpy()
@@ -851,6 +875,7 @@ class Example:
 
         body_q = self.state_0.body_q.numpy()
         bh = self.brick_height_scaled
+        stack_height = self.brick_stack_height
         red, green, blue = self.brick_bodies
 
         blue_z = body_q[blue][2]
@@ -874,12 +899,12 @@ class Example:
             errors.append(f"Red brick XY offset from blue: {np.linalg.norm(red_xy - blue_xy):.4f} m (max 0.01)")
 
         dz_green = green_z - blue_z
-        if abs(dz_green - bh) > tol_z:
-            errors.append(f"Green-Blue height gap: {dz_green:.4f} m, expected ~{bh:.4f} m")
+        if abs(dz_green - stack_height) > tol_z:
+            errors.append(f"Green-Blue height gap: {dz_green:.4f} m, expected ~{stack_height:.4f} m")
 
         dz_red = red_z - blue_z
-        if abs(dz_red - 2.0 * bh) > tol_z:
-            errors.append(f"Red-Blue height gap: {dz_red:.4f} m, expected ~{2.0 * bh:.4f} m")
+        if abs(dz_red - 2.0 * stack_height) > tol_z:
+            errors.append(f"Red-Blue height gap: {dz_red:.4f} m, expected ~{2.0 * stack_height:.4f} m")
 
         if errors:
             raise ValueError("Brick stacking verification failed:\n  " + "\n  ".join(errors))

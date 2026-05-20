@@ -64,12 +64,12 @@ class TestUIPCClothConfiguration(unittest.TestCase):
 
         geo = _Geometry()
         thickness_values = np.array([0.0005, 0.001, 0.002], dtype=np.float64)
-        original_view = cloth_module.view
+        original_view_attr = cloth_module._view_attr
         try:
-            cloth_module.view = lambda attr: attr
+            cloth_module._view_attr = lambda attr: attr
             ClothBuilder._write_vertex_thickness(geo, thickness_values, applied_thickness=0.001)
         finally:
-            cloth_module.view = original_view
+            cloth_module._view_attr = original_view_attr
 
         np.testing.assert_allclose(geo.vertices().find("thickness"), thickness_values)
         np.testing.assert_allclose(geo.vertices().find("volume"), np.array([1.0, 2.0, 4.0]))

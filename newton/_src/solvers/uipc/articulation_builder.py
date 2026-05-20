@@ -70,6 +70,7 @@ class ArticulationBuilder:
         mapping: UIpcMappingInfo,
         dt: float,
         kappa: float = 100 * MPa,
+        body_kappa: np.ndarray | None = None,
     ) -> None:
         self._model = model
         self._scene = scene
@@ -78,6 +79,7 @@ class ArticulationBuilder:
         self._device = model.device
         self._abd = AffineBodyConstitution()
         self._kappa = kappa
+        self._body_kappa = body_kappa
 
         # Per-articulation runtime objects (populated by build_joints)
         self.articulations: dict[int, Articulation] = {}
@@ -335,6 +337,7 @@ class ArticulationBuilder:
         transform: np.ndarray,
         *,
         is_fixed: bool = False,
+        kappa: float | None = None,
     ) -> SimplicialComplexSlot:
         """Create a 1-vertex ABD proxy body.
 
@@ -350,6 +353,8 @@ class ArticulationBuilder:
             name: Unique name for the UIPC object.
             transform: 4x4 world-frame transform for the proxy.
             is_fixed: If ``True`` the proxy is marked kinematic.
+            kappa: Optional ABD stiffness parameter [Pa]. If ``None``, uses
+                this builder's default.
 
         Returns:
             The UIPC geometry slot for the proxy body.
@@ -361,7 +366,8 @@ class ArticulationBuilder:
         mass_center = np.zeros(3, dtype=np.float64)
         inertia = np.eye(3, dtype=np.float64) * 1e-6
         volume = 1e-9
-        sc = self._abd.create_proxy(self._kappa, mass, mass_center, inertia, volume)
+        applied_kappa = self._kappa if kappa is None else kappa
+        sc = self._abd.create_proxy(applied_kappa, mass, mass_center, inertia, volume)
 
         _view_attr(sc.transforms())[:] = transform
 
@@ -388,10 +394,18 @@ class ArticulationBuilder:
         else:
             tf = np.eye(4, dtype=np.float64)
 
-        geo_slot = self._create_proxy(f"shapeless_proxy_{body_idx}", tf)
+        kappa = self._resolve_body_kappa(body_idx)
+        geo_slot = self._create_proxy(f"shapeless_proxy_{body_idx}", tf, kappa=kappa)
         self._mapping.body_geo_slots[body_idx] = geo_slot
         self._mapping.body_instance_ids[body_idx] = 0
         return geo_slot
+
+    def _resolve_body_kappa(self, body_idx: int) -> float:
+        """Return the effective ABD stiffness [Pa] for a Newton body."""
+        if self._body_kappa is None:
+            return self._kappa
+        kappa = float(self._body_kappa[body_idx])
+        return kappa if kappa > 0.0 else self._kappa
 
     def _build_revolute_joints_batch(
         self,

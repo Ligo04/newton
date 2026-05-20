@@ -5,6 +5,8 @@
 ### Added
 
 - Add `uipc_cloth_franka_stable_pd_force` demo using `ControllerStablePD` EFFORT actuators for Franka contact-based cloth manipulation.
+- Add `uipc:abd_kappa` body custom attribute for per-rigid-body UIPC ABD stiffness overrides.
+- Add `--enable-contact` / `--no-enable-contact` to `uipc_brick_stacking` so UIPC contact can be disabled while remaining enabled by default.
 - Add UIPC cloth poker-cards demo with stacked card patches, UIPC cloth self-contact, and a dynamic soft-transform sphere knock-off.
 - Add opt-in `validate_mesh` parameter to `ModelBuilder.add_cloth_mesh()`, `ModelBuilder.add_soft_mesh()`, and `style3d.add_cloth_mesh()` that warns on degenerate geometry; add public `newton.utils.validate_triangle_mesh()` and `newton.utils.validate_tet_mesh()` utilities
 - Add `ViewerGL.show_loading_splash()` / `ViewerGL.hide_loading_splash()` displaying a stylized Newton's-cradle overlay while the GL viewer waits on Warp kernel compilation; raised automatically by `newton.examples.init()` for visible GL viewers
@@ -16,6 +18,7 @@
 
 ### Fixed
 
+- Fix `uipc_brick_stacking` board floor placement so its studs remain visible above the table instead of being embedded by the UIPC mesh-centering transform.
 - Fix `uipc_brick_stacking` to follow the original brick-stacking sequence, start from the red-brick IK approach pose, add the board floor, and use the Warp-kernel FSM.
 - Fix `SolverMuJoCo` returning `State.joint_qd` in world frame for root `FREE` joints with non-identity `parent_xform`, violating the documented parent-frame contract and corrupting derived `body_qd`.
 - Fix `basic_conveyor` example emitting a spurious inertia validation warning at finalize.

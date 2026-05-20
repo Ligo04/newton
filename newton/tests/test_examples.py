@@ -37,7 +37,15 @@ from newton.tests.unittest_utils import (
 _HAS_UIPC = importlib.util.find_spec("uipc") is not None
 
 if _HAS_UIPC:
-    from newton.examples.uipc.example_uipc_brick_stacking import Example as UIPCBrickStackingExample
+    from newton.examples.uipc.example_uipc_brick_stacking import (
+        BRICK_ABD_KAPPA as UIPC_BRICK_ABD_KAPPA,
+    )
+    from newton.examples.uipc.example_uipc_brick_stacking import (
+        STUD_HEIGHT as UIPC_BRICK_STUD_HEIGHT,
+    )
+    from newton.examples.uipc.example_uipc_brick_stacking import (
+        Example as UIPCBrickStackingExample,
+    )
     from newton.examples.uipc.example_uipc_cloth_franka import Example as UIPCClothFrankaExample
     from newton.examples.uipc.example_uipc_cloth_franka_stable_pd_force import (
         Example as StablePDForceExample,
@@ -838,7 +846,36 @@ class TestUIPCSoftbodyExamples(unittest.TestCase):
         self.assertIn("Task sequence incomplete", source)
         self.assertIn("Green-Blue height gap", source)
         self.assertIn("Red-Blue height gap", source)
+        self.assertIn('"--enable-contact"', source)
+        self.assertIn("default=True", source)
+        self.assertIn('self.enable_contact = getattr(args, "enable_contact", True)', source)
+        self.assertIn("self.solver.set_contact(enable=self.enable_contact, d_hat=self.uipc_gap)", source)
+        self.assertIn("BRICK_ABD_KAPPA = 10.0 * uipc.unit.GPa", source)
+        self.assertIn("newton.solvers.SolverUIPC.register_custom_attributes(builder)", source)
+        self.assertIn('custom_attributes={"uipc:abd_kappa": BRICK_ABD_KAPPA}', source)
+        self.assertIn("self.brick_stack_height = self.brick_height_scaled + self.uipc_gap", source)
+        self.assertIn("self.brick_stack_height,", source)
+        self.assertIn("self.drop_z_offset = wp.vec3(0.0, 0.0, 0.0)", source)
+        self.assertIn("blue_x = self.table_top_center[0] - 0.05", source)
+        self.assertIn("blue_y = self.table_top_center[1] - 0.04", source)
+        self.assertIn("self.table_top_center + wp.vec3(0.0, 0.06, bh + self.uipc_gap)", source)
+        self.assertIn("self.table_top_center + wp.vec3(0.05, -0.04, bh + self.uipc_gap)", source)
+        self.assertIn("self.table_top_center[2] + 0.2 * self.brick_height_scaled + bh + self.uipc_gap", source)
+        self.assertIn("floor_center_z = floor_z + BRICK_HZ", source)
+        self.assertIn("for ix, dx in enumerate((-1.5 * bw, -0.5 * bw, 0.5 * bw, 1.5 * bw))", source)
+        self.assertIn("for iy, dy in enumerate((-0.5 * bl, 0.5 * bl))", source)
         self.assertIn("parser.set_defaults(num_frames=1800)", source)
+
+    def test_uipc_brick_stacking_contact_flag_defaults_on_and_can_disable(self):
+        if not _HAS_UIPC:
+            self.skipTest("Requires uipc")
+
+        parser = UIPCBrickStackingExample.create_parser()
+        default_args = parser.parse_args([])
+        disabled_args = parser.parse_args(["--no-enable-contact"])
+
+        self.assertTrue(default_args.enable_contact)
+        self.assertFalse(disabled_args.enable_contact)
 
     def test_uipc_brick_stacking_initial_pose_is_red_approach(self):
         if not _HAS_UIPC:
@@ -873,10 +910,20 @@ class TestUIPCSoftbodyExamples(unittest.TestCase):
             body_q = example.state_0.body_q.numpy()
             red_pos = body_q[example.brick_bodies[0]][:3]
             ee_pos = body_q[example.ee_index][:3]
+            abd_kappa = example.model.uipc.abd_kappa.numpy()
 
         target_pos = red_pos + np.array([0.0, 0.0, float(example.offset_approach[2])], dtype=np.float32)
         self.assertLess(float(np.linalg.norm(ee_pos - target_pos)), 0.025)
-        self.assertEqual(len([label for label in example.model.body_label if label.startswith("board_floor_")]), 8)
+        np.testing.assert_allclose(abd_kappa[example.brick_bodies], UIPC_BRICK_ABD_KAPPA)
+        np.testing.assert_allclose(abd_kappa[example.board_floor_bodies], -1.0)
+        board_floor_labels = [label for label in example.model.body_label if label.startswith("board_floor_")]
+        self.assertEqual(len(board_floor_labels), 8)
+
+        board_floor_z = body_q[example.board_floor_bodies[0]][2]
+        board_top = board_floor_z + 0.5 * example.brick_height_scaled
+        board_stud_top = board_top + UIPC_BRICK_STUD_HEIGHT
+        self.assertGreater(board_top, example.table_top_z)
+        self.assertGreater(board_stud_top, example.table_top_z)
 
     def test_uipc_softbody_dropping_to_cloth_uses_uipc_solver(self):
         example_path = os.path.join(
