@@ -483,7 +483,6 @@ class ArticulationBuilder:
             child_slots.append(c_slot)
             child_ids.append(c_id)
             target_ke = self._extract_target_strength(j, model.joint_qd_start, model.joint_target_ke)
-            print(f"target_ke: {target_ke}")
             strengths.append(target_ke)
             drive_strengths.append(target_ke)
 
