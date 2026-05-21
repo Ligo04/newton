@@ -50,6 +50,9 @@ if _HAS_UIPC:
     from newton.examples.uipc.contacts.example_uipc_brick_stacking import (
         Example as UIPCBrickStackingExample,
     )
+    from newton.examples.uipc.contacts.example_uipc_nut_bolt import (
+        Example as UIPCNutBoltExample,
+    )
     from newton.examples.uipc.multiphysics.example_uipc_softbody_dropping_to_cloth import (
         Example as UIPCSoftbodyDroppingToClothExample,
     )
@@ -925,6 +928,106 @@ class TestUIPCSoftbodyExamples(unittest.TestCase):
         board_stud_top = board_top + UIPC_BRICK_STUD_HEIGHT
         self.assertGreater(board_top, example.table_top_z)
         self.assertGreater(board_stud_top, example.table_top_z)
+
+    def test_uipc_nut_bolt_uses_contact_instead_of_aim_target_drive(self):
+        example_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "examples",
+            "uipc",
+            "contacts",
+            "example_uipc_nut_bolt.py",
+        )
+        with open(example_path) as f:
+            source = f.read()
+
+        self.assertIn('ABD_REPO_URL = "https://github.com/Autodesk/affine-body-dynamics.git"', source)
+        self.assertIn('ABD_SCREW_NUT_FOLDER = "meshes/screw-and-nut"', source)
+        self.assertIn('SCREW_MESH_NAME = "screw-big.obj"', source)
+        self.assertIn('NUT_MESH_NAME = "nut-big.obj"', source)
+        self.assertIn('ISAACGYM_ENVS_REPO_URL = "https://github.com/isaac-sim/IsaacGymEnvs.git"', source)
+        self.assertIn('ISAACGYM_NUT_BOLT_FOLDER = "assets/factory/mesh/factory_nut_bolt"', source)
+        self.assertIn('ORIGINAL_ASSEMBLY_STR = "m20_loose"', source)
+        self.assertIn('ORIGIN_MESH_SOURCE_ALIAS = "origin"', source)
+        self.assertIn(
+            "MESH_SOURCE_CHOICES = (AUTODESK_MESH_SOURCE, ORIGINAL_MESH_SOURCE, ORIGIN_MESH_SOURCE_ALIAS)", source
+        )
+        self.assertIn("def _canonical_mesh_source(mesh_source: str) -> str:", source)
+        self.assertIn("if mesh_source == ORIGIN_MESH_SOURCE_ALIAS:", source)
+        self.assertIn("AUTODESK_MESH_SCALE = 0.00326", source)
+        self.assertIn("ORIGINAL_MESH_SCALE = 1.0", source)
+        self.assertIn("ORIGINAL_BOLT_RADIAL_SCALE = 0.955", source)
+        self.assertIn("ORIGINAL_NUT_RADIAL_SCALE = 1.0", source)
+        self.assertIn("ASSEMBLY_SPACING = 0.1", source)
+        self.assertIn("AUTODESK_BOLT_START_Z = 0.048", source)
+        self.assertIn("AUTODESK_NUT_START_Z = 0.05676", source)
+        self.assertIn("ORIGINAL_BOLT_START_Z = 0.0", source)
+        self.assertIn("ORIGINAL_NUT_START_Z = 0.04262", source)
+        self.assertIn("NUT_START_YAW = np.pi / 8.0", source)
+        self.assertIn("MIN_NUT_DROP_BY_MESH_SOURCE", source)
+        self.assertIn("ORIGINAL_MESH_SOURCE: 0.004", source)
+        self.assertIn("MIN_NUT_ROTATION = 1.0", source)
+        self.assertIn("UIPC_SOLVE_TOL = 1.0e-5", source)
+        self.assertIn("THREAD_CONTACT_MU = 0.0", source)
+        self.assertIn("mu=THREAD_CONTACT_MU", source)
+        self.assertNotIn("mu=0.12", source)
+        self.assertIn("self.solver.configure_scene", source)
+        self.assertIn('"translation_tol": UIPC_SOLVE_TOL', source)
+        self.assertIn('"velocity_tol": UIPC_SOLVE_TOL', source)
+        self.assertIn('"linear_system": {"tol_rate": UIPC_SOLVE_TOL}', source)
+        self.assertIn('parser.add_argument(\n            "--mesh-source"', source)
+        self.assertIn("default=AUTODESK_MESH_SOURCE", source)
+        self.assertIn("'origin' is accepted as an alias", source)
+        self.assertIn(
+            "vertices = np.ascontiguousarray(np.column_stack((vertices[:, 0], vertices[:, 2], -vertices[:, 1])))",
+            source,
+        )
+        self.assertNotIn("vertices = vertices[:, [0, 2, 1]]", source)
+        self.assertIn("vertices[:, 0:2] *= np.float32(radial_scale)", source)
+        self.assertIn("rotate_y_axis_to_z=True", source)
+        self.assertIn("radial_scale=ORIGINAL_BOLT_RADIAL_SCALE", source)
+        self.assertIn("radial_scale=ORIGINAL_NUT_RADIAL_SCALE", source)
+        self.assertIn("ORIGINAL_NUT_MESH_NAME", source)
+        self.assertNotIn("convex_hull", source)
+        self.assertIn("configure_contact_tabular", source)
+        self.assertNotIn("aim_transform", source)
+        self.assertNotIn("aim_tf", source)
+        self.assertNotIn("is_constrained", source)
+        self.assertNotIn("_write_nut_aim_transforms", source)
+        self.assertNotIn("NUT_SPIN_RATE", source)
+        self.assertNotIn("NUT_DROP_RATE", source)
+        self.assertNotIn("NUT_MAX_DROP", source)
+        self.assertNotIn("body_qd[nut_body]", source)
+        self.assertNotIn("joint_qd[qd_start + 5]", source)
+        self.assertNotIn("if self.mesh_source != AUTODESK_MESH_SOURCE", source)
+        self.assertIn("drop > min_drop", source)
+        self.assertIn("rotation > MIN_NUT_ROTATION", source)
+
+    def test_uipc_nut_bolt_tracks_initial_nuts_outside_test_mode(self):
+        if not _HAS_UIPC:
+            self.skipTest("Requires uipc")
+
+        class DummyBodyQ:
+            def numpy(self):
+                return np.array(
+                    [
+                        [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+                        [1.0, 2.0, 3.0, 0.0, 0.0, np.sin(0.25), np.cos(0.25)],
+                    ],
+                    dtype=np.float32,
+                )
+
+        example = UIPCNutBoltExample.__new__(UIPCNutBoltExample)
+        example.test_mode = False
+        example.model = types.SimpleNamespace(body_label=["bolt_0_0", "nut_0_0"])
+        example.state_0 = types.SimpleNamespace(body_q=DummyBodyQ())
+
+        example._init_test_tracking()
+
+        self.assertEqual(example.bolt_body_indices, None)
+        self.assertEqual(example.nut_body_indices, None)
+        self.assertIn(1, example.nut_initial_by_body)
+        self.assertFalse(hasattr(example, "nut_initial_yaw_by_body"))
+        np.testing.assert_allclose(example.nut_initial_by_body[1][:3], [1.0, 2.0, 3.0])
 
     def test_uipc_softbody_dropping_to_cloth_uses_uipc_solver(self):
         example_path = os.path.join(

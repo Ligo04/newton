@@ -133,6 +133,10 @@ class TestExampleDiscovery(unittest.TestCase):
             examples["uipc_brick_stacking"],
             "newton.examples.uipc.contacts.example_uipc_brick_stacking",
         )
+        self.assertEqual(
+            examples["uipc_nut_bolt"],
+            "newton.examples.uipc.contacts.example_uipc_nut_bolt",
+        )
 
     def test_example_browser_uses_nested_uipc_group_names(self):
         class _BrowserViewer(_StubViewer):
@@ -146,6 +150,10 @@ class TestExampleDiscovery(unittest.TestCase):
         self.assertIn(
             ("uipc_cloth_franka", "newton.examples.uipc.cloth.example_uipc_cloth_franka"),
             browser._tree["uipc/cloth"],
+        )
+        self.assertIn(
+            ("uipc_nut_bolt", "newton.examples.uipc.contacts.example_uipc_nut_bolt"),
+            browser._tree["uipc/contacts"],
         )
 
 
