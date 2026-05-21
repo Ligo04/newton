@@ -206,8 +206,7 @@ class _ExampleBrowser:
         examples = get_examples()
         tree: dict[str, list[tuple[str, str]]] = defaultdict(list)
         for name, module_path in examples.items():
-            parts = module_path.split(".")
-            category = parts[2] if len(parts) > 2 else "other"
+            category = _example_category(module_path)
             tree[category].append((name, module_path))
         self._tree = dict(sorted(tree.items()))
 
@@ -445,25 +444,45 @@ def compute_world_offsets(
     return world_offsets
 
 
+def _iter_example_files(examples_dir: str):
+    """Yield discovered example files as ``(relative_parts, filename)`` tuples."""
+    for dirpath, dirnames, filenames in os.walk(examples_dir):
+        dirnames[:] = sorted(name for name in dirnames if not name.startswith("_") and name != "__pycache__")
+        rel_dir = os.path.relpath(dirpath, examples_dir)
+        if rel_dir == ".":
+            continue
+        rel_parts = rel_dir.split(os.sep)
+        for filename in sorted(filenames):
+            if filename.startswith("example_") and filename.endswith(".py"):
+                yield rel_parts, filename
+
+
+def _example_category(module_path: str) -> str:
+    """Return the browser grouping key for an example module path."""
+    parts = module_path.split(".")
+    if len(parts) <= 2:
+        return "other"
+    if parts[2] == "uipc" and len(parts) > 4:
+        return "/".join(parts[2:-1])
+    return parts[2]
+
+
 def get_examples() -> dict[str, str]:
     """Return a dict mapping example short names to their full module paths."""
     example_map = {}
     examples_dir = get_source_directory()
-    for module in sorted(os.listdir(examples_dir)):
-        module_dir = os.path.join(examples_dir, module)
-        if not os.path.isdir(module_dir) or module.startswith("_"):
-            continue
-        for filename in sorted(os.listdir(module_dir)):
-            if filename.startswith("example_") and filename.endswith(".py"):
-                example_name = filename[8:-3]
-                example_map[example_name] = f"newton.examples.{module}.{filename[:-3]}"
-    return example_map
+    for rel_parts, filename in _iter_example_files(examples_dir):
+        example_name = filename[8:-3]
+        module_path = ".".join(("newton", "examples", *rel_parts, filename[:-3]))
+        example_map[example_name] = module_path
+    return dict(sorted(example_map.items()))
 
 
 def _print_examples(examples: dict[str, str]) -> None:
     print("Available examples:")
-    for name in examples:
-        print(f"  {name}")
+    for name, module_path in examples.items():
+        category = _example_category(module_path)
+        print(f"  {name:<40} [{category}]")
 
 
 def create_parser():

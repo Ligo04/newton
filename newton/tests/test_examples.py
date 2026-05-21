@@ -37,20 +37,20 @@ from newton.tests.unittest_utils import (
 _HAS_UIPC = importlib.util.find_spec("uipc") is not None
 
 if _HAS_UIPC:
-    from newton.examples.uipc.example_uipc_brick_stacking import (
-        BRICK_ABD_KAPPA as UIPC_BRICK_ABD_KAPPA,
-    )
-    from newton.examples.uipc.example_uipc_brick_stacking import (
-        STUD_HEIGHT as UIPC_BRICK_STUD_HEIGHT,
-    )
-    from newton.examples.uipc.example_uipc_brick_stacking import (
-        Example as UIPCBrickStackingExample,
-    )
-    from newton.examples.uipc.example_uipc_cloth_franka import Example as UIPCClothFrankaExample
-    from newton.examples.uipc.example_uipc_cloth_franka_stable_pd_force import (
+    from newton.examples.uipc.cloth.example_uipc_cloth_franka import Example as UIPCClothFrankaExample
+    from newton.examples.uipc.cloth.example_uipc_cloth_franka_stable_pd_force import (
         Example as StablePDForceExample,
     )
-    from newton.examples.uipc.example_uipc_softbody_dropping_to_cloth import (
+    from newton.examples.uipc.contacts.example_uipc_brick_stacking import (
+        BRICK_ABD_KAPPA as UIPC_BRICK_ABD_KAPPA,
+    )
+    from newton.examples.uipc.contacts.example_uipc_brick_stacking import (
+        STUD_HEIGHT as UIPC_BRICK_STUD_HEIGHT,
+    )
+    from newton.examples.uipc.contacts.example_uipc_brick_stacking import (
+        Example as UIPCBrickStackingExample,
+    )
+    from newton.examples.uipc.multiphysics.example_uipc_softbody_dropping_to_cloth import (
         Example as UIPCSoftbodyDroppingToClothExample,
     )
 
@@ -829,6 +829,7 @@ class TestUIPCSoftbodyExamples(unittest.TestCase):
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
             "examples",
             "uipc",
+            "contacts",
             "example_uipc_brick_stacking.py",
         )
         with open(example_path) as f:
@@ -930,6 +931,7 @@ class TestUIPCSoftbodyExamples(unittest.TestCase):
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
             "examples",
             "uipc",
+            "multiphysics",
             "example_uipc_softbody_dropping_to_cloth.py",
         )
         with open(example_path) as f:
@@ -986,6 +988,7 @@ class TestUIPCSoftbodyExamples(unittest.TestCase):
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
             "examples",
             "uipc",
+            "cloth",
             "example_uipc_cloth_franka.py",
         )
         with open(example_path) as f:
@@ -1011,6 +1014,7 @@ class TestUIPCSoftbodyExamples(unittest.TestCase):
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
             "examples",
             "uipc",
+            "cloth",
             "example_uipc_cloth_franka.py",
         )
         with open(example_path) as f:
@@ -1142,6 +1146,7 @@ class TestUIPCSoftbodyExamples(unittest.TestCase):
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
             "examples",
             "uipc",
+            "cloth",
             "example_uipc_cloth_franka_stable_pd_force.py",
         )
         with open(example_path) as f:
@@ -1162,63 +1167,63 @@ class TestUIPCSoftbodyExamples(unittest.TestCase):
 if _HAS_UIPC:
     add_example_test(
         TestUIPCSoftbodyExamples,
-        name="uipc.example_uipc_soft_hanging",
+        name="uipc.softbody.example_uipc_soft_hanging",
         devices=cuda_test_devices,
         test_options={"num-frames": 60},
         use_viewer=True,
     )
     add_example_test(
         TestUIPCSoftbodyExamples,
-        name="uipc.example_deformablebody",
+        name="uipc.softbody.example_deformablebody",
         devices=cuda_test_devices,
         test_options={"num-frames": 10},
         use_viewer=True,
     )
     add_example_test(
         TestUIPCSoftbodyExamples,
-        name="uipc.example_uipc_softbody_franka",
+        name="uipc.softbody.example_uipc_softbody_franka",
         devices=cuda_test_devices,
         test_options={"num-frames": 10},
         use_viewer=True,
     )
     add_example_test(
         TestUIPCSoftbodyExamples,
-        name="uipc.example_uipc_softbody_dropping_to_cloth",
+        name="uipc.multiphysics.example_uipc_softbody_dropping_to_cloth",
         devices=cuda_test_devices,
         test_options={"num-frames": 1},
         use_viewer=True,
     )
     add_example_test(
         TestUIPCSoftbodyExamples,
-        name="uipc.example_uipc_cloth_franka",
+        name="uipc.cloth.example_uipc_cloth_franka",
         devices=cuda_test_devices,
         test_options={"num-frames": 1},
         use_viewer=True,
     )
     add_example_test(
         TestUIPCSoftbodyExamples,
-        name="uipc.example_uipc_cloth_franka_stable_pd_force",
+        name="uipc.cloth.example_uipc_cloth_franka_stable_pd_force",
         devices=cuda_test_devices,
         test_options={"num-frames": 1},
         use_viewer=True,
     )
     add_example_test(
         TestUIPCSoftbodyExamples,
-        name="uipc.example_uipc_cloth_poker_cards",
+        name="uipc.cloth.example_uipc_cloth_poker_cards",
         devices=cuda_test_devices,
         test_options={"num-frames": 5, "num-cards": 4},
         use_viewer=True,
     )
     add_example_test(
         TestUIPCSoftbodyExamples,
-        name="uipc.example_uipc_sensor_contact",
+        name="uipc.sensors.example_uipc_sensor_contact",
         devices=cuda_test_devices,
         test_options={"num-frames": 60},
         use_viewer=True,
     )
     add_example_test(
         TestUIPCSoftbodyExamples,
-        name="uipc.example_uipc_sensor_contact",
+        name="uipc.sensors.example_uipc_sensor_contact",
         devices=cuda_test_devices,
         test_options={"num-frames": 60, "solver": "mujoco"},
         use_viewer=True,

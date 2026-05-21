@@ -12,7 +12,7 @@ import warp as wp
 
 import newton
 from newton import JointTargetMode
-from newton.examples.uipc.example_uipc_ur10_force import _compute_coriolis_from_mass_derivatives
+from newton.examples.uipc.robot.example_uipc_ur10_force import _compute_coriolis_from_mass_derivatives
 from newton.tests.unittest_utils import USD_AVAILABLE, add_function_test, get_test_devices
 
 # Matches ``example_uipc_ur10_force.Example.HOME_POSE`` (6 revolute DOFs).

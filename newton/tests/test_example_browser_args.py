@@ -121,5 +121,33 @@ class TestExampleBrowserReset(unittest.TestCase):
         self.assertEqual(reset_example.args.world_count, 7)
 
 
+class TestExampleDiscovery(unittest.TestCase):
+    def test_get_examples_discovers_grouped_uipc_examples(self):
+        examples = newton.examples.get_examples()
+
+        self.assertEqual(
+            examples["uipc_cloth_franka"],
+            "newton.examples.uipc.cloth.example_uipc_cloth_franka",
+        )
+        self.assertEqual(
+            examples["uipc_brick_stacking"],
+            "newton.examples.uipc.contacts.example_uipc_brick_stacking",
+        )
+
+    def test_example_browser_uses_nested_uipc_group_names(self):
+        class _BrowserViewer(_StubViewer):
+            def register_ui_callback(self, *_args, **_kwargs):
+                pass
+
+        browser = _ExampleBrowser(_BrowserViewer())
+
+        self.assertIn("uipc/cloth", browser._tree)
+        self.assertIn("uipc/contacts", browser._tree)
+        self.assertIn(
+            ("uipc_cloth_franka", "newton.examples.uipc.cloth.example_uipc_cloth_franka"),
+            browser._tree["uipc/cloth"],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

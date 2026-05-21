@@ -314,8 +314,8 @@ Typos may occasionally flag legitimate project-specific terminology, domain term
 False positives are managed as follows:
 
 - **File exclusions:** The ``[tool.typos]`` section includes ``files.extend-exclude`` to ignore matching files and directories, such as ``examples/assets`` and specific model or asset file types (e.g., ``*.urdf``, ``*.usd``).
-- **Word allowlist:** Words or acronyms that would otherwise be flagged can be listed in ``[tool.typos.default.extend-words]`` (e.g., ``ba``, ``HAA``).
-- **Identifier allowlist:** Specific identifiers, such as variable or constant names, can be declared in ``[tool.typos.default.extend-identifiers]`` (e.g., ``PNGs``).
+- **Word allowlist:** Words or acronyms that would otherwise be flagged can be listed in ``[tool.typos.default.extend-words]`` (e.g., ``newton`` or ``warp``).
+- **Identifier allowlist:** Specific identifiers, such as variable or constant names, can be declared in ``[tool.typos.default.extend-identifiers]`` (e.g., ``abd_transform_buf``).
 
 When typos reports a word that is valid within the Newton codebase, you can add it to the appropriate section in ``pyproject.toml`` to suppress future warnings. After updating, re-run typos (or pre-commit) to confirm that the word is ignored. Use these options to keep the codebase clean while ensuring needed flexibility for accepted project-specific words and identifiers.
 
@@ -621,7 +621,10 @@ Writing examples
 ----------------
 
 Examples live in ``newton/examples/<category>/example_<category>_<name>.py`` (e.g.
-``newton/examples/basic/example_basic_pendulum.py``). Each file defines an ``Example``
+``newton/examples/basic/example_basic_pendulum.py``). Solver-family overlays can use one
+extra grouping level under their solver directory, for example
+``newton/examples/uipc/cloth/example_uipc_cloth_franka.py`` groups UIPC examples by
+the same domains as the core Newton examples. Each file defines an ``Example``
 class with the following interface:
 
 .. code-block:: python
@@ -656,7 +659,7 @@ Discovery and registration
 ^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 Examples are discovered automatically: any file matching
-``newton/examples/<category>/example_*.py`` is picked up by ``newton.examples.get_examples()``.
+``newton/examples/**/example_*.py`` is picked up by ``newton.examples.get_examples()``.
 The short name used on the command line is the filename without the ``example_`` prefix and
 ``.py`` extension (e.g. ``basic_pendulum``).
 

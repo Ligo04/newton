@@ -371,7 +371,7 @@ If you installed from source with uv, substitute `uv run` for `python` in the co
       </a>
     </td>
     <td align="center" width="33%">
-      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/uipc/example_uipc_cloth_poker_cards.py">
+      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/uipc/cloth/example_uipc_cloth_poker_cards.py">
         <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_cloth_poker_cards.jpg" alt="UIPC Cloth Poker Cards">
       </a>
     </td>
@@ -389,7 +389,7 @@ If you installed from source with uv, substitute `uv run` for `python` in the co
   </tr>
   <tr>
     <td align="center" width="33%">
-      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/uipc/example_uipc_cloth_franka_stable_pd_force.py">
+      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/uipc/cloth/example_uipc_cloth_franka_stable_pd_force.py">
         <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_cloth_franka.jpg" alt="UIPC Cloth Franka Stable-PD Force">
       </a>
     </td>
@@ -693,7 +693,7 @@ If you installed from source with uv, substitute `uv run` for `python` in the co
       </a>
     </td>
     <td align="center" width="33%">
-      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/uipc/example_uipc_softbody_dropping_to_cloth.py">
+      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/uipc/multiphysics/example_uipc_softbody_dropping_to_cloth.py">
         <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_softbody_dropping_to_cloth.jpg" alt="UIPC Softbody Dropping to Cloth">
       </a>
     </td>

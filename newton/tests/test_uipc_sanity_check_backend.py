@@ -3,7 +3,7 @@
 
 """Benchmark: compare SolverUIPC ``sanity_check.backend`` cuda vs cpu.
 
-Builds the Allegro hand model from :mod:`newton.examples.uipc.example_uipc_allegro_hand`
+Builds the Allegro hand model from :mod:`newton.examples.uipc.robot.example_uipc_allegro_hand`
 replicated to ``WORLD_COUNT`` worlds and times only ``SolverUIPC.initialize()``
 with the ``sanity_check`` backend set to ``"cuda"`` and ``"cpu"`` respectively.
 """
