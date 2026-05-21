@@ -170,7 +170,7 @@ def _make_shell_mesh(nx, ny):
     return v, f
 
 
-def _make_brick_mesh(nx=4, ny=2):
+def _make_brick_mesh(nx=4, ny=2, tube_outer_radius=TUBE_OUTER_RADIUS):
     shell_v, shell_f = _make_shell_mesh(nx, ny)
     stud_meshes = []
     for i in range(nx):
@@ -186,7 +186,7 @@ def _make_brick_mesh(nx=4, ny=2):
     if ny == 2:
         for i in range(nx - 1):
             tx = (i - (nx - 2) / 2.0) * PITCH
-            tube_meshes.append(_cylinder_mesh(TUBE_OUTER_RADIUS, TUBE_HEIGHT, CYLINDER_SEGMENTS, cx=tx, cy=0.0, cz=0.0))
+            tube_meshes.append(_cylinder_mesh(tube_outer_radius, TUBE_HEIGHT, CYLINDER_SEGMENTS, cx=tx, cy=0.0, cz=0.0))
     return _combine_meshes([(shell_v, shell_f), *stud_meshes, *tube_meshes])
 
 

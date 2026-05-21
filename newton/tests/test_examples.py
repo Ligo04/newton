@@ -45,13 +45,31 @@ if _HAS_UIPC:
         BRICK_ABD_KAPPA as UIPC_BRICK_ABD_KAPPA,
     )
     from newton.examples.uipc.contacts.example_uipc_brick_stacking import (
+        PITCH as UIPC_BRICK_PITCH,
+    )
+    from newton.examples.uipc.contacts.example_uipc_brick_stacking import (
         STUD_HEIGHT as UIPC_BRICK_STUD_HEIGHT,
+    )
+    from newton.examples.uipc.contacts.example_uipc_brick_stacking import (
+        STUD_RADIUS as UIPC_BRICK_STUD_RADIUS,
     )
     from newton.examples.uipc.contacts.example_uipc_brick_stacking import (
         Example as UIPCBrickStackingExample,
     )
     from newton.examples.uipc.contacts.example_uipc_nut_bolt import (
         Example as UIPCNutBoltExample,
+    )
+    from newton.examples.uipc.contacts.example_uipc_two_brick_stack import (
+        BRICK_HEIGHT as UIPC_TWO_BRICK_HEIGHT,
+    )
+    from newton.examples.uipc.contacts.example_uipc_two_brick_stack import (
+        INTERLOCK_TUBE_OUTER_RADIUS as UIPC_INTERLOCK_TUBE_OUTER_RADIUS,
+    )
+    from newton.examples.uipc.contacts.example_uipc_two_brick_stack import (
+        UIPC_GAP as UIPC_TWO_BRICK_GAP,
+    )
+    from newton.examples.uipc.contacts.example_uipc_two_brick_stack import (
+        Example as UIPCTwoBrickStackExample,
     )
     from newton.examples.uipc.multiphysics.example_uipc_softbody_dropping_to_cloth import (
         Example as UIPCSoftbodyDroppingToClothExample,
@@ -929,6 +947,58 @@ class TestUIPCSoftbodyExamples(unittest.TestCase):
         self.assertGreater(board_top, example.table_top_z)
         self.assertGreater(board_stud_top, example.table_top_z)
 
+    def test_uipc_two_brick_stack_initializes_stacked_bricks(self):
+        if not _HAS_UIPC:
+            self.skipTest("Requires uipc")
+        if not cuda_test_devices:
+            self.skipTest("Requires a CUDA test device")
+
+        class DummyViewer:
+            def __init__(self):
+                self._paused = False
+
+            def set_model(self, model):
+                pass
+
+            def set_camera(self, **kwargs):
+                pass
+
+            def begin_frame(self, *args, **kwargs):
+                pass
+
+            def log_state(self, *args, **kwargs):
+                pass
+
+            def end_frame(self):
+                pass
+
+        args = types.SimpleNamespace(test=True, uipc_gap=UIPC_TWO_BRICK_GAP)
+        with wp.ScopedDevice(cuda_test_devices[0]):
+            example = UIPCTwoBrickStackExample(DummyViewer(), args)
+            self.assertEqual([example.model.body_label[i] for i in example.brick_bodies], ["brick_bottom", "brick_top"])
+            self.assertTrue(example.solver.is_contact_enabled(example.brick_bodies[0], example.brick_bodies[1]))
+            self.assertTrue(example.solver.is_contact_enabled(-1, example.brick_bodies[0]))
+            body_q = example.state_0.body_q.numpy()[example.brick_bodies]
+            initial_body_q = example.initial_body_q.copy()
+            abd_kappa = example.model.uipc.abd_kappa.numpy()[example.brick_bodies]
+
+        np.testing.assert_allclose(body_q, initial_body_q)
+        np.testing.assert_allclose(abd_kappa, UIPC_BRICK_ABD_KAPPA)
+        self.assertAlmostEqual(example.uipc_gap, 1.0e-4)
+        self.assertAlmostEqual(example.interlock_tube_outer_radius, UIPC_INTERLOCK_TUBE_OUTER_RADIUS)
+        stud_tube_clearance = (
+            np.hypot(0.5 * UIPC_BRICK_PITCH, 0.5 * UIPC_BRICK_PITCH)
+            - example.interlock_tube_outer_radius
+            - UIPC_BRICK_STUD_RADIUS
+        )
+        self.assertAlmostEqual(stud_tube_clearance, example.uipc_gap)
+        self.assertLess(float(np.linalg.norm(body_q[1, :2] - body_q[0, :2])), 1.0e-6)
+        self.assertAlmostEqual(
+            float(body_q[1, 2] - body_q[0, 2]),
+            UIPC_TWO_BRICK_HEIGHT + args.uipc_gap,
+            delta=1.0e-6,
+        )
+
     def test_uipc_nut_bolt_uses_contact_instead_of_aim_target_drive(self):
         example_path = os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -1320,6 +1390,13 @@ if _HAS_UIPC:
     add_example_test(
         TestUIPCSoftbodyExamples,
         name="uipc.sensors.example_uipc_sensor_contact",
+        devices=cuda_test_devices,
+        test_options={"num-frames": 60},
+        use_viewer=True,
+    )
+    add_example_test(
+        TestUIPCSoftbodyExamples,
+        name="uipc.contacts.example_uipc_two_brick_stack",
         devices=cuda_test_devices,
         test_options={"num-frames": 60},
         use_viewer=True,

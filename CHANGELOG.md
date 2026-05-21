@@ -4,6 +4,7 @@
 
 ### Added
 
+- Add `uipc_two_brick_stack` as a minimal SolverUIPC initialization scene with two already-stacked LEGO bricks.
 - Add `uipc_nut_bolt` demo with selectable Autodesk ABD or original IsaacGym nut/bolt meshes, SolverUIPC IPC contact, original nut/bolt friction, and no soft-transform aim-target driving.
 - Add `uipc_cloth_franka_stable_pd_force` demo using `ControllerStablePD` EFFORT actuators for Franka contact-based cloth manipulation.
 - Add `uipc:abd_kappa` body custom attribute for per-rigid-body UIPC ABD stiffness overrides.
