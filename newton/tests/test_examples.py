@@ -875,6 +875,11 @@ class TestUIPCSoftbodyExamples(unittest.TestCase):
         self.assertIn("BRICK_ABD_KAPPA = 10.0 * uipc.unit.GPa", source)
         self.assertIn("newton.solvers.SolverUIPC.register_custom_attributes(builder)", source)
         self.assertIn('custom_attributes={"uipc:abd_kappa": BRICK_ABD_KAPPA}', source)
+        self.assertIn(
+            "self.interlock_tube_outer_radius = self._compute_interlock_tube_outer_radius(self.uipc_gap)", source
+        )
+        self.assertIn("_make_brick_mesh(tube_outer_radius=tube_outer_radius)", source)
+        self.assertIn('"--uipc-gap"', source)
         self.assertIn("self.brick_stack_height = self.brick_height_scaled + self.uipc_gap", source)
         self.assertIn("self.brick_stack_height,", source)
         self.assertIn("self.drop_z_offset = wp.vec3(0.0, 0.0, 0.0)", source)
@@ -936,6 +941,11 @@ class TestUIPCSoftbodyExamples(unittest.TestCase):
 
         target_pos = red_pos + np.array([0.0, 0.0, float(example.offset_approach[2])], dtype=np.float32)
         self.assertLess(float(np.linalg.norm(ee_pos - target_pos)), 0.025)
+        self.assertAlmostEqual(example.uipc_gap, 0.0005)
+        self.assertAlmostEqual(
+            example.interlock_tube_outer_radius,
+            np.hypot(0.5 * UIPC_BRICK_PITCH, 0.5 * UIPC_BRICK_PITCH) - UIPC_BRICK_STUD_RADIUS - example.uipc_gap,
+        )
         np.testing.assert_allclose(abd_kappa[example.brick_bodies], UIPC_BRICK_ABD_KAPPA)
         np.testing.assert_allclose(abd_kappa[example.board_floor_bodies], -1.0)
         board_floor_labels = [label for label in example.model.body_label if label.startswith("board_floor_")]

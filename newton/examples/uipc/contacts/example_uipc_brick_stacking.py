@@ -34,6 +34,7 @@ BRICK_HEIGHT = 0.0096
 BRICK_SCALE = 1.0
 BRICK_DENSITY = 565.0  # ABS plastic [kg/m³]
 BRICK_ABD_KAPPA = 10.0 * uipc.unit.GPa
+UIPC_GAP = 0.0005
 
 
 BRICK_HX = 2.0 * PITCH
@@ -366,7 +367,9 @@ class Example:
         self.test_mode = getattr(args, "test", False)
         self.enable_contact = getattr(args, "enable_contact", True)
 
-        self.uipc_gap = 0.001
+        self.uipc_gap = float(getattr(args, "uipc_gap", UIPC_GAP))
+        if self.uipc_gap <= 0.0:
+            raise ValueError("--uipc-gap must be positive so the brick mesh can stay above the UIPC barrier")
         self.ee_index = -1
         self.brick_count = 3
 
@@ -383,6 +386,9 @@ class Example:
         self.brick_stack_height = self.brick_height_scaled + self.uipc_gap
         self.brick_width_scaled = 2 * PITCH * BRICK_SCALE
         self.brick_length_scaled = 4 * PITCH * BRICK_SCALE
+        self.interlock_tube_outer_radius = self._compute_interlock_tube_outer_radius(self.uipc_gap)
+        if self.interlock_tube_outer_radius <= 0.0:
+            raise ValueError("--uipc-gap leaves no positive-radius underside tube for interlocking brick geometry")
         # Targets are specified at the Franka hand link. The finger pads sit
         # roughly 58 mm below that link, so the UIPC port uses taller hand-link
         # offsets than the MuJoCo example to keep the initial pose intersection-free.
@@ -455,7 +461,17 @@ class Example:
             default=True,
             help="Enable UIPC contact handling. Use --no-enable-contact to disable contact.",
         )
+        parser.add_argument(
+            "--uipc-gap",
+            type=float,
+            default=UIPC_GAP,
+            help="Initial UIPC barrier clearance [m] used to size the brick tube-to-stud interlock.",
+        )
         return parser
+
+    @staticmethod
+    def _compute_interlock_tube_outer_radius(uipc_gap: float) -> float:
+        return float(np.hypot(0.5 * PITCH, 0.5 * PITCH) - STUD_RADIUS - uipc_gap)
 
     def _setup_brick_layout(self):
         sqrt2_2 = float(np.sqrt(2.0) / 2.0)
@@ -538,8 +554,8 @@ class Example:
         )
 
     @staticmethod
-    def _build_brick_mesh(color):
-        v, f = _make_brick_mesh()
+    def _build_brick_mesh(color, tube_outer_radius):
+        v, f = _make_brick_mesh(tube_outer_radius=tube_outer_radius)
         return newton.Mesh(v, f.flatten(), color=color)
 
     _brick_mesh_xform = wp.transform(wp.vec3(0.0, 0.0, -BRICK_HZ), wp.quat_identity())
@@ -556,7 +572,7 @@ class Example:
         floor_rot = self.rot_90z
         bw = self.brick_width_scaled
         bl = self.brick_length_scaled
-        gray_mesh = self._build_brick_mesh((0.35, 0.35, 0.35))
+        gray_mesh = self._build_brick_mesh((0.35, 0.35, 0.35), self.interlock_tube_outer_radius)
         self.board_floor_bodies = []
         for ix, dx in enumerate((-1.5 * bw, -0.5 * bw, 0.5 * bw, 1.5 * bw)):
             for iy, dy in enumerate((-0.5 * bl, 0.5 * bl)):
@@ -584,7 +600,7 @@ class Example:
                 label=self.brick_labels[i],
                 custom_attributes={"uipc:abd_kappa": BRICK_ABD_KAPPA},
             )
-            brick_mesh = self._build_brick_mesh(self.brick_colors[i])
+            brick_mesh = self._build_brick_mesh(self.brick_colors[i], self.interlock_tube_outer_radius)
             builder.add_shape_mesh(
                 body=body,
                 mesh=brick_mesh,
