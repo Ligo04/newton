@@ -11,7 +11,7 @@
 #
 # This is essentially ``example_ik_franka`` (gizmo + IK only, no physics)
 # upgraded to drive a real UIPC simulation, mirroring the actuator setup
-# from ``example_uipc_panda_hydro``.
+# from ``example_uipc_panda``.
 #
 # Command: python -m newton.examples uipc_ik_franka
 #
@@ -93,7 +93,7 @@ class Example:
         franka.add_shape_mesh(body=left_finger_idx, mesh=pad_mesh, xform=pad_xform)
         franka.add_shape_mesh(body=right_finger_idx, mesh=pad_mesh, xform=pad_xform)
 
-        # Initial joint configuration (matches example_uipc_panda_hydro).
+        # Initial joint configuration (matches example_uipc_panda).
         init_q = [
             -3.6802115e-03,
             2.3901723e-02,
@@ -155,7 +155,7 @@ class Example:
 
         # ------------------------------------------------------------------
         # IK setup — single-problem solver targeting ``fr3_hand``, which
-        # matches the convention used by ``example_uipc_panda_hydro``. The
+        # matches the convention used by ``example_uipc_panda``. The
         # wrist chain (``link7 → link8 → fr3_hand``) now behaves correctly
         # under UIPC because ``articulation_franka._compute_shape_body_anchors``
         # collapses the shapeless ``fr3_link8`` into its nearest ABD-bearing

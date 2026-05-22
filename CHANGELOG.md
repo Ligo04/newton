@@ -19,6 +19,7 @@
 
 ### Changed
 
+- Rename `uipc_panda_hydro` example to `uipc_panda`; run it with `python -m newton.examples uipc_panda`.
 - Require `pyuipc>=0.0.25` for the UIPC runtime dependency.
 - Remove the `cbor2` `<6` dependency ceiling after updating recorder deserialization to accept mapping-like decoded containers
 - Require Warp 1.14 and configure Warp logging through `warp.config.log_level`; use Newton's `--quiet` flag or `--warp-config log_level=...` instead of legacy `verbose` or `quiet` config keys

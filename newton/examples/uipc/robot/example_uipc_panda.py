@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 ###########################################################################
-# Example UIPC Panda Hydro
+# Example UIPC Panda
 #
 # Pick-and-place manipulation with a Franka Panda arm using the
 # SolverUIPC backend. Mirrors ``example_robot_panda_hydro`` but replaces
@@ -21,7 +21,7 @@
 # IK runs on a single-world model and the resulting joint targets are
 # broadcast to every replicated world.
 #
-# Command: python -m newton.examples uipc_panda_hydro --scene pen
+# Command: python -m newton.examples uipc_panda --scene pen
 #
 ###########################################################################
 
@@ -276,11 +276,12 @@ class Example:
         self.contacts = self.model.contacts()
 
         self.solver = newton.solvers.SolverUIPC(
-            workspace="/tmp/newton_uipc/panda_hydro",
+            workspace="/tmp/newton_uipc/uipc_panda",
             model=self.model,
             dt=self.sim_dt,
             logger_level=uipc.Logger.Warn,
             dump_enable=True,
+            require_profile=True,
         )
         # self.solver.configure_scene({"extras": {"debug": {"dump_surface": True}}})
         self.solver.set_contact(True, uipc_gap)
@@ -374,15 +375,13 @@ class Example:
                 self.cup_pos[1],
                 self.z_rest - 0.1,
             )
-            self.waypoints.extend(
-                [
-                    [cup_above_high, 2.0, grasp_pos, rot_hand],
-                    [cup_above_high, 2.0, loose_pos, rot_hand],
-                    [cup_above_high, 1.0, loose_pos, rot_hand],
-                    [cup_above_low, 1.0, loose_pos, rot_hand],
-                    [cup_above_low, 1.0, 0.0, rot_hand],
-                ]
-            )
+            self.waypoints.extend([
+                [cup_above_high, 2.0, grasp_pos, rot_hand],
+                [cup_above_high, 2.0, loose_pos, rot_hand],
+                [cup_above_high, 1.0, loose_pos, rot_hand],
+                [cup_above_low, 1.0, loose_pos, rot_hand],
+                [cup_above_low, 1.0, 0.0, rot_hand],
+            ])
 
     def _set_joint_targets(self):
         self.time_in_waypoint += self.frame_dt
