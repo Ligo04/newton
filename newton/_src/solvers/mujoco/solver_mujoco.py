@@ -4057,7 +4057,7 @@ class SolverMuJoCo(SolverBase):
         """
         Convert a Newton model and state to MuJoCo (Warp) model and data.
 
-        See ``docs/integrations/mujoco.rst`` for user-facing documentation of
+        See ``docs/integrations/mujoco.md`` for user-facing documentation of
         all conversions performed here.  Keep that file in sync when changing
         this method.
 
