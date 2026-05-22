@@ -8,4 +8,5 @@
 
 isaac-lab
 mujoco
+uipc
 ```

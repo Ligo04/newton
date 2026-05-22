@@ -1,0 +1,19 @@
+---
+description: Use MuJoCo integration guidance for Newton SolverMuJoCo docs/backend/examples/tests.
+globs:
+  - "newton/_src/solvers/mujoco/**"
+  - "newton/_src/utils/import_mjcf.py"
+  - "newton/_src/usd/schemas.py"
+  - "newton/tests/test_mujoco*"
+  - "newton/tests/test_import_mjcf.py"
+  - "docs/integrations/mujoco.md"
+alwaysApply: false
+---
+
+When working on these files, use the project-local MuJoCo integration guidance:
+
+- Read `.cursor/skills/mujoco-integration/SKILL.md`.
+- Read `.cursor/skills/mujoco-integration/references/mujoco-surface-map.md`.
+- If a dedicated agent prompt is available, use `.cursor/agents/mujoco-integration.md`.
+- Ground behavior claims in current code/tests/examples.
+- Preserve MuJoCo caveats: default MuJoCo contacts, explicit `update_contacts`, construction-time option resolution, custom attribute registration, margin zeroing/multiccd constraints, and separate-world structural identity.

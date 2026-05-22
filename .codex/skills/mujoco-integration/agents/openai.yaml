@@ -1,0 +1,4 @@
+interface:
+  display_name: "MuJoCo Integration"
+  short_description: "Work on Newton's MuJoCo solver integration."
+  default_prompt: "Use the MuJoCo integration skill to inspect, document, or modify Newton's SolverMuJoCo backend, MuJoCo custom attributes, MJCF/USD import behavior, contacts, examples, and docs/integrations/mujoco.md."

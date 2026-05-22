@@ -1,0 +1,18 @@
+---
+description: Use UIPC integration guidance for Newton SolverUIPC docs/backend/examples/tests.
+globs:
+  - "newton/_src/solvers/uipc/**"
+  - "newton/examples/uipc/**"
+  - "newton/tests/test_uipc*"
+  - "docs/integrations/uipc.md"
+  - "docs/guide/uipc_parameters.md"
+alwaysApply: false
+---
+
+When working on these files, use the project-local UIPC integration guidance:
+
+- Read `.cursor/skills/uipc-integration/SKILL.md`.
+- Read `.cursor/skills/uipc-integration/references/uipc-surface-map.md`.
+- If a dedicated agent prompt is available, use `.cursor/agents/uipc-integration.md`.
+- Ground behavior claims in current code/tests/examples.
+- Preserve UIPC caveats: internal contact + `update_contacts`, fixed constructor `dt`, contact disabled by default, init-time baked geometry/actuators/inertials, active controls limited to revolute/prismatic.

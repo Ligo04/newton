@@ -1,0 +1,4 @@
+interface:
+  display_name: "UIPC Integration"
+  short_description: "Work on Newton's UIPC solver integration."
+  default_prompt: "Use the UIPC integration skill to inspect, document, or modify Newton's SolverUIPC backend, examples, contact setup, cloth/deformable mapping, and docs/integrations/uipc.md."
