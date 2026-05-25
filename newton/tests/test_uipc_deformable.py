@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import importlib.util
+import inspect
 import unittest
 
 import numpy as np
@@ -21,6 +22,12 @@ if _HAS_UIPC:
 
 @unittest.skipUnless(_HAS_UIPC, "uipc is not installed")
 class TestUIPCDeformableBuilder(unittest.TestCase):
+    def test_solver_uipc_init_has_no_constitution_model_parameters(self):
+        signature = inspect.signature(newton.solvers.SolverUIPC.__init__)
+
+        self.assertNotIn("cloth_model", signature.parameters)
+        self.assertNotIn("deformable_model", signature.parameters)
+
     @staticmethod
     def _add_disconnected_tet_soft_mesh(
         builder: newton.ModelBuilder,
@@ -175,6 +182,19 @@ class TestUIPCDeformableBuilder(unittest.TestCase):
         self.assertEqual(len(solver.mapping.deformable_particle_indices), 1)
         self.assertEqual(len(solver.mapping.deformable_particle_indices[0]), 8)
 
+    def test_register_custom_attributes_adds_default_deformable_model(self):
+        builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+        newton.solvers.SolverUIPC.register_custom_attributes(builder)
+        self._add_disconnected_tet_soft_mesh(builder)
+        self._add_disconnected_tet_soft_mesh(builder)
+
+        model = builder.finalize()
+
+        self.assertTrue(hasattr(model, "uipc"))
+        self.assertTrue(hasattr(model.uipc, "deformable_model"))
+        self.assertEqual(model.custom_frequency_counts["uipc:deformable_body"], 2)
+        self.assertEqual(model.uipc.deformable_model, ["stable_neo_hookean", "stable_neo_hookean"])
+
     def test_disconnected_tet_materials_are_copied_per_tet(self):
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
         k_mu = [2.0e4, 8.0e4]
@@ -208,6 +228,36 @@ class TestUIPCDeformableBuilder(unittest.TestCase):
         self.assertEqual(np_lambda.shape[0], 2)
         np.testing.assert_allclose(np_mu, expected_mu, rtol=0.0, atol=2.0e-2)
         np.testing.assert_allclose(np_lambda, expected_lambda, rtol=0.0, atol=2.0e-2)
+
+    def test_deformable_model_custom_attribute_selects_per_range_constitution(self):
+        builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+        newton.solvers.SolverUIPC.register_custom_attributes(builder)
+        k_mu = [2.0e4, 8.0e4]
+        self._add_disconnected_tet_soft_mesh(builder, k_mu=k_mu)
+        self._add_disconnected_tet_soft_mesh(builder, k_mu=k_mu)
+
+        model = builder.finalize()
+        model.uipc.deformable_model[1] = "arap"
+        solver = newton.solvers.SolverUIPC(
+            model=model,
+            backend="none",
+            dt=1.0 / 60.0,
+            logger_level=uipc.Logger.Warn,
+        )
+
+        solver.initialize(model.state())
+
+        stable_geometry = solver.mapping.deformable_geo_slots[0].geometry()
+        self.assertIsNotNone(stable_geometry.tetrahedra().find("mu"))
+        self.assertIsNotNone(stable_geometry.tetrahedra().find("lambda"))
+        self.assertIsNone(stable_geometry.tetrahedra().find("kappa"))
+
+        arap_geometry = solver.mapping.deformable_geo_slots[1].geometry()
+        kappa_attr = arap_geometry.tetrahedra().find("kappa")
+        self.assertIsNotNone(kappa_attr)
+        self.assertIsNone(arap_geometry.tetrahedra().find("mu"))
+        self.assertIsNone(arap_geometry.tetrahedra().find("lambda"))
+        np.testing.assert_allclose(uipc.view(kappa_attr), np.array(k_mu, dtype=np.float32), rtol=0.0, atol=2.0e-2)
 
     def test_soft_position_constraint_can_be_disabled(self):
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z)

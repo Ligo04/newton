@@ -1566,6 +1566,29 @@ class TestCustomFrequencyAttributes(unittest.TestCase):
         # Verify custom frequency count is stored
         self.assertEqual(model.get_custom_frequency_count("test:pair"), 2)
 
+    def test_custom_frequency_ensure_count_appends_defaults(self):
+        """Test that a registered custom frequency can be padded with default rows."""
+        builder = ModelBuilder()
+        builder.add_custom_frequency(ModelBuilder.CustomFrequency(name="item", namespace="test"))
+        builder.add_custom_attribute(
+            ModelBuilder.CustomAttribute(
+                name="item_name",
+                frequency="test:item",
+                dtype=str,
+                default="default",
+                namespace="test",
+            )
+        )
+
+        builder._ensure_custom_frequency_count("test:item", 2)
+        builder.add_custom_values(**{"test:item_name": "custom"})
+        builder._ensure_custom_frequency_count("test:item", 5)
+
+        model = builder.finalize(device=self.device)
+
+        self.assertEqual(model.get_custom_frequency_count("test:item"), 5)
+        self.assertEqual(model.test.item_name, ["default", "default", "custom", "default", "default"])
+
     def test_custom_frequency_requires_registration(self):
         """Test that using an unregistered custom frequency raises ValueError."""
         builder = ModelBuilder()

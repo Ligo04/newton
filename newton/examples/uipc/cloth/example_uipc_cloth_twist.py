@@ -6,7 +6,8 @@
 #
 # Twist a square cloth with SolverUIPC.  The cloth uses the UIPC default
 # StrainLimitingBaraffWitkinShell + DiscreteShellBending material; pass
-# ``--cloth-model neo_hookean`` to use NeoHookeanShell instead.  Edge
+# ``--cloth-model neo_hookean`` to set every ``model.uipc.cloth_model`` entry to
+# NeoHookeanShell instead.  Edge
 # position control is applied through UIPC SoftPositionConstraint targets.
 #
 # Command: python -m newton.examples uipc_cloth_twist
@@ -64,6 +65,7 @@ class Example:
         vertices = [wp.vec3(v) for v in mesh_points]
 
         builder = newton.ModelBuilder(gravity=0.0)
+        newton.solvers.SolverUIPC.register_custom_attributes(builder)
         builder.add_cloth_mesh(
             pos=wp.vec3(0.0, 0.0, 0.0),
             rot=wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), np.pi / 2.0),
@@ -81,6 +83,7 @@ class Example:
         builder.color()
 
         self.model = builder.finalize()
+        self.model.uipc.cloth_model[:] = [args.cloth_model] * len(self.model.cloth_ranges)
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
         self.control = self.model.control()
@@ -107,7 +110,6 @@ class Example:
             model=self.model,
             dt=self.sim_dt,
             logger_level=uipc.Logger.Warn,
-            cloth_model=args.cloth_model,
             cloth_soft_position_strength_ratio=self.soft_strength,
         )
         self.solver.set_contact(True, d_hat=0.001)

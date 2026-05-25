@@ -1499,6 +1499,20 @@ class ModelBuilder:
             out.append(self.add_custom_values(**row))
         return out
 
+    def _ensure_custom_frequency_count(self, frequency: str, count: int) -> None:
+        """Append default rows until a registered custom frequency reaches ``count``."""
+        values = {key: None for key, attr in self.custom_attributes.items() if attr.frequency == frequency}
+        if not values:
+            return
+
+        while self._custom_frequency_counts.get(frequency, 0) < count:
+            self.add_custom_values(**values)
+
+    def _sync_uipc_range_custom_frequencies(self) -> None:
+        """Keep UIPC range-frequency attributes aligned with authored ranges."""
+        self._ensure_custom_frequency_count("uipc:cloth", len(self.cloth_ranges))
+        self._ensure_custom_frequency_count("uipc:deformable_body", len(self.soft_body_ranges))
+
     def _process_custom_attributes(
         self,
         entity_index: int | list[int],
@@ -3496,6 +3510,8 @@ class ModelBuilder:
         for freq_key, builder_count in builder._custom_frequency_counts.items():
             offset = custom_frequency_offsets.get(freq_key, 0)
             self._custom_frequency_counts[freq_key] = offset + builder_count
+
+        self._sync_uipc_range_custom_frequencies()
 
         # Merge actuator entries from the sub-builder with offset DOF indices
         for entry_key, sub_entry in builder.actuator_entries.items():
@@ -8133,6 +8149,7 @@ class ModelBuilder:
             surface_density=density,
         )
         self.cloth_ranges.append(cloth_range)
+        self._sync_uipc_range_custom_frequencies()
         return cloth_range
 
     def add_particle_grid(
@@ -8417,6 +8434,7 @@ class ModelBuilder:
             density=density,
         )
         self.soft_body_ranges.append(soft_range)
+        self._sync_uipc_range_custom_frequencies()
         return soft_range
 
     def add_soft_mesh(
@@ -8659,6 +8677,7 @@ class ModelBuilder:
             density=density,
         )
         self.soft_body_ranges.append(soft_range)
+        self._sync_uipc_range_custom_frequencies()
         return soft_range
 
     # incrementally updates rigid body mass with additional mass and inertia expressed at a local to the body

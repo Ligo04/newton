@@ -20,6 +20,7 @@ _CUDA_TEST_DEVICES = get_selected_cuda_test_devices(mode="basic")
 if _HAS_UIPC:
     import uipc.builtin as uipc_builtin
     from uipc import view
+    from uipc.constitution import NeoHookeanShell, StrainLimitingBaraffWitkinShell
 
     import newton._src.solvers.uipc.cloth as cloth_module
     from newton._src.solvers.uipc.cloth import ClothBuilder
@@ -102,6 +103,54 @@ class TestUIPCClothSoftPosition(unittest.TestCase):
         self.assertEqual(len(model.cloth_ranges), 2)
         self.assertEqual(len(solver.mapping.cloth_geo_slots), 2)
         self.assertEqual(len(solver.mapping.cloth_particle_indices), 2)
+
+    @staticmethod
+    def _add_minimal_cloth(builder: newton.ModelBuilder) -> None:
+        builder.add_cloth_grid(
+            pos=wp.vec3(0.0, 0.0, 0.0),
+            rot=wp.quat_identity(),
+            vel=wp.vec3(0.0, 0.0, 0.0),
+            dim_x=1,
+            dim_y=1,
+            cell_x=0.1,
+            cell_y=0.1,
+            mass=0.01,
+            tri_ke=1.0e3,
+            tri_ka=1.0e3,
+            tri_kd=0.0,
+        )
+
+    def test_register_custom_attributes_adds_default_cloth_model(self):
+        builder = newton.ModelBuilder(up_axis=newton.Axis.Z, gravity=0.0)
+        newton.solvers.SolverUIPC.register_custom_attributes(builder)
+        self._add_minimal_cloth(builder)
+        self._add_minimal_cloth(builder)
+
+        model = builder.finalize()
+
+        self.assertTrue(hasattr(model, "uipc"))
+        self.assertTrue(hasattr(model.uipc, "cloth_model"))
+        self.assertEqual(model.custom_frequency_counts["uipc:cloth"], 2)
+        self.assertEqual(model.uipc.cloth_model, ["strain_limiting_baraff_witkin", "strain_limiting_baraff_witkin"])
+
+    def test_cloth_model_custom_attribute_selects_per_range_constitution(self):
+        builder = newton.ModelBuilder(up_axis=newton.Axis.Z, gravity=0.0)
+        newton.solvers.SolverUIPC.register_custom_attributes(builder)
+        self._add_minimal_cloth(builder)
+        self._add_minimal_cloth(builder)
+
+        model = builder.finalize()
+        model.uipc.cloth_model[1] = "neo_hookean"
+        solver = newton.solvers.SolverUIPC(model, backend="none", dt=1.0 / 60.0)
+        solver.initialize(model.state())
+
+        geo_0 = solver.mapping.cloth_geo_slots[0].geometry()
+        geo_1 = solver.mapping.cloth_geo_slots[1].geometry()
+        self.assertEqual(
+            int(view(geo_0.meta().find("constitution_uid"))[0]),
+            StrainLimitingBaraffWitkinShell().uid(),
+        )
+        self.assertEqual(int(view(geo_1.meta().find("constitution_uid"))[0]), NeoHookeanShell().uid())
 
     def test_fixed_cloth_grid_edges_mark_uipc_vertices_fixed(self):
         dim_x = 4

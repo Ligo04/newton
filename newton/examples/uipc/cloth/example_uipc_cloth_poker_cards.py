@@ -61,6 +61,7 @@ class Example:
 
         # Build the model (using meters)
         builder = newton.ModelBuilder(gravity=-9.8)  # m/s²
+        newton.solvers.SolverUIPC.register_custom_attributes(builder)
 
         # Add a static cube for cards to stack on
         body_cube = builder.add_body(
@@ -186,6 +187,7 @@ class Example:
 
         # Finalize model
         self.model = builder.finalize()
+        self.model.uipc.cloth_model[:] = [args.cloth_model] * len(self.model.cloth_ranges)
 
         # Create UIPC solver with cloth self-contact enabled through actor-actor contact.
         self.solver = newton.solvers.SolverUIPC(
@@ -194,7 +196,6 @@ class Example:
             model=self.model,
             dt=self.sim_dt,
             logger_level=uipc.Logger.Warn,
-            cloth_model=args.cloth_model,
             enable_soft_position_constraint=False,
             auto_sync_inertia=False,
         )

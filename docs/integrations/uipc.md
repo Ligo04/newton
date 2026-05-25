@@ -161,6 +161,8 @@ Currently registered:
 | Attribute | Frequency | Default | Meaning |
 | --- | --- | --- | --- |
 | `model.uipc.abd_kappa` | Body | `-1.0` | Per-body AffineBody stiffness override [Pa]. Negative values inherit the solver-level `kappa`. |
+| `model.uipc.cloth_model` | `uipc:cloth` | `"strain_limiting_baraff_witkin"` | Per-`cloth_ranges` membrane constitution. Supported values are `"strain_limiting_baraff_witkin"` and `"neo_hookean"`. |
+| `model.uipc.deformable_model` | `uipc:deformable_body` | `"stable_neo_hookean"` | Per-`soft_body_ranges` tetrahedral deformable constitution. Supported values are `"stable_neo_hookean"` and `"arap"`. |
 
 ## Cloth
 
@@ -178,9 +180,11 @@ triangle mesh plus a membrane constitution and `DiscreteShellBending`.
 | `edge_bending_properties[:, 0]` | Edge `bending_stiffness` | Damping (`edge_kd`) is not forwarded. |
 | `particle_mass <= 0.0` | UIPC `is_fixed` vertex marker | Marks kinematic cloth vertices. |
 
-The default membrane model is `StrainLimitingBaraffWitkinShell`. Pass
-`cloth_model="neo_hookean"` to use `NeoHookeanShell`. Closed / watertight
-triangle meshes are rejected as cloth; use a deformable or rigid
+The default membrane model is `StrainLimitingBaraffWitkinShell`. Call
+`SolverUIPC.register_custom_attributes(builder)` before adding cloth, then set
+`model.uipc.cloth_model[cloth_index]` before constructing `SolverUIPC` to choose
+`NeoHookeanShell` for one authored `model.cloth_ranges` entry. Closed /
+watertight triangle meshes are rejected as cloth; use a deformable or rigid
 representation for closed volumes.
 
 When `enable_soft_position_constraint=True` (the default), the builder adds
@@ -192,14 +196,18 @@ dormant UIPC `SoftPositionConstraint` attributes. Use
 
 Newton deformables are built from particles and tetrahedra. UIPC deformables
 use `tetmesh` geometry, surface labels for contact, and
-`StableNeoHookean` elasticity.
+`StableNeoHookean` elasticity by default. Call
+`SolverUIPC.register_custom_attributes(builder)` before adding soft bodies, then
+set `model.uipc.deformable_model[soft_index]` before constructing `SolverUIPC`
+to choose a different supported constitution for one authored
+`model.soft_body_ranges` entry.
 
 | Newton source | UIPC target | Notes |
 | --- | --- | --- |
 | `particle_q` | Tet mesh vertices | World-space particle positions [m]. |
 | `tet_indices` / `soft_body_ranges` | Tet mesh topology and grouping | Authored `soft_body_ranges` keep multiple soft bodies separate. |
 | `particle_mass` + tet volume | Mass density | Falls back to `default_mass_density` when the estimate is unavailable. |
-| `tet_materials[:, 0]` / `tet_materials[:, 1]` | Stable Neo-Hookean `mu` / `lambda` | Converted to UIPC's Stable Neo-Hookean parameterization before writing. |
+| `tet_materials[:, 0]` / `tet_materials[:, 1]` | Deformable material attributes | Stable Neo-Hookean writes converted `mu` / `lambda`; ARAP writes `tet_materials[:, 0]` to UIPC `kappa`. |
 | `particle_mass <= 0.0` | UIPC `is_fixed` vertex marker | Marks kinematic deformable vertices. |
 
 When soft-position constraints are enabled, use
@@ -353,7 +361,6 @@ Important constructor arguments:
 | `dump_enable` | `False` | Dumps UIPC surface OBJ snapshots before each physics advance. |
 | `require_profile` | `False` | Collects UIPC timer data; use `save_performance_report`. |
 | `auto_sync_inertia` | `True` | Sync final UIPC AffineBody inertia back into Newton after initialization. |
-| `cloth_model` | `"strain_limiting_baraff_witkin"` | Also accepts `"neo_hookean"`. |
 | `enable_soft_position_constraint` | `True` | Adds dormant cloth/deformable soft-position attributes. |
 
 Use `configure_scene` for UIPC scene configuration not exposed as constructor

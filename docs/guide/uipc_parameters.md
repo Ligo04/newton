@@ -27,7 +27,6 @@
 | `dump_enable` | `False` | solver dump 路径 | 控制是否输出 UIPC surface mesh / 调试数据。 |
 | `require_profile` | `False` | UIPC timer / report | 开启后记录 step profile，可由 `save_performance_report()` 导出。 |
 | `auto_sync_inertia` | `True` | 初始化后的 ABD inertia 同步 | 初始化后把 UIPC ABD 最终质量、COM、惯量同步回 Newton model。 |
-| `cloth_model` | `"strain_limiting_baraff_witkin"` | `ClothBuilder` membrane constitution | 可选 `"strain_limiting_baraff_witkin"` 或 `"neo_hookean"`。 |
 | `cloth_soft_position_strength_ratio` | `100.0` | cloth `SoftPositionConstraint` | 布料软位置约束默认强度比例。 |
 | `enable_soft_position_constraint` | `True` | cloth / deformable vertices | 是否给布料和软体顶点添加 dormant `SoftPositionConstraint` 属性。 |
 
@@ -75,8 +74,10 @@
 | `model.soft_body_ranges` | 分组构建 deformable object | 有 range 时逐组构建 | 避免不同软体混到一个 UIPC geometry。 |
 | `model.particle_mass` | mass density 估计；fixed marker | `sum(mass) / tet_volume`；失败时 `default_mass_density` | `particle_mass <= 0.0` 的粒子会写成 UIPC vertex `is_fixed = 1`。 |
 | `default_mass_density` | `StableNeoHookean.apply_to(..., mass_density=...)` fallback | `1000.0 kg/m^3` | 质量或体积不可用时使用。 |
+| `model.uipc.deformable_model[i]` | 第 `i` 个 `soft_body_ranges` 的软体四面体本构选择 | `"stable_neo_hookean"` | 需先调用 `SolverUIPC.register_custom_attributes(builder)` 再添加 soft body；支持 `"stable_neo_hookean"` 和 `"arap"`。 |
 | `model.tet_materials[:, 0]` (`k_mu`) | UIPC tet `mu` | 写入 `(4 / 3) * k_mu` | UIPC StableNeoHookean 的 `mu` 不是原样写入，而是做了变换。 |
 | `model.tet_materials[:, 1]` (`k_lambda`) | UIPC tet `lambda` | 写入 `k_lambda + (5 / 6) * k_mu` | UIPC StableNeoHookean 的 `lambda` 会叠加部分 `k_mu`。 |
+| `model.tet_materials[:, 0]` (`k_mu`) 且对应 `model.uipc.deformable_model[i] == "arap"` | UIPC tet `kappa` | 原样写入 `k_mu` | ARAP 不使用 StableNeoHookean 的 `mu/lambda` 变换。 |
 | `model.tet_materials[:, 2]` (`k_damp`) | 当前 UIPC builder 未写入 | `ModelBuilder.default_tet_k_damp = 0.0` | Newton 会保存该列，但当前 UIPC deformable builder 没有映射 damping 参数。 |
 | `enable_soft_position_constraint` | `SoftPositionConstraint.apply_to(sc)` | `True` | 为软体顶点添加软位置约束属性；具体目标值由内部同步逻辑写入。 |
 | contact element | `actor_elem` | 默认 | 当前 solver 构建 soft body 时默认归入 actor contact element。 |
@@ -89,7 +90,7 @@
 | `model.particle_q` | UIPC trimesh vertices | 直接拷贝选中 cloth 粒子坐标 | 布料几何顶点位置 [m]。 |
 | `model.tri_indices` | UIPC trimesh faces | 按 `cloth_ranges` 或 legacy heuristic 选取并重映射 | 布料三角面拓扑。闭合三角网格会报错，建议闭合体使用软体或刚体。 |
 | `model.cloth_ranges` | 分组构建 cloth object | 有 range 时逐组构建 | 避免多个 cloth 混成一个 UIPC geometry。 |
-| `cloth_model` | membrane constitution | 默认 `StrainLimitingBaraffWitkinShell`；可选 `NeoHookeanShell` | 两种 membrane 后续都会写入 `mu/lambda` 三角属性。 |
+| `model.uipc.cloth_model[i]` | 第 `i` 个 `cloth_ranges` 的 membrane constitution | 默认 `StrainLimitingBaraffWitkinShell`；可选 `NeoHookeanShell` | 需先调用 `SolverUIPC.register_custom_attributes(builder)` 再添加 cloth；两种 membrane 后续都会写入 `mu/lambda` 三角属性。 |
 | `model.particle_radius` | vertex `thickness` 和 `volume` 修正 | 直接读取 cloth 粒子的 `particle_radius`；负值报错；缺失时回退默认厚度 | 布料 thickness 与粒子碰撞半径保持一致。 |
 | `model.particle_mass` + `model.tri_areas` | membrane `mass_density` | `sum(particle_mass) / sum(tri_area) / thickness`；失败时 `100.0` | UIPC shell 使用体密度 [kg/m^3]。 |
 | `model.tri_materials[:, 0]` (`tri_ke`) | UIPC triangle `mu` | 当前实现原样写入 | 虽然注释提到 Young's modulus，但实际代码把该列写到 `mu`。 |
@@ -125,7 +126,7 @@
 
 - `_write_edge_bending_stiffness()` 使用的是 `model.edge_bending_properties[edge_id, 0]`，也就是 `edge_ke`；`edge_kd` 当前没有写入 UIPC。
 - 布料的 `tri_ke/tri_ka` 当前实现是直接写入 UIPC triangle `mu/lambda`，不是在 UIPC builder 中再转换为 Young's modulus / Poisson ratio。
-- 软体的 `tet_materials` 会做 StableNeoHookean 所需的参数变换：`mu = (4/3) * k_mu`，`lambda = k_lambda + (5/6) * k_mu`。
+- 软体默认使用 StableNeoHookean；此时 `tet_materials` 会做本构所需的参数变换：`mu = (4/3) * k_mu`，`lambda = k_lambda + (5/6) * k_mu`。选择 ARAP 时，`k_mu` 写入 UIPC tet `kappa`。
 - `SoftPositionConstraint` 只有在 `enable_soft_position_constraint=True` 时才会添加属性；目标位置、启用标记和强度比例属于运行时约束数据，不在本表展开为公开配置项。
 - UIPC cloth 的 shell thickness 现在直接来源于 `model.particle_radius`，因此 cloth 粒子半径和 UIPC 厚度是同一参数。
 - UIPC 全局 contact 默认关闭；即使 contact tabular 已经配置 pair，也只有 `scene_config["contact"]["enable"]` 打开后才会启用接触。

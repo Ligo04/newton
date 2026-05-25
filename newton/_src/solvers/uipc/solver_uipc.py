@@ -137,7 +137,7 @@ class SolverUIPC(SolverBase):
 
         - This solver requires ``libuipc`` (the ``uipc`` Python package) to be installed.
         - Supports rigid bodies (AffineBody), cloth (NeoHookeanShell), and deformable bodies
-          (StableNeoHookean).
+          (StableNeoHookean by default).
         - Joint types: REVOLUTE, PRISMATIC, FIXED, FREE.
         - BALL, DISTANCE, D6, and CABLE joints are not supported.
     """
@@ -152,7 +152,9 @@ class SolverUIPC(SolverBase):
         ``uipc:abd_kappa`` is a per-body override for the
         :class:`~uipc.constitution.AffineBodyConstitution` stiffness parameter
         [Pa].  A negative value leaves the solver-level ``kappa`` default in
-        effect for that body.
+        effect for that body. ``uipc:cloth_model`` and
+        ``uipc:deformable_model`` select constitutions per authored cloth or
+        deformable range.
         """
         builder.add_custom_attribute(
             ModelBuilder.CustomAttribute(
@@ -164,6 +166,29 @@ class SolverUIPC(SolverBase):
                 namespace="uipc",
             )
         )
+        builder.add_custom_frequency(ModelBuilder.CustomFrequency(name="cloth", namespace="uipc"))
+        builder.add_custom_frequency(ModelBuilder.CustomFrequency(name="deformable_body", namespace="uipc"))
+        builder.add_custom_attribute(
+            ModelBuilder.CustomAttribute(
+                name="deformable_model",
+                frequency="uipc:deformable_body",
+                assignment=Model.AttributeAssignment.MODEL,
+                dtype=str,
+                default=DeformableBodyBuilder.DEFORMABLE_MODEL_STABLE_NEO_HOOKEAN,
+                namespace="uipc",
+            )
+        )
+        builder.add_custom_attribute(
+            ModelBuilder.CustomAttribute(
+                name="cloth_model",
+                frequency="uipc:cloth",
+                assignment=Model.AttributeAssignment.MODEL,
+                dtype=str,
+                default=ClothBuilder.CLOTH_MODEL_STRAIN_LIMITING_BARAFF_WITKIN,
+                namespace="uipc",
+            )
+        )
+        builder._sync_uipc_range_custom_frequencies()
 
     @classmethod
     def import_uipc(cls):
@@ -219,7 +244,6 @@ class SolverUIPC(SolverBase):
         dump_enable: bool = False,
         require_profile: bool = False,
         auto_sync_inertia: bool = True,
-        cloth_model: str = "strain_limiting_baraff_witkin",
         cloth_soft_position_strength_ratio: float = 100.0,
         enable_soft_position_constraint: bool = True,
     ):
@@ -260,10 +284,6 @@ class SolverUIPC(SolverBase):
                 and must not see UIPC's mesh-volume-derived drift.  Bodies
                 flagged via :meth:`sync_uipc_inertia_with_model` are
                 always pushed into UIPC regardless of this flag.
-            cloth_model: UIPC membrane model used for Newton cloth triangles.
-                Defaults to ``"strain_limiting_baraff_witkin"``.  Pass
-                ``"neo_hookean"`` to use ``NeoHookeanShell`` instead.  In
-                both cases ``DiscreteShellBending`` is added for bending.
             cloth_soft_position_strength_ratio: Default UIPC
                 ``SoftPositionConstraint`` strength ratio added to cloth
                 vertices.  Vertices are unconstrained until
@@ -287,7 +307,6 @@ class SolverUIPC(SolverBase):
         self._kappa = kappa
         self._default_mass_density = default_mass_density
         self._dump_enable = dump_enable
-        self._cloth_model = cloth_model
         self._cloth_soft_position_strength_ratio = cloth_soft_position_strength_ratio
         self._enable_soft_position_constraint = enable_soft_position_constraint
 
@@ -922,7 +941,6 @@ class SolverUIPC(SolverBase):
             model,
             scene,
             self.mapping,
-            cloth_model=self._cloth_model,
             enable_soft_position_constraint=self._enable_soft_position_constraint,
             soft_position_strength_ratio=self._cloth_soft_position_strength_ratio,
         )

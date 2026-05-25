@@ -45,8 +45,9 @@ class ClothBuilder:
         - ``particle_radius`` -> UIPC shell thickness [m]
 
     By default the membrane model is UIPC's
-    ``StrainLimitingBaraffWitkinShell``.  Pass ``"neo_hookean"`` through
-    :class:`~newton.solvers.SolverUIPC` to use ``NeoHookeanShell`` instead.
+    ``StrainLimitingBaraffWitkinShell``.  Set an entry in
+    ``model.uipc.cloth_model`` to ``"neo_hookean"`` to use ``NeoHookeanShell``
+    for that authored cloth range.
     """
 
     CLOTH_MODEL_STRAIN_LIMITING_BARAFF_WITKIN = "strain_limiting_baraff_witkin"
@@ -60,7 +61,6 @@ class ClothBuilder:
         default_thickness: float = 0.001,
         default_poisson_ratio: float = 0.3,
         default_bending_stiffness: float = 0.01,
-        cloth_model: str = CLOTH_MODEL_STRAIN_LIMITING_BARAFF_WITKIN,
         enable_soft_position_constraint: bool = True,
         soft_position_strength_ratio: float = 100.0,
     ):
@@ -70,7 +70,7 @@ class ClothBuilder:
         self._default_thickness = default_thickness
         self._default_poisson_ratio = default_poisson_ratio
         self._default_bending_stiffness = default_bending_stiffness
-        self._cloth_model = self._normalize_cloth_model(cloth_model)
+        self._cloth_model = self.CLOTH_MODEL_STRAIN_LIMITING_BARAFF_WITKIN
         self._enable_soft_position_constraint = enable_soft_position_constraint
         self._soft_position_strength_ratio = soft_position_strength_ratio
 
@@ -102,7 +102,7 @@ class ClothBuilder:
             return
 
         if model.cloth_ranges:
-            for cloth_range in model.cloth_ranges:
+            for cloth_index, cloth_range in enumerate(model.cloth_ranges):
                 if not self._range_in_particle_range(cloth_range.particle_range, particle_range):
                     continue
                 selected_particles, cloth_faces, selected_tri_ids = self._select_range_cloth(model, cloth_range)
@@ -114,11 +114,14 @@ class ClothBuilder:
                     cloth_range.edge_range,
                     subscene_elem,
                     cloth_range.surface_density,
+                    cloth_index,
                 )
             return
 
         selected_particles, cloth_faces, selected_tri_ids = self._select_legacy_cloth(model, particle_range)
-        self._build_geometry(contact_elem, selected_particles, cloth_faces, selected_tri_ids, None, subscene_elem, None)
+        self._build_geometry(
+            contact_elem, selected_particles, cloth_faces, selected_tri_ids, None, subscene_elem, None, None
+        )
 
     def _select_range_cloth(self, model: Model, cloth_range: Any) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Return particles, local faces, and triangle IDs for one authored cloth range."""
@@ -203,6 +206,7 @@ class ClothBuilder:
         edge_range: tuple[int, int] | None,
         subscene_elem: SubsceneElement | None,
         authored_surface_density: float | None,
+        cloth_index: int | None,
     ) -> None:
         """Build one UIPC cloth geometry."""
         if cloth_particle_indices.size == 0 or cloth_faces.size == 0:
@@ -247,7 +251,8 @@ class ClothBuilder:
         )
 
         moduli = ElasticModuli2D.youngs_poisson(1000.0, self._default_poisson_ratio)
-        if self._cloth_model == self.CLOTH_MODEL_NEO_HOOKEAN:
+        cloth_model = self._cloth_model_from_model(model, cloth_index)
+        if cloth_model == self.CLOTH_MODEL_NEO_HOOKEAN:
             membrane = NeoHookeanShell()
         else:
             membrane = StrainLimitingBaraffWitkinShell()
@@ -435,3 +440,26 @@ class ClothBuilder:
         except KeyError as exc:
             valid = ", ".join(sorted(set(aliases)))
             raise ValueError(f"Unknown UIPC cloth model {cloth_model!r}. Expected one of: {valid}") from exc
+
+    def _cloth_model_from_model(self, model: Model, cloth_index: int | None) -> str:
+        """Return the selected UIPC cloth membrane model for one cloth range."""
+        uipc_attrs = getattr(model, "uipc", None)
+        if uipc_attrs is None or not hasattr(uipc_attrs, "cloth_model"):
+            return self._cloth_model
+
+        cloth_model = uipc_attrs.cloth_model
+        if isinstance(cloth_model, (list, tuple)):
+            if len(cloth_model) == 0:
+                return self._cloth_model
+            if cloth_index is None:
+                cloth_model = cloth_model[0]
+            elif cloth_index >= len(cloth_model):
+                return self._cloth_model
+            else:
+                cloth_model = cloth_model[cloth_index]
+
+        if not isinstance(cloth_model, str):
+            raise TypeError("uipc:cloth_model must be a string custom attribute.")
+        if not cloth_model:
+            return self._cloth_model
+        return self._normalize_cloth_model(cloth_model)

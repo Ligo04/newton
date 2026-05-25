@@ -8,7 +8,8 @@
 # is taken directly from ``particle_radius`` so UIPC thickness and Newton
 # particle contact radius stay aligned.  Cloth defaults to
 # StrainLimitingBaraffWitkinShell + DiscreteShellBending; pass
-# ``--cloth-model neo_hookean`` to use NeoHookeanShell.  The Franka follows
+# ``--cloth-model neo_hookean`` to set every ``model.uipc.cloth_model`` entry to
+# NeoHookeanShell.  The Franka follows
 # the same end-effector keyframe sequence as ``cloth_franka`` and manipulates
 # the cloth through UIPC contact.
 #
@@ -69,12 +70,15 @@ class Example:
         )
 
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+        newton.solvers.SolverUIPC.register_custom_attributes(builder)
         self._build_franka(builder)
         self._build_table(builder)
         # self._build_cloth(builder)
         builder.add_ground_plane()
         # builder.gravity = 0.0
         self.model = builder.finalize()
+        if hasattr(self.model.uipc, "cloth_model"):
+            self.model.uipc.cloth_model[:] = [args.cloth_model] * len(self.model.cloth_ranges)
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
         self.control = self.model.control()
@@ -89,7 +93,6 @@ class Example:
             model=self.model,
             dt=self.sim_dt,
             logger_level=uipc.Logger.Warn,
-            cloth_model=args.cloth_model,
             enable_soft_position_constraint=False,
             auto_sync_inertia=False,
         )

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Deformable body (StableNeoHookean) builder for the UIPC solver backend."""
+"""Deformable body builder for the UIPC solver backend."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from typing import Any
 
 import numpy as np
 import uipc.builtin as uipc_builtin
-from uipc.constitution import ElasticModuli, SoftPositionConstraint, StableNeoHookean
+from uipc.constitution import ARAP, ElasticModuli, SoftPositionConstraint, StableNeoHookean
 from uipc.core import ContactElement, SubsceneElement
 from uipc.geometry import flip_inward_triangles, label_surface, label_triangle_orient, mesh_partition
 from uipc.geometry import tetmesh as uipc_tetmesh
@@ -23,6 +23,9 @@ from .converter import UIpcMappingInfo
 class DeformableBodyBuilder:
     """Build UIPC deformable bodies from Newton particles and tetrahedra."""
 
+    DEFORMABLE_MODEL_STABLE_NEO_HOOKEAN = "stable_neo_hookean"
+    DEFORMABLE_MODEL_ARAP = "arap"
+
     def __init__(
         self,
         model: Model,
@@ -35,6 +38,7 @@ class DeformableBodyBuilder:
         self._scene = scene
         self._mapping = mapping
         self._default_mass_density = default_mass_density
+        self._deformable_model = self.DEFORMABLE_MODEL_STABLE_NEO_HOOKEAN
         self._enable_soft_position_constraint = enable_soft_position_constraint
 
     @property
@@ -62,7 +66,7 @@ class DeformableBodyBuilder:
             return
 
         if model.soft_body_ranges:
-            for soft_range in model.soft_body_ranges:
+            for soft_index, soft_range in enumerate(model.soft_body_ranges):
                 if not self._range_in_particle_range(soft_range.particle_range, particle_range):
                     continue
                 selected_particle_indices, local_tets, selected_tet_ids = self._select_tetrahedra(
@@ -75,13 +79,16 @@ class DeformableBodyBuilder:
                     selected_tet_ids,
                     subscene_elem,
                     soft_range.density,
+                    soft_index,
                 )
             return
 
         selected_particle_indices, local_tets, selected_tet_ids = self._select_tetrahedra(
             model, particle_range=particle_range
         )
-        self._build_tet_set(contact_elem, selected_particle_indices, local_tets, selected_tet_ids, subscene_elem, None)
+        self._build_tet_set(
+            contact_elem, selected_particle_indices, local_tets, selected_tet_ids, subscene_elem, None, None
+        )
 
     def _build_tet_set(
         self,
@@ -91,6 +98,7 @@ class DeformableBodyBuilder:
         selected_tet_ids: np.ndarray,
         subscene_elem: SubsceneElement | None,
         authored_density: float | None,
+        soft_index: int | None,
     ) -> None:
         """Build one UIPC geometry for a selected tetrahedron set."""
         if selected_particle_indices.size == 0 or local_tets.size == 0:
@@ -103,6 +111,7 @@ class DeformableBodyBuilder:
             selected_tet_ids,
             subscene_elem,
             authored_density,
+            soft_index,
         )
 
     def _build_geometry(
@@ -113,6 +122,7 @@ class DeformableBodyBuilder:
         selected_tet_ids: np.ndarray,
         subscene_elem: SubsceneElement | None,
         authored_density: float | None,
+        soft_index: int | None,
     ) -> None:
         """Build one UIPC deformable geometry from an authored tet group."""
         model = self._model
@@ -135,8 +145,8 @@ class DeformableBodyBuilder:
         mass_density = self._estimate_mass_density(
             model, selected_particle_indices, local_tets, deformable_verts, authored_density
         )
-        snk = StableNeoHookean()
-        snk.apply_to(sc, ElasticModuli.youngs_poisson(1000.0, 0.45), mass_density=mass_density)
+        deformable_model = self._deformable_model_from_model(model, soft_index)
+        self._apply_deformable_model(sc, deformable_model, mass_density)
         self._write_tet_elastic_moduli(sc, model, selected_tet_ids)
 
         fixed_local_indices = self._fixed_particle_indices(model, selected_particle_indices)
@@ -210,24 +220,86 @@ class DeformableBodyBuilder:
         pstart, pend = particle_range
         return pstart <= start and end <= pend
 
+    def _deformable_model_from_model(self, model: Model, soft_index: int | None) -> str:
+        """Return the selected UIPC tet constitution for one deformable range."""
+        uipc_attrs = getattr(model, "uipc", None)
+        if uipc_attrs is None or not hasattr(uipc_attrs, "deformable_model"):
+            return self._deformable_model
+
+        deformable_model = uipc_attrs.deformable_model
+        if isinstance(deformable_model, (list, tuple)):
+            if len(deformable_model) == 0:
+                return self._deformable_model
+            if soft_index is None:
+                deformable_model = deformable_model[0]
+            elif soft_index >= len(deformable_model):
+                return self._deformable_model
+            else:
+                deformable_model = deformable_model[soft_index]
+
+        if not isinstance(deformable_model, str):
+            raise TypeError("uipc:deformable_model must be a string custom attribute.")
+        if not deformable_model:
+            return self._deformable_model
+        return self._normalize_deformable_model(deformable_model)
+
+    @classmethod
+    def _normalize_deformable_model(cls, deformable_model: str) -> str:
+        """Return the canonical UIPC deformable constitution key."""
+        key = deformable_model.lower().replace("-", "_")
+        aliases = {
+            "stable": cls.DEFORMABLE_MODEL_STABLE_NEO_HOOKEAN,
+            "stable_neo": cls.DEFORMABLE_MODEL_STABLE_NEO_HOOKEAN,
+            "stable_neo_hookean": cls.DEFORMABLE_MODEL_STABLE_NEO_HOOKEAN,
+            "stable_neohookean": cls.DEFORMABLE_MODEL_STABLE_NEO_HOOKEAN,
+            "stable_neohookean_fem": cls.DEFORMABLE_MODEL_STABLE_NEO_HOOKEAN,
+            "stable_neo_hookean_fem": cls.DEFORMABLE_MODEL_STABLE_NEO_HOOKEAN,
+            "stableneohookean": cls.DEFORMABLE_MODEL_STABLE_NEO_HOOKEAN,
+            "arap": cls.DEFORMABLE_MODEL_ARAP,
+        }
+        try:
+            return aliases[key]
+        except KeyError as exc:
+            supported = ", ".join(sorted({cls.DEFORMABLE_MODEL_STABLE_NEO_HOOKEAN, cls.DEFORMABLE_MODEL_ARAP}))
+            raise ValueError(
+                f"Unsupported UIPC deformable_model '{deformable_model}'. Supported values: {supported}."
+            ) from exc
+
+    def _apply_deformable_model(self, sc: Any, deformable_model: str, mass_density: float) -> None:
+        """Apply the configured UIPC tetrahedral constitution."""
+        if deformable_model == self.DEFORMABLE_MODEL_STABLE_NEO_HOOKEAN:
+            model = StableNeoHookean()
+            model.apply_to(sc, ElasticModuli.youngs_poisson(1000.0, 0.45), mass_density=mass_density)
+        elif deformable_model == self.DEFORMABLE_MODEL_ARAP:
+            model = ARAP()
+            model.apply_to(sc, 1000.0, mass_density=mass_density)
+        else:
+            raise ValueError(f"Unsupported UIPC deformable_model '{deformable_model}'.")
+
     def _write_tet_elastic_moduli(self, sc: Any, model: Model, selected_tet_ids: np.ndarray) -> None:
-        """Copy authored per-tet Lamé parameters onto UIPC tet attributes."""
+        """Copy authored per-tet material parameters onto UIPC tet attributes."""
         if model.tet_materials is None or selected_tet_ids.size == 0:
             return
 
         tet_materials_np = model.tet_materials.numpy()[selected_tet_ids]  # ty:ignore[unresolved-attribute]  # pyright: ignore[reportAttributeAccessIssue]
         mu_attr = sc.tetrahedra().find("mu")
         lambda_attr = sc.tetrahedra().find("lambda")
-        if mu_attr is None or lambda_attr is None:
-            raise RuntimeError("StableNeoHookean.apply_to() did not create tet mu/lambda attributes.")
+        kappa_attr = sc.tetrahedra().find("kappa")
+        if mu_attr is not None and lambda_attr is not None:
+            snh_mu = (4.0 / 3.0) * tet_materials_np[:, 0]
+            snh_lambda = tet_materials_np[:, 1] + (5.0 / 6.0) * tet_materials_np[:, 0]
 
-        snh_mu = (4.0 / 3.0) * tet_materials_np[:, 0]
-        snh_lambda = tet_materials_np[:, 1] + (5.0 / 6.0) * tet_materials_np[:, 0]
+            mu_view = _view_attr(mu_attr)
+            lambda_view = _view_attr(lambda_attr)
+            mu_view[:] = np.asarray(snh_mu, dtype=mu_view.dtype)
+            lambda_view[:] = np.asarray(snh_lambda, dtype=lambda_view.dtype)
+            return
+        if kappa_attr is not None:
+            kappa_view = _view_attr(kappa_attr)
+            kappa_view[:] = np.asarray(tet_materials_np[:, 0], dtype=kappa_view.dtype)
+            return
 
-        mu_view = _view_attr(mu_attr)
-        lambda_view = _view_attr(lambda_attr)
-        mu_view[:] = np.asarray(snh_mu, dtype=mu_view.dtype)
-        lambda_view[:] = np.asarray(snh_lambda, dtype=lambda_view.dtype)
+        raise RuntimeError("UIPC deformable constitution did not create supported tet material attributes.")
 
     def _fixed_particle_indices(self, model: Model, particle_indices: np.ndarray) -> np.ndarray:
         """Return local particle indices that should remain kinematic."""

@@ -8,6 +8,7 @@
 - Add `uipc_nut_bolt` demo with selectable Autodesk ABD or original IsaacGym nut/bolt meshes, SolverUIPC IPC contact, original nut/bolt friction, and no soft-transform aim-target driving.
 - Add `uipc_cloth_franka_stable_pd_force` demo using `ControllerStablePD` EFFORT actuators for Franka contact-based cloth manipulation.
 - Add `uipc:abd_kappa` body custom attribute for per-rigid-body UIPC ABD stiffness overrides.
+- Add per-range `uipc:cloth_model` and `uipc:deformable_model` custom attributes so UIPC cloth and soft bodies can select constitutions while retaining their existing defaults.
 - Add `--enable-contact` / `--no-enable-contact` to `uipc_brick_stacking` so UIPC contact can be disabled while remaining enabled by default.
 - Add UIPC cloth poker-cards demo with stacked card patches, UIPC cloth self-contact, and a dynamic soft-transform sphere knock-off.
 - Add opt-in `validate_mesh` parameter to `ModelBuilder.add_cloth_mesh()`, `ModelBuilder.add_soft_mesh()`, and `style3d.add_cloth_mesh()` that warns on degenerate geometry; add public `newton.utils.validate_triangle_mesh()` and `newton.utils.validate_tet_mesh()` utilities
