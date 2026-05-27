@@ -49,6 +49,7 @@
 - Fix `SolverXPBD` `body_parent_f` reporting to include `Control.joint_f` contributions and accumulate multiple inbound joint contributions, matching the `SolverMuJoCo` and `SolverFeatherstone` convention.
 - Fix MJCF `xyaxes` parsing to treat the second vector as Y and derive Z from X cross Y.
 - Fix mesh-convex and heightfield-convex contacts missing when shapes are separated by margin but still within the contact envelope.
+- Fix `ModelBuilder.collapse_fixed_joints()` producing a NaN center of mass when collapsing joints between zero-mass bodies.
 - Fix `SolverMuJoCo` returning `State.joint_qd` in world frame for root `FREE` joints with non-identity `parent_xform`, violating the documented parent-frame contract and corrupting derived `body_qd`.
 - Fix `example_softbody_gift` emitting spurious non-manifold edge warnings caused by mismatched 5-tet diagonals across adjacent cubes in the soft body mesh.
 - Fix `basic_conveyor` example emitting a spurious inertia validation warning at finalize.
@@ -81,6 +82,8 @@
 - Add `num_worlds` parameter to `ControllerStablePD` for batched block-diagonal Cholesky over replicated worlds; the implicit solve dispatches kamino's blocked LLT with `num_blocks = num_worlds` so cost scales as `O(W·n³)` instead of the merged-dense `O((W·n)³)`. `ControllerStablePD.State.mass_matrix` and `bias_forces` gain a leading batch dimension (shapes `(W, n_per_world, n_per_world)` and `(W, n_per_world)`), matching `newton.eval_mass_matrix` output for direct slice-and-assign
 - Add `HydroelasticSDF.Config.mc_edge_clamp_min` to expose the marching-cubes edge-interpolation clamp; default `0.02` matches the previous hard-coded value. Set to `0.0` to disable the clamp and recover faithful contact-surface dynamics for threading-style scenarios (#2702)
 - Add `deterministic` flag to `CollisionPipeline` and `NarrowPhase` for GPU-thread-scheduling-independent contact ordering via radix sort and deterministic fingerprint tiebreaking in contact reduction
+- Add linear HDR color output support to `SensorTiledCamera` via `hdr_color_image`
+- Add `newton.utils.ColorSpace`, `color_srgb_to_linear()`, `color_linear_to_srgb()`, and `SensorTiledCamera.RenderConfig.output_color_space` for color-space boundaries
 - Add `shape_pairs_max` override on `CollisionPipeline` to cap the SAP/NXN broad-phase candidate-pair buffer below the worst-case `N*(N-1)/2` per-world bound, avoiding multi-GB allocations on large sparse scenes (a too-small value triggers a runtime overflow warning)
 - Add fast parity-based SDF construction path for watertight meshes in `SDF.create_from_mesh`, using `wp.mesh_query_point_sign_parity` instead of winding numbers; selected via the new `sign_method` argument (`"auto"` — the default — picks parity when `Mesh.is_watertight` is true, or `"parity"` / `"winding"` to force either strategy)
 - Add `Viewer.log_image()` for displaying single or batched images in `ViewerGL`; other backends inherit a no-op. Also add `SensorTiledCamera.utils.to_rgba_from_color()`, `to_rgba_from_normal()`, `to_rgba_from_depth()`, and `to_rgba_from_shape_index()` (hash palette or caller-provided RGB lookup) adapters producing output consumable by `log_image()`.
@@ -112,6 +115,7 @@
 
 - Use pre-computed local AABB for `CONVEX_MESH` shapes in `compute_shape_aabbs`, avoiding a per-frame support-function AABB computation
 - Build mesh SDFs via the texture-based sparse path only; sample via `SDF.texture_data` instead of `SDF.sparse_volume` / `SDF.coarse_volume`.
+- Change `SensorTiledCamera` default packed `color` and `albedo` outputs to sRGB-encoded bytes so authored display colors render at the expected display brightness; pass `RenderConfig(output_color_space=ColorSpace.LINEAR)` to preserve the previous linear-byte behavior.
 - Change implicit MPM default `solver` from `"gs"` to `"auto"`, which selects `"gs"` for trilinear bases and `"gs-batched"` for higher-order ones. Set `solver="gs"` explicitly to restore the previous behavior.
 - Change `SolverImplicitMPM.Config.solver` warmstart syntax from `+`-separated strings to ordered sequences; use `solver=("cg", "gauss-seidel")` instead of `solver="cg+gauss-seidel"`.
 - Change implicit MPM default `collider_basis` from `"Q1"` to `"S2"` for improved contact quality; set `collider_basis="Q1"` explicitly to restore the previous behavior.
@@ -187,6 +191,7 @@
 - Fix VRAM leak when resetting examples that allocate large GPU state (e.g. `diffsim_bear`)
 - Fix `SensorRaycast` and viewer picking ignoring `HFIELD` (heightfield) geometry
 - Fix `SensorTiledCamera` textured albedo output rendering flat colors when color and normal outputs are disabled
+- Respect USD color-space metadata for scalar material colors and convert linear-authored USD color textures to display space when loading them
 - Fix URDF Collada visual meshes dropping diffuse texture bindings
 - Fix `contacts_rj45_plug` example crashing on reset
 - Fix `SolverMuJoCo` dependency version-mismatch warning being silently skipped when Newton is installed from a wheel
@@ -217,6 +222,7 @@
 - Fix `eq_objtype` mismatch for joint equality and mimic constraints in `SolverMuJoCo` so compiled models match native MuJoCo XML behavior
 - Fix implicit-MPM rheology solver launch-dim handling under `warp-lang` 1.13's templated `launch_bounds` (formerly produced out-of-bounds reads)
 - Fix `SolverKamino.reset` clobbering `q_j_p`, `q_j`, and `dq_j` for worlds outside `world_mask` when `joint_q`/`joint_u` targets were provided. The previous unmasked writes broke TWOPI revolute-joint angle unwrapping after partial-mask resets.
+- Fix rigid-rigid friction in `SolverVBD` for contacts with nonzero `rigid_contact_offset0/rigid_contact_offset1`.
 
 ## [1.1.0] - 2026-04-13
 
