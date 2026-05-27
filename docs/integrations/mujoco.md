@@ -197,6 +197,24 @@ baked into the underlying MuJoCo model.
 See MuJoCo's solver documentation and the `<option>` XML reference for what each
 parameter does and when to tune it.
 
+### `njmax` sizing
+
+`njmax` is the per-world capacity for active MuJoCo constraint rows (`nefc`),
+not just the number of contact points. A single contact can consume multiple
+rows depending on friction cone settings and contact dimensionality, and joint
+limits or equality constraints also consume rows. If `mujoco_warp` reports
+`nefc overflow - please increase njmax to ...`, the solver has run out of
+constraint-row capacity and the simulation result should be treated as invalid.
+
+Use the following defaults for Newton/MuJoCo integration presets:
+
+- Arm-only manipulators: `njmax=512`.
+- Full robot models, including mobile bases, humanoids, or dense grippers:
+  `njmax=1024`.
+
+Tune down only after profiling a specific asset; tune up in power-of-two style
+steps when runtime contacts exceed these defaults.
+
 (mujoco-custom-attributes)=
 ## MuJoCo-specific parameters in USD and MJCF
 
