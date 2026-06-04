@@ -29,6 +29,7 @@ from newton.actuators import (
     ControllerNeuralMLP,
     ControllerPD,
     ControllerPID,
+    ControllerStablePD,
     Delay,
     parse_actuator_prim,
 )
@@ -1974,6 +1975,122 @@ class TestTargetPosIndicesSeparation(unittest.TestCase):
                     self._run(use_coord_layout)
         finally:
             newton.use_coord_layout_targets = prev
+
+
+class TestControllerStablePD(unittest.TestCase):
+    """Tan 2011 stable-PD: implicit ``(M + diag(kd)·dt)·q̈ = rhs`` mass-matrix solve.
+
+    Focused on the identity-padded composite block invariant for the batched
+    kamino blocked Cholesky: when ``n_per_world`` is not a multiple of
+    ``block_size`` the per-world block is padded to ``n_padded`` and the
+    phantom ``[n:, n:]`` diagonal must stay the identity, otherwise the
+    composite ``diag(A_real, 0)`` is singular and the solve returns NaN.
+    """
+
+    # n_per_world=12 with default block_size=32 -> n_padded=32, the reported
+    # NaN-on-reset config (phantom region [12:, 12:] is the padded identity).
+    N_PER_WORLD = 12
+
+    def _make(self, device, num_worlds=1):
+        n = self.N_PER_WORLD * num_worlds
+        kp = wp.array(np.full(n, 100.0, np.float32), dtype=wp.float32, device=device)
+        kd = wp.array(np.full(n, 10.0, np.float32), dtype=wp.float32, device=device)
+        ctrl = ControllerStablePD(kp=kp, kd=kd, num_worlds=num_worlds)
+        ctrl.finalize(device, n)
+        return ctrl, n
+
+    def _spd_mass(self, num_worlds, seed=0):
+        """A batch of well-conditioned SPD mass matrices, shape (W, n, n)."""
+        rng = np.random.default_rng(seed)
+        n = self.N_PER_WORLD
+        out = np.empty((num_worlds, n, n), dtype=np.float32)
+        for w in range(num_worlds):
+            b = rng.standard_normal((n, n)).astype(np.float32)
+            out[w] = b @ b.T + n * np.eye(n, dtype=np.float32)
+        return out
+
+    def _step(self, ctrl, n, state, mass, device):
+        """Run one compute() with the given (W, n_per_world, n_per_world) mass batch."""
+        rng = np.random.default_rng(123)
+        state.mass_matrix.assign(mass)
+        state.bias_forces.assign(np.zeros(state.bias_forces.shape, np.float32))
+
+        def _f(vals):
+            return wp.array(vals.astype(np.float32), dtype=wp.float32, device=device)
+
+        pos = _f(rng.standard_normal(n))
+        zeros = _f(np.zeros(n))
+        idx = wp.array(np.arange(n, dtype=np.uint32), dtype=wp.uint32, device=device)
+        forces = wp.zeros(n, dtype=wp.float32, device=device)
+        ctrl.compute(pos, zeros, zeros, zeros, None, idx, idx, idx, idx, forces, state, dt=0.01, device=device)
+        return forces.numpy()
+
+    def test_padded_block_solve_no_nan(self):
+        """Fresh state with n_per_world=12 (padded to 32) produces finite efforts."""
+        device = wp.get_device()
+        ctrl, n = self._make(device)
+        self.assertEqual(ctrl._n_padded, 32)
+        self.assertGreater(ctrl._n_padded, ctrl._n_per_world)
+        state = ctrl.state(n, device)
+        forces = self._step(ctrl, n, state, self._spd_mass(1), device)
+        self.assertTrue(np.isfinite(forces).all(), f"non-finite efforts on fresh state: {forces}")
+
+    def test_reset_preserves_identity_pad_no_nan(self):
+        """Regression: reset() must not zero the phantom identity pad (NaN otherwise).
+
+        With ``n_padded > n_per_world`` a blanket ``zero_()`` of ``A``/``L`` wipes
+        the phantom ``[n:, n:]`` identity, leaving the composite singular so the
+        blocked Cholesky returns NaN on the next step. reset() must restore the
+        identity-padded state instead.
+        """
+        device = wp.get_device()
+        ctrl, n = self._make(device)
+        state = ctrl.state(n, device)
+        mass = self._spd_mass(1)
+
+        before = self._step(ctrl, n, state, mass, device)
+        self.assertTrue(np.isfinite(before).all())
+
+        state.reset()
+
+        # Phantom diagonal of A must be back to the identity after reset.
+        a = state.A.numpy()[0]
+        for k in range(ctrl._n_per_world, ctrl._n_padded):
+            self.assertEqual(a[k, k], 1.0, f"A phantom diagonal [{k},{k}] not restored to 1.0")
+
+        after = self._step(ctrl, n, state, mass, device)
+        self.assertTrue(np.isfinite(after).all(), f"non-finite efforts after reset(): {after}")
+        np.testing.assert_allclose(after, before, rtol=1e-4, atol=1e-4)
+
+    def test_solve_matches_numpy_reference(self):
+        """qddot from the batched blocked Cholesky matches a per-world numpy solve."""
+        device = wp.get_device()
+        num_worlds = 2
+        ctrl, n = self._make(device, num_worlds=num_worlds)
+        state = ctrl.state(n, device)
+        mass = self._spd_mass(num_worlds, seed=7)
+        state.mass_matrix.assign(mass)
+
+        # Drive a known rhs through b; read back qddot and compare to A^-1 b.
+        rng = np.random.default_rng(7)
+        npw = self.N_PER_WORLD
+        bias = rng.standard_normal((num_worlds, npw)).astype(np.float32)
+        state.bias_forces.assign(bias)
+
+        def _f(vals):
+            return wp.array(vals.astype(np.float32), dtype=wp.float32, device=device)
+
+        zeros = _f(np.zeros(n))
+        idx = wp.array(np.arange(n, dtype=np.uint32), dtype=wp.uint32, device=device)
+        forces = wp.zeros(n, dtype=wp.float32, device=device)
+        ctrl.compute(zeros, zeros, zeros, zeros, None, idx, idx, idx, idx, forces, state, dt=0.01, device=device)
+
+        qddot = state.qddot.numpy()
+        b = state.b.numpy()
+        for w in range(num_worlds):
+            a_real = mass[w] + np.eye(npw, dtype=np.float32) * (10.0 * 0.01)  # M + diag(kd)*dt
+            x_ref = np.linalg.solve(a_real, b[w, :npw])
+            np.testing.assert_allclose(qddot[w, :npw], x_ref, rtol=1e-3, atol=1e-4, err_msg=f"world {w}")
 
 
 if __name__ == "__main__":

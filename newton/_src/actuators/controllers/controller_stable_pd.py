@@ -48,6 +48,25 @@ def _alloc_identity_padded_blocks(num_worlds: int, n: int, n_padded: int, device
 
 
 @wp.kernel
+def _stable_pd_reset_identity_padded_kernel(n_per_world: int, blocks: wp.array3d[float]):
+    """Reset each ``(n_padded, n_padded)`` block to its identity-padded initial state.
+
+    Restores the invariant established by :func:`_alloc_identity_padded_blocks`:
+    the real ``[:n, :n]`` sub-block is zeroed and the phantom diagonal ``[n:, n:]``
+    is set to the identity. A blanket ``zero_()`` would wipe the phantom identity
+    and leave the per-world composite ``diag(A_real, 0)`` singular, so the blocked
+    Cholesky takes ``sqrt`` of a zero pivot and the whole solve returns NaN.
+    Launched on a ``(W, n_padded, n_padded)`` grid (the trailing dims are the
+    padded block size, not ``n_per_world``).
+    """
+    w, i, j = wp.tid()
+    if i >= n_per_world and i == j:
+        blocks[w, i, j] = 1.0
+    else:
+        blocks[w, i, j] = 0.0
+
+
+@wp.kernel
 def _stable_pd_build_rhs_kernel(
     current_pos: wp.array[float],
     current_vel: wp.array[float],
@@ -256,10 +275,31 @@ class ControllerStablePD(Controller):
         qddot: wp.array2d[float] | None = None
 
         def reset(self, mask: wp.array[wp.bool] | None = None) -> None:
-            """Zero all buffers in-place. ``mask`` is ignored (scratch is per-actuator-batch)."""
-            for arr in (self.mass_matrix, self.bias_forces, self.A, self.L, self.b, self.y, self.qddot):
+            """Reset all buffers to their initial state. ``mask`` is ignored (scratch is per-world).
+
+            ``mass_matrix``, ``bias_forces``, ``b``, ``y`` and ``qddot`` are
+            zeroed (they are user-populated or fully recomputed each step). ``A``
+            and ``L`` are restored to their identity-padded initial state rather
+            than zeroed: a blanket ``zero_()`` wipes the phantom ``[n:, n:]``
+            identity that :func:`_alloc_identity_padded_blocks` installs and that
+            :func:`_stable_pd_build_A_kernel` never rewrites, leaving the per-world
+            composite ``diag(A_real, 0)`` singular so the blocked Cholesky returns
+            NaN on the next step (only when ``n_padded > n_per_world``).
+            """
+            for arr in (self.mass_matrix, self.bias_forces, self.b, self.y, self.qddot):
                 if arr is not None:
                     arr.zero_()
+            # mass_matrix is (W, n_per_world, n_per_world); A/L are (W, n_padded, n_padded).
+            n_per_world = self.mass_matrix.shape[1] if self.mass_matrix is not None else 0
+            for blocks in (self.A, self.L):
+                if blocks is not None:
+                    wp.launch(
+                        _stable_pd_reset_identity_padded_kernel,
+                        dim=blocks.shape,
+                        inputs=[n_per_world],
+                        outputs=[blocks],
+                        device=blocks.device,
+                    )
 
     SHARED_PARAMS = frozenset({"num_worlds", "block_size", "tile_block_dim"})  # pyright: ignore[reportAssignmentType]
     """Controller-construction kwargs shared across every actuator in the entry.
