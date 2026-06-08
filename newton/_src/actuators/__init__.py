@@ -12,7 +12,7 @@ from .controllers import (
     ControllerStablePD,
 )
 from .delay import Delay
-from .usd_parser import ActuatorParsed, ComponentKind, parse_actuator_prim, register_actuator_component
+from .usd_parser import ActuatorParsed, ComponentKind, SchemaNames, parse_actuator_prim, register_actuator_component
 
 __all__ = [
     "Actuator",
@@ -29,6 +29,7 @@ __all__ = [
     "ControllerPID",
     "ControllerStablePD",
     "Delay",
+    "SchemaNames",
     "parse_actuator_prim",
     "register_actuator_component",
 ]
