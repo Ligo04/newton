@@ -1112,8 +1112,8 @@ class ArticulationBuilder:
         # cache_control kernel runs on ``self._device``.
         joint_type = model.joint_type.to(self._device)
         joint_target_mode = model.joint_target_mode.to(self._device)
-        target_pos = control.joint_target_pos.to(self._device) if control.joint_target_pos is not None else None
-        target_vel = control.joint_target_vel.to(self._device) if control.joint_target_vel is not None else None
+        target_pos = control.joint_target_q.to(self._device) if control.joint_target_q is not None else None
+        target_vel = control.joint_target_qd.to(self._device) if control.joint_target_qd is not None else None
         joint_f = control.joint_f.to(self._device) if control.joint_f is not None else None
 
         for art in self.articulations.values():

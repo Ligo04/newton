@@ -179,7 +179,7 @@ class Example:
         belt_qd_start = builder.joint_qd_start[self.belt_joint]
         builder.joint_target_ke[belt_qd_start] = 1e5
         builder.joint_target_kd[belt_qd_start] = 1e3
-        builder.joint_target_pos[belt_qd_start] = 0.0
+        builder.joint_target_q[belt_qd_start] = 0.0
         builder.joint_target_mode[belt_qd_start] = int(JointTargetMode.POSITION)
         builder.joint_qd[belt_qd_start] = self.belt_angular_speed
         builder.add_articulation([self.belt_joint], label="conveyor_belt")
@@ -314,9 +314,9 @@ class Example:
     def _update_belt_target(self):
         """Set belt revolute joint target angle for constant-speed rotation."""
         target_angle = self.belt_angular_speed * self.sim_time
-        target_pos = self.control.joint_target_pos.numpy()
+        target_pos = self.control.joint_target_q.numpy()
         target_pos[self.belt_qd_start] = target_angle
-        self.control.joint_target_pos.assign(target_pos)
+        self.control.joint_target_q.assign(target_pos)
 
     def simulate(self):
         for _ in range(self.sim_substeps):

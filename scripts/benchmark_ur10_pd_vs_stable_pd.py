@@ -34,15 +34,15 @@ from dataclasses import dataclass
 
 import numpy as np
 import warp as wp
+from newton.examples.uipc.example_uipc_ur10_force import (
+    _compute_coriolis_from_mass_derivatives,
+)
 
 import newton
 import newton.utils
 from newton import JointTargetMode
 from newton.actuators import Actuator as _NewtonActuator
 from newton.actuators import ClampingMaxEffort, ControllerPD, ControllerStablePD
-from newton.examples.uipc.example_uipc_ur10_force import (
-    _compute_coriolis_from_mass_derivatives,
-)
 from newton.selection import ArticulationView
 
 # UR10 home pose, identical to example_uipc_ur10_force.Example.HOME_POSE.
@@ -205,8 +205,8 @@ def run_trial(*, controller: str, dt: float, duration: float, verbose: bool) -> 
 
     target_pose = (HOME_POSE + TARGET_OFFSET).reshape(1, 1, dof).astype(np.float32)
     qd_target = np.zeros((1, 1, dof), dtype=np.float32)
-    arti.set_attribute("joint_target_pos", control, target_pose)
-    arti.set_attribute("joint_target_vel", control, qd_target)
+    arti.set_attribute("joint_target_q", control, target_pose)
+    arti.set_attribute("joint_target_qd", control, qd_target)
 
     expected_cls = ControllerStablePD if stable_pd else ControllerPD
     pd_actuator = next(

@@ -7,8 +7,8 @@
 # Drives the cart (prismatic DOF) with a PD controller implemented as a
 # Newton ``ControllerPD`` composed under ``newton.actuators.Actuator`` with
 # a ``ClampingMaxEffort`` layer for the force limit. The actuator reads
-# ``state.joint_q`` / ``state.joint_qd`` and ``control.joint_target_pos`` /
-# ``joint_target_vel``, computes the PD torque, clamps it, and writes it
+# ``state.joint_q`` / ``state.joint_qd`` and ``control.joint_target_q`` /
+# ``joint_target_qd``, computes the PD torque, clamps it, and writes it
 # into ``control.joint_f``. The cart DOF is configured as
 # ``JointTargetMode.EFFORT`` so the UIPC solver forwards that force as
 # generalized effort on the joint.
@@ -17,7 +17,7 @@
 # native position drive, this variant shows the canonical "external
 # actuator" pipeline:
 #   1. ``builder.add_actuator(ControllerPD, ...)`` registers a PD actuator
-#   2. every step: write the position target into ``control.joint_target_pos``
+#   2. every step: write the position target into ``control.joint_target_q``
 #   3. every step: ``actuator.step(state, control, ...)`` computes joint_f
 #   4. every step: ``solver.step(...)`` consumes joint_f via EFFORT mode
 #
@@ -84,7 +84,7 @@ class Example:
         cartpole.joint_target_mode[cart_dof + 2] = int(JointTargetMode.NONE)
 
         # Register the PD actuator on the cart DOF. The actuator reads
-        # control.joint_target_pos / joint_target_vel, the ControllerPD
+        # control.joint_target_q / joint_target_qd, the ControllerPD
         # kernel computes the PD torque, ClampingMaxEffort clamps it to
         # ±max_force, and the Actuator scatter-adds the result into
         # control.joint_f.
@@ -151,12 +151,12 @@ class Example:
         target_vel = self.cart_amplitude * w * math.cos(w * t)
 
         # Shape: (world_count, 1, dofs_per_arti)
-        pos = self.cartpoles.get_attribute("joint_target_pos", self.control).numpy()
-        vel = self.cartpoles.get_attribute("joint_target_vel", self.control).numpy()
+        pos = self.cartpoles.get_attribute("joint_target_q", self.control).numpy()
+        vel = self.cartpoles.get_attribute("joint_target_qd", self.control).numpy()
         pos[:, 0, self.cart_dof] = target_pos
         vel[:, 0, self.cart_dof] = target_vel
-        self.cartpoles.set_attribute("joint_target_pos", self.control, pos)
-        self.cartpoles.set_attribute("joint_target_vel", self.control, vel)
+        self.cartpoles.set_attribute("joint_target_q", self.control, pos)
+        self.cartpoles.set_attribute("joint_target_qd", self.control, vel)
 
     def _apply_actuators(self):
         """Run every registered actuator so joint_f gets filled before solver.step.

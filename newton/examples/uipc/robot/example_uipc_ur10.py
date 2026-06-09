@@ -102,7 +102,7 @@ class Example:
 
     def _update_targets(self):
         """Apply sinusoidal trajectory to joint targets."""
-        target_pos = self.control.joint_target_pos.numpy()
+        target_pos = self.control.joint_target_q.numpy()
         t = self.sim_time
 
         for w in range(self.world_count):
@@ -120,7 +120,7 @@ class Example:
                 val = mid + amp * np.sin(t * 1.5 + i * 0.8 + w * 0.3)
                 target_pos[di] = np.clip(val, lower, upper)
 
-        self.control.joint_target_pos.assign(target_pos)
+        self.control.joint_target_q.assign(target_pos)
 
     def simulate(self):
         for _ in range(self.sim_substeps):

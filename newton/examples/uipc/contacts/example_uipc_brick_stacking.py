@@ -436,7 +436,7 @@ class Example:
 
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
         self.solver.initialize(self.state_0)
-        wp.copy(self.control.joint_target_pos[:9], self.model.joint_q[:9])
+        wp.copy(self.control.joint_target_q[:9], self.model.joint_q[:9])
 
         self._setup_ik()
         self._setup_tasks()
@@ -513,7 +513,7 @@ class Example:
 
     def _configure_franka(self, builder: newton.ModelBuilder, arm_q: np.ndarray | list[float]) -> None:
         builder.joint_q[:9] = [*np.asarray(arm_q, dtype=np.float32)[:7].tolist(), GRIPPER_OPEN, GRIPPER_OPEN]
-        builder.joint_target_pos[:9] = builder.joint_q[:9]
+        builder.joint_target_q[:9] = builder.joint_q[:9]
         builder.joint_target_ke[:9] = [650.0] * 9
         builder.joint_target_kd[:9] = [100.0] * 9
         builder.joint_effort_limit[:7] = [80.0] * 7
@@ -804,8 +804,8 @@ class Example:
         self.rot_obj.set_target_rotations(self.ee_rot_interp)
         self.ik_solver.step(self.joint_q_ik, self.joint_q_ik, iterations=self.ik_iters)
 
-        wp.copy(dest=self.control.joint_target_pos[:7], src=self.joint_q_ik.flatten()[:7])
-        wp.copy(dest=self.control.joint_target_pos[7:9], src=self.gripper_target.flatten()[:2])
+        wp.copy(dest=self.control.joint_target_q[:7], src=self.joint_q_ik.flatten()[:7])
+        wp.copy(dest=self.control.joint_target_q[7:9], src=self.gripper_target.flatten()[:2])
 
         wp.launch(
             advance_task_kernel,
@@ -838,7 +838,7 @@ class Example:
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
-        wp.copy(self.control.joint_target_pos[:9], self.model.joint_q[:9])
+        wp.copy(self.control.joint_target_q[:9], self.model.joint_q[:9])
         self.joint_q_ik = wp.clone(self.model.joint_q[: self.model_ik.joint_coord_count].reshape((1, -1)))
         self._setup_tasks()
 

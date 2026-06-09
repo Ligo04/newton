@@ -104,9 +104,9 @@ class Example:
         self.solver.set_contact(enable=True, d_hat=self.soft_body_contact_margin)
         self.solver.initialize(self.state_0)
 
-        self.joint_targets_flat = wp.zeros_like(self.control.joint_target_pos)
+        self.joint_targets_flat = wp.zeros_like(self.control.joint_target_q)
         wp.copy(self.joint_targets_flat, self.model.joint_q)
-        wp.copy(self.control.joint_target_pos, self.joint_targets_flat)
+        wp.copy(self.control.joint_target_q, self.joint_targets_flat)
 
         self.viewer._paused = True
 
@@ -163,7 +163,7 @@ class Example:
         )
         builder.joint_q[:6] = [0.0, 0.0, 0.0, -1.59695, 0.0, 2.5307]
         for d in range(min(9, len(builder.joint_q))):
-            builder.joint_target_pos[d] = builder.joint_q[d]
+            builder.joint_target_q[d] = builder.joint_q[d]
             builder.joint_target_mode[d] = int(JointTargetMode.POSITION)
 
         gripper_open = 1.0
@@ -223,7 +223,7 @@ class Example:
             inputs=[self.ik_joint_q, self.finger_pos_buf, self.finger_idx0, self.finger_idx1],
         )
         wp.copy(self.joint_targets_flat, self.ik_joint_q, dest_offset=0, src_offset=0, count=self.n_coords)
-        wp.copy(self.control.joint_target_pos, self.joint_targets_flat)
+        wp.copy(self.control.joint_target_q, self.joint_targets_flat)
 
         self.state_0.clear_forces()
         self.viewer.apply_forces(self.state_0)

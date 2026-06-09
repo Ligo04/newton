@@ -106,7 +106,7 @@ class Example:
         franka.joint_q[:9] = [*init_q, 0.04, 0.04]
 
         for d in range(9):
-            franka.joint_target_pos[d] = franka.joint_q[d]
+            franka.joint_target_q[d] = franka.joint_q[d]
             franka.joint_target_ke[d] = 650.0
             franka.joint_target_kd[d] = 100.0
             franka.joint_target_mode[d] = int(JointTargetMode.POSITION)
@@ -133,12 +133,12 @@ class Example:
 
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
 
-        # Persistent flat buffer mirroring control.joint_target_pos shape.
-        # Slice-assigning into control.joint_target_pos via wp.copy on views
+        # Persistent flat buffer mirroring control.joint_target_q shape.
+        # Slice-assigning into control.joint_target_q via wp.copy on views
         # is unreliable; we always write the whole buffer instead.
-        self.joint_targets_flat = wp.zeros_like(self.control.joint_target_pos)
+        self.joint_targets_flat = wp.zeros_like(self.control.joint_target_q)
         wp.copy(self.joint_targets_flat, self.model.joint_q)
-        wp.copy(self.control.joint_target_pos, self.joint_targets_flat)
+        wp.copy(self.control.joint_target_q, self.joint_targets_flat)
 
         # ------------------------------------------------------------------
         # Viewer setup.
@@ -224,7 +224,7 @@ class Example:
             dim=1,
             inputs=[self.joint_q_ik, self.joint_targets_flat, self.gripper_value],
         )
-        wp.copy(self.control.joint_target_pos, self.joint_targets_flat)
+        wp.copy(self.control.joint_target_q, self.joint_targets_flat)
 
     # ----------------------------------------------------------------------
     # Template API

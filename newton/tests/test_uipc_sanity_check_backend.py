@@ -48,10 +48,10 @@ def _build_allegro_hand_model() -> newton.Model:
         allegro_hand.joint_target_ke[i] = 150
         allegro_hand.joint_target_kd[i] = 5
         allegro_hand.joint_q[i] = 0.3
-        allegro_hand.joint_target_pos[i] = 0.3
+        allegro_hand.joint_target_q[i] = 0.3
         if allegro_hand.joint_label[i][-2:] == "_0":
             allegro_hand.joint_q[i] = 0.6
-            allegro_hand.joint_target_pos[i] = 0.6
+            allegro_hand.joint_target_q[i] = 0.6
         allegro_hand.joint_target_mode[i] = int(JointTargetMode.POSITION)
         if allegro_hand.joint_type[i] == newton.JointType.REVOLUTE:
             allegro_hand.joint_armature[i] = 1e-2

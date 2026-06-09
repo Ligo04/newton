@@ -7,7 +7,7 @@
 # Drives the cart (prismatic DOF) with UIPC's built-in position-control PD:
 # ``JointTargetMode.POSITION`` sets up an aim constraint whose stiffness and
 # damping come from ``joint_target_ke`` / ``joint_target_kd`` on the builder.
-# The user just writes a scalar target into ``control.joint_target_pos``
+# The user just writes a scalar target into ``control.joint_target_q``
 # every step and UIPC takes care of the PD law internally. The poles stay
 # passive so they swing as the cart accelerates.
 #
@@ -82,7 +82,7 @@ class Example:
         cartpole.joint_target_kd[cart_dof] = self.kd
 
         # Initial target matches the rest pose so the first step is consistent.
-        cartpole.joint_target_pos[cart_dof] = 0.0
+        cartpole.joint_target_q[cart_dof] = 0.0
 
         if self.world_count > 1:
             builder = newton.ModelBuilder(newton.Axis.Z)
@@ -125,10 +125,10 @@ class Example:
         target = self.cart_amplitude * math.sin(2.0 * math.pi * self.cart_frequency * self.sim_time)
         # Copy into host-side numpy first so we hit one H→D transfer per step
         # instead of one per world.
-        target_np = self.control.joint_target_pos.numpy()
+        target_np = self.control.joint_target_q.numpy()
         for idx in self.cart_dof_indices:
             target_np[idx] = target
-        self.control.joint_target_pos.assign(target_np)
+        self.control.joint_target_q.assign(target_np)
 
     def simulate(self):
         self._update_cart_target()

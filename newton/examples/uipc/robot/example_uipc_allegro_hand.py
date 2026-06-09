@@ -56,10 +56,10 @@ class Example:
             allegro_hand.joint_target_ke[i] = 150
             allegro_hand.joint_target_kd[i] = 5
             allegro_hand.joint_q[i] = 0.3
-            allegro_hand.joint_target_pos[i] = 0.3
+            allegro_hand.joint_target_q[i] = 0.3
             if allegro_hand.joint_label[i][-2:] == "_0":
                 allegro_hand.joint_q[i] = 0.6
-                allegro_hand.joint_target_pos[i] = 0.6
+                allegro_hand.joint_target_q[i] = 0.6
             allegro_hand.joint_target_mode[i] = int(JointTargetMode.POSITION)
             if allegro_hand.joint_type[i] == newton.JointType.REVOLUTE:
                 allegro_hand.joint_armature[i] = 1e-2
@@ -121,7 +121,7 @@ class Example:
 
     def _update_targets(self):
         """Apply sinusoidal trajectory to finger joint targets."""
-        target_pos = self.control.joint_target_pos.numpy()
+        target_pos = self.control.joint_target_q.numpy()
         t = self.sim_time
 
         for w in range(self.world_count):
@@ -139,7 +139,7 @@ class Example:
                     self.joint_limit_upper[di],
                 )
 
-        self.control.joint_target_pos.assign(target_pos)
+        self.control.joint_target_q.assign(target_pos)
 
     def simulate(self):
         for _ in range(self.sim_substeps):

@@ -89,9 +89,9 @@ class Example:
         self.solver.configure_contact_tabular(self._configure_contact_tabular)
         self.solver.initialize(self.state_0)
 
-        self.joint_targets_flat = wp.zeros_like(self.control.joint_target_pos)
+        self.joint_targets_flat = wp.zeros_like(self.control.joint_target_q)
         wp.copy(self.joint_targets_flat, self.model.joint_q)
-        wp.copy(self.control.joint_target_pos, self.joint_targets_flat)
+        wp.copy(self.control.joint_target_q, self.joint_targets_flat)
 
         self.viewer.set_model(self.model)
         self.viewer.set_camera(pos=wp.vec3(1.0, 0.4, 0.9), pitch=-30.0, yaw=-145.0)
@@ -128,7 +128,7 @@ class Example:
             clamp_open_activation_val * self.gripper_activation_scale,
         ]
         for d in range(9):
-            builder.joint_target_pos[d] = builder.joint_q[d]
+            builder.joint_target_q[d] = builder.joint_q[d]
             builder.joint_target_mode[d] = int(JointTargetMode.POSITION)
 
         self.robot_key_poses = np.array(
@@ -301,7 +301,7 @@ class Example:
 
     def _solve_ik_and_push_control(self, time: float, is_delayed: bool) -> None:
         if is_delayed:
-            wp.copy(self.control.joint_target_pos, self.model.joint_q)
+            wp.copy(self.control.joint_target_q, self.model.joint_q)
             return
 
         target = self._target_at_time(time, is_delayed)
@@ -315,7 +315,7 @@ class Example:
             inputs=[self.joint_q_ik, self.finger_pos_buf, self.finger_idx0, self.finger_idx1],
         )
         wp.copy(self.joint_targets_flat, self.joint_q_ik, dest_offset=0, src_offset=0, count=self.n_coords)
-        wp.copy(self.control.joint_target_pos, self.joint_targets_flat)
+        wp.copy(self.control.joint_target_q, self.joint_targets_flat)
 
     def simulate(self):
         for _ in range(self.sim_substeps):

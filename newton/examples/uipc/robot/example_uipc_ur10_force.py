@@ -272,9 +272,9 @@ class Example:
         )
         self.qd_target = np.zeros((self.world_count, 1, self.dofs_per_world), dtype=np.float32)
 
-        # Populate joint_target_pos/vel — ActuatorPD reads them every step.
-        self.ur10s.set_attribute("joint_target_pos", self.control, self.q_target)
-        self.ur10s.set_attribute("joint_target_vel", self.control, self.qd_target)
+        # Populate joint_target_q/qd — ActuatorPD reads them every step.
+        self.ur10s.set_attribute("joint_target_q", self.control, self.q_target)
+        self.ur10s.set_attribute("joint_target_qd", self.control, self.qd_target)
 
         # Cache the composed Actuator that drives every UR10 DOF. ``.kp``
         # lives on ``pd_actuator.controller``; effort limits on the
@@ -443,7 +443,7 @@ class Example:
 
         ``ActuatorPD`` already handles the PD math and the ``max_force`` clamp
         in its Warp kernel, and it reads position / velocity targets from
-        ``control.joint_target_pos`` / ``joint_target_vel`` (written once in
+        ``control.joint_target_q`` / ``joint_target_qd`` (written once in
         ``__init__``). The only per-substep bookkeeping we need is:
 
         1. Clear ``control.joint_f`` — the PD kernel accumulates with ``+=``,

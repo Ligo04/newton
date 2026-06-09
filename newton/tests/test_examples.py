@@ -13,6 +13,7 @@ manipulating cloth example, which takes approximately 35 seconds to run on a
 CUDA device.
 """
 
+import importlib.util
 import os
 import subprocess
 import sys
@@ -1233,7 +1234,7 @@ class TestUIPCSoftbodyExamples(unittest.TestCase):
         self.assertIn("self.action_delay_frames = 25", source)
         self.assertIn("self.action_delay = self.action_delay_frames * self.frame_dt", source)
         self.assertIn("self.frame < self.action_delay_frames", source)
-        self.assertIn("wp.copy(self.control.joint_target_pos, self.model.joint_q)", source)
+        self.assertIn("wp.copy(self.control.joint_target_q, self.model.joint_q)", source)
         self.assertIn("self.state_0.body_q.numpy()[self.ee_index]", source)
         self.assertIn("def _target_at_time(self, time: float, is_delayed: bool)", source)
         self.assertIn("parser.set_defaults(num_frames=3850)", source)

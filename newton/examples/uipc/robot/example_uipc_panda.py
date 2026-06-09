@@ -148,7 +148,7 @@ class Example:
         # in particular must stay at 0.1 / 0.5 or the arm will visibly sag under
         # gravity and the rest pose will not match the original.
         builder.joint_q[:9] = [*init_q, 0.00, 0.00]
-        builder.joint_target_pos[:9] = [*init_q, 1.0, 1.0]
+        builder.joint_target_q[:9] = [*init_q, 1.0, 1.0]
 
         builder.joint_target_ke[:9] = [650.0] * 9
         builder.joint_target_kd[:9] = [100.0] * 9
@@ -298,9 +298,9 @@ class Example:
 
         self._setup_ik()
         self.control = self.model.control()
-        self.joint_target_shape = self.control.joint_target_pos.reshape((self.world_count, -1)).shape
+        self.joint_target_shape = self.control.joint_target_q.reshape((self.world_count, -1)).shape
         self.joint_targets_2d = wp.zeros(self.joint_target_shape, dtype=wp.float32)
-        wp.copy(self.control.joint_target_pos[:9], self.model.joint_q[:9])
+        wp.copy(self.control.joint_target_q[:9], self.model.joint_q[:9])
 
         # Track maximum object height for testing (only in test mode)
         self.object_max_z = [self.object_pos[2]] * self.world_count if self.test_mode else None
@@ -375,13 +375,15 @@ class Example:
                 self.cup_pos[1],
                 self.z_rest - 0.1,
             )
-            self.waypoints.extend([
-                [cup_above_high, 2.0, grasp_pos, rot_hand],
-                [cup_above_high, 2.0, loose_pos, rot_hand],
-                [cup_above_high, 1.0, loose_pos, rot_hand],
-                [cup_above_low, 1.0, loose_pos, rot_hand],
-                [cup_above_low, 1.0, 0.0, rot_hand],
-            ])
+            self.waypoints.extend(
+                [
+                    [cup_above_high, 2.0, grasp_pos, rot_hand],
+                    [cup_above_high, 2.0, loose_pos, rot_hand],
+                    [cup_above_high, 1.0, loose_pos, rot_hand],
+                    [cup_above_low, 1.0, loose_pos, rot_hand],
+                    [cup_above_low, 1.0, 0.0, rot_hand],
+                ]
+            )
 
     def _set_joint_targets(self):
         self.time_in_waypoint += self.frame_dt
@@ -410,7 +412,7 @@ class Example:
             dim=self.world_count,
             inputs=[self.joint_q_ik, self.joint_targets_2d, gripper_value],
         )
-        wp.copy(self.control.joint_target_pos, self.joint_targets_2d.flatten())
+        wp.copy(self.control.joint_target_q, self.joint_targets_2d.flatten())
 
         if self.time_in_waypoint >= self.waypoints[wp_idx][1]:
             self.current_waypoint = next_idx

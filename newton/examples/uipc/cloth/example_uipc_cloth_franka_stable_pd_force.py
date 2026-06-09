@@ -105,10 +105,10 @@ class Example:
         self.solver.configure_contact_tabular(self._configure_contact_tabular)
         self.solver.initialize(self.state_0)
 
-        self.joint_targets_flat = wp.zeros_like(self.control.joint_target_pos)
+        self.joint_targets_flat = wp.zeros_like(self.control.joint_target_q)
         wp.copy(self.joint_targets_flat, self.model.joint_q)
-        wp.copy(self.control.joint_target_pos, self.joint_targets_flat)
-        self.control.joint_target_vel.zero_()
+        wp.copy(self.control.joint_target_q, self.joint_targets_flat)
+        self.control.joint_target_qd.zero_()
 
         self.robot = ArticulationView(self.model, "fr3")
         self.dofs_per_world = self.robot.joint_dof_count
@@ -163,8 +163,8 @@ class Example:
             clamp_open_activation_val * self.gripper_activation_scale,
         ]
         for d in range(9):
-            builder.joint_target_pos[d] = builder.joint_q[d]
-            builder.joint_target_vel[d] = 0.0
+            builder.joint_target_q[d] = builder.joint_q[d]
+            builder.joint_target_qd[d] = 0.0
             builder.joint_target_ke[d] = 100.0 if d < 7 else self.stable_pd_kp[d]
             builder.joint_target_kd[d] = 10.0 if d < 7 else self.stable_pd_kd[d]
             builder.joint_target_mode[d] = int(JointTargetMode.EFFORT)
@@ -348,8 +348,8 @@ class Example:
 
     def _solve_ik_and_push_control(self, time: float, is_delayed: bool) -> None:
         if is_delayed:
-            self.robot.set_attribute("joint_target_pos", self.control, self.home_q.reshape(1, 1, self.dofs_per_world))
-            self.control.joint_target_vel.zero_()
+            self.robot.set_attribute("joint_target_q", self.control, self.home_q.reshape(1, 1, self.dofs_per_world))
+            self.control.joint_target_qd.zero_()
             return
 
         target = self._target_at_time(time, is_delayed)
@@ -363,8 +363,8 @@ class Example:
             inputs=[self.joint_q_ik, self.finger_pos_buf, self.finger_idx0, self.finger_idx1],
         )
         wp.copy(self.joint_targets_flat, self.joint_q_ik, dest_offset=0, src_offset=0, count=self.n_coords)
-        wp.copy(self.control.joint_target_pos, self.joint_targets_flat)
-        self.control.joint_target_vel.zero_()
+        wp.copy(self.control.joint_target_q, self.joint_targets_flat)
+        self.control.joint_target_qd.zero_()
 
     def _compute_gravity_feedforward(self) -> np.ndarray:
         """Compute Jacobian-transpose gravity compensation for the Franka DOFs."""
