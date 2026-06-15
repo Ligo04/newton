@@ -93,6 +93,24 @@ axis endpoints must coincide; prismatic axes must be parallel and their anchors
 must be collinear. Invalid authored joint frames raise at initialization rather
 than failing later inside UIPC.
 
+### Mimic joint coupling
+
+Mimic constraints (`Model.constraint_mimic_*`, imported from URDF `<mimic>`,
+MJCF joint equalities, or USD `PhysxMimicJointAPI` / `NewtonMimicAPI`) enforce
+`joint0 = coef0 + coef1 * joint1` (follower = offset + scale × leader). Each
+step, before `world.advance()`, the follower's position target is set to
+`coef0 + coef1 * q_leader` and the follower is forced into position-driving
+mode, so the UIPC animator drives it toward the coupled target. The leader value
+is its commanded target when the leader is itself position-driven (no lag),
+otherwise its measured start-of-step position (one-step lag).
+
+The coupling is **soft**: the follower tracks its target through the driving
+joint's stiffness (`joint_target_ke` / `joint_target_kd`) and may lag under
+load, unlike a hard equality constraint. Both follower and leader must be active
+`REVOLUTE` / `PRISMATIC` joints; a constraint whose follower or leader is not an
+active UIPC joint is skipped with a warning. Coefficients are baked at
+initialization — editing them requires reconstructing the solver.
+
 ## Geometry types
 
 Rigid bodies are represented as UIPC AffineBody geometries. Newton gathers each
@@ -379,6 +397,11 @@ Smaller limitations are documented inline above. The most common ones are:
 - **Only revolute and prismatic joints are active driven/read-back joints.**
   Ball joints constrain anchors but do not participate in the active joint
   control/readback arrays. Distance, D6, and cable joints are unsupported.
+- **Mimic constraints are enforced softly via position driving.** The follower
+  tracks `coef0 + coef1 * q_leader` through its driving-joint stiffness and may
+  lag under load; this is not a hard equality constraint. Follower and leader
+  must both be active revolute/prismatic joints, and coefficients are baked at
+  initialization.
 - **Velocity-only joint drives are not forwarded.** `VELOCITY` target mode is
   passive in UIPC; `POSITION_VELOCITY` forwards only the position target.
 - **Most edits require solver reconstruction.** Shape changes, actuator changes,

@@ -90,6 +90,12 @@ class ArticulationBuilder:
         # Transient subscene element set per build_joints call
         self._subscene_elem: Any | None = None
 
+        # Resolved mimic constraints (populated by setup_mimic_constraints).
+        # Each entry: (follower_art, follower_local, leader_art, leader_local,
+        #              coef0, coef1). All indices are local within their
+        #              owning Articulation. See :meth:`apply_mimic_targets`.
+        self._mimic_constraints: list[tuple[Articulation, int, Articulation, int, float, float]] = []
+
     # ------------------------------------------------------------------
     # Build
     # ------------------------------------------------------------------
@@ -1193,3 +1199,116 @@ class ArticulationBuilder:
         """Increment the step counter on all articulations."""
         for art in self.articulations.values():
             art.increment_step()
+
+    # ------------------------------------------------------------------
+    # Mimic joint coupling
+    # ------------------------------------------------------------------
+
+    def setup_mimic_constraints(self) -> None:
+        """Resolve ``model.constraint_mimic_*`` into per-articulation indices.
+
+        Call **once** after every world has been built via
+        :meth:`build_joints` (so all active joints are registered and
+        ``setup_state`` has run). Builds the ``_mimic_constraints`` list
+        consumed by :meth:`apply_mimic_targets` each step.
+
+        Newton semantic: ``joint0 = coef0 + coef1 * joint1`` (follower =
+        offset + scale * leader). Only REVOLUTE / PRISMATIC joints are
+        active (driven) in SolverUIPC, so a constraint whose follower or
+        leader is not active is skipped with a warning.
+        """
+        self._mimic_constraints = []
+        model = self._model
+        count = getattr(model, "constraint_mimic_count", 0)
+        if (
+            not count
+            or model.constraint_mimic_joint0 is None
+            or model.constraint_mimic_joint1 is None
+            or model.constraint_mimic_coef0 is None
+            or model.constraint_mimic_coef1 is None
+        ):
+            return
+
+        # Global Newton joint index -> (Articulation, local index).
+        joint_to_art: dict[int, tuple[Articulation, int]] = {}
+        for art in self.articulations.values():
+            for newton_idx, local in art._joint_to_local.items():
+                joint_to_art[newton_idx] = (art, local)
+
+        joint0_np = model.constraint_mimic_joint0.numpy()
+        joint1_np = model.constraint_mimic_joint1.numpy()
+        coef0_np = model.constraint_mimic_coef0.numpy()
+        coef1_np = model.constraint_mimic_coef1.numpy()
+        enabled_np = (
+            model.constraint_mimic_enabled.numpy()
+            if model.constraint_mimic_enabled is not None
+            else np.ones(count, dtype=bool)
+        )
+        labels = model.constraint_mimic_label
+
+        for i in range(count):
+            if not bool(enabled_np[i]):
+                continue
+            follower = int(joint0_np[i])
+            leader = int(joint1_np[i])
+            label = labels[i] if i < len(labels) else f"mimic_{i}"
+            if follower not in joint_to_art or leader not in joint_to_art:
+                missing = follower if follower not in joint_to_art else leader
+                role = "follower" if follower not in joint_to_art else "leader"
+                warnings.warn(
+                    f"Mimic constraint '{label}': {role} joint {missing} is not an active "
+                    f"(revolute/prismatic) UIPC joint; SolverUIPC is skipping this constraint.",
+                    stacklevel=2,
+                )
+                continue
+            follower_art, follower_local = joint_to_art[follower]
+            leader_art, leader_local = joint_to_art[leader]
+            self._mimic_constraints.append(
+                (follower_art, follower_local, leader_art, leader_local, float(coef0_np[i]), float(coef1_np[i]))
+            )
+
+    # __APPLY_MIMIC_PLACEHOLDER__
+
+    def apply_mimic_targets(self) -> None:
+        """Drive follower joints from their leaders for this step.
+
+        Call **once per step**, after :meth:`cache_joint_control` and
+        :meth:`read_joint_state_pre_advance`, but **before**
+        ``world.advance()``. Overwrites the follower's CPU
+        ``target_position`` numpy view with ``coef0 + coef1 * q_leader``
+        and forces the follower into position-driving mode, so the UIPC
+        animator drives it toward the coupled target.
+
+        Leader value: the leader's commanded ``target_position`` when the
+        leader is itself position-driven (no lag), otherwise its
+        start-of-step measured ``joint_position`` from
+        :meth:`read_joint_state_pre_advance` (one-step lag).
+
+        The coupling is soft: the follower tracks its target through the
+        UIPC driving-joint stiffness and may lag under load, like any
+        position-driven UIPC joint. Chained mimics (a follower that is
+        also a leader) are resolved in list order; deep chains are not
+        guaranteed to fully converge within one step.
+        """
+        for follower_art, follower_local, leader_art, leader_local, coef0, coef1 in self._mimic_constraints:
+            if follower_art.target_position is None or follower_art.is_constrained is None:
+                continue
+            if leader_art.target_position is None or leader_art.joint_position is None:
+                continue
+
+            # Prefer the leader's commanded target (lag-free) when it is
+            # position-driven; fall back to its measured start-of-step
+            # position otherwise.
+            leader_driven = (
+                bool(leader_art.is_constrained.numpy()[leader_local])
+                if leader_art.is_constrained is not None
+                else False
+            )
+            if leader_driven:
+                q_leader = float(leader_art.target_position.numpy()[leader_local])
+            else:
+                q_leader = float(leader_art.joint_position.numpy()[leader_local])
+
+            target = coef0 + coef1 * q_leader
+            follower_art.target_position.numpy()[follower_local] = target
+            follower_art.is_constrained.numpy()[follower_local] = 1

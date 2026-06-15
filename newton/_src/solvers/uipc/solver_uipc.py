@@ -1068,6 +1068,11 @@ class SolverUIPC(SolverBase):
             if self._deformable_builder.has_deformable:
                 self._deformable_builder.build(actor_elems[world_index], particle_range, se)
 
+        # Resolve mimic joint couplings now that every world's joints are
+        # registered. Mimic followers are driven from their leaders each
+        # step in :meth:`step` via ``apply_mimic_targets``.
+        self._articulation_builder.setup_mimic_constraints()
+
         # Initialize UIPC world and set up state accessors
         self.world.init(scene)
         if not self.world.is_valid():
@@ -1209,6 +1214,12 @@ class SolverUIPC(SolverBase):
         # Snapshot pre-advance joint angles/distances so the post-retrieve
         # finite difference yields a true (q_{t+dt} - q_t) / dt velocity.
         self._articulation_builder.read_joint_state_pre_advance()
+
+        # Drive mimic followers from their leaders. Runs after control
+        # caching (target arrays populated, device synced) and after the
+        # pre-advance snapshot (leader fallback value available), but
+        # before the animator fires in world.advance().
+        self._articulation_builder.apply_mimic_targets()
 
         # Dump surface geometry before physics advance
         if self._dump_enable:

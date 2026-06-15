@@ -9,6 +9,7 @@
 - Add `uipc_cloth_franka_stable_pd_force` demo using `ControllerStablePD` EFFORT actuators for Franka contact-based cloth manipulation.
 - Add `uipc:abd_kappa` body custom attribute for per-rigid-body UIPC ABD stiffness overrides.
 - Add per-range `uipc:cloth_model` and `uipc:deformable_model` custom attributes so UIPC cloth and soft bodies can select constitutions while retaining their existing defaults.
+- Add mimic joint support to `SolverUIPC`: follower joints track `coef0 + coef1 * leader` via position driving (soft coupling); follower and leader must both be active revolute/prismatic joints.
 - Add `--enable-contact` / `--no-enable-contact` to `uipc_brick_stacking` so UIPC contact can be disabled while remaining enabled by default.
 - Add UIPC cloth poker-cards demo with stacked card patches, UIPC cloth self-contact, and a dynamic soft-transform sphere knock-off.
 - Add `newton.use_coord_layout_targets` opt-in flag exposing `Model.joint_target_q` / `Control.joint_target_q` shaped `(joint_coord_count,)` (matching `joint_q`) and `joint_target_qd` shaped `(joint_dof_count,)` (matching `joint_qd`); solvers, the actuator library, and `ModelBuilder.finalize()` honor the flag. Defaults to `False` for backwards compatibility; will flip in a future release.
