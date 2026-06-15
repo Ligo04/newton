@@ -317,7 +317,7 @@ class SolverUIPC(SolverBase):
         scene_config["contact"]["d_hat"] = 0.001
         scene_config["contact"]["enable"] = False
         scene_config["newton"]["velocity_tol"] = 0.001
-        scene_config["newton"]["translation_tol"] = 0.01
+        scene_config["newton"]["transrate_tol"] = 0.01
         if model.gravity is not None:
             gravity_np = model.gravity.numpy().flatten()
             scene_config["gravity"] = [
