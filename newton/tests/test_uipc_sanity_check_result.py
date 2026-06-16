@@ -189,6 +189,56 @@ class TestUIPCFreeJointSoftTransformConstraint(unittest.TestCase):
 
         self.assertGreater(float(state_0.body_q.numpy()[body, 0]), 0.05)
 
+    def test_free_joint_readback_tracks_body_state(self):
+        # A free-floating body integrated by UIPC writes its motion to
+        # ``body_q``; its generalized ``joint_q[0:7]`` / ``joint_qd[0:6]`` must
+        # be back-filled so consumers that read the floating root pose from
+        # ``joint_q`` see the motion. UIPC does not register FREE joints as
+        # active joints, so the per-articulation readback skips them; the
+        # solver back-fills them from body state instead (mjwarp does this
+        # natively). See ``_free_joint_readback_kernel``.
+        builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+        body = builder.add_link(is_kinematic=False)
+        cfg = newton.ModelBuilder.ShapeConfig()
+        cfg.density = 1000.0
+        builder.add_shape_sphere(body, radius=0.05, cfg=cfg)
+        joint = builder.add_joint_free(
+            child=body,
+            parent_xform=wp.transform(wp.vec3(0.3, -0.2, 1.0), wp.quat_rpy(0.2, 0.3, 0.4)),
+        )
+        builder.add_articulation([joint])
+        model = builder.finalize()
+
+        solver = newton.solvers.SolverUIPC(model, backend="cuda", logger_level=uipc.Logger.Error)
+        solver.initialize()
+
+        state_0 = model.state()
+        state_1 = model.state()
+        control = model.control()
+        contacts = model.contacts()
+
+        # Snapshot the spawn-pose joint_q so we can assert it actually moved.
+        initial_joint_q = state_0.joint_q.numpy().copy()
+
+        for _ in range(15):
+            solver.step(state_0, state_1, control, contacts, 1.0 / 60.0)
+            state_0, state_1 = state_1, state_0
+
+        joint_q = state_0.joint_q.numpy()
+        joint_qd = state_0.joint_qd.numpy()
+
+        # The body fell under gravity, so joint_q must no longer be frozen at
+        # the spawn pose.
+        self.assertFalse(np.allclose(joint_q, initial_joint_q, atol=1.0e-4))
+
+        # The readback must reproduce the full inverse kinematics result that
+        # eval_ik computes from the same body_q / body_qd.
+        ref_joint_q = wp.zeros_like(state_0.joint_q)
+        ref_joint_qd = wp.zeros_like(state_0.joint_qd)
+        newton.eval_ik(model, state_0, ref_joint_q, ref_joint_qd)
+        np.testing.assert_allclose(joint_q, ref_joint_q.numpy(), atol=1.0e-5)
+        np.testing.assert_allclose(joint_qd, ref_joint_qd.numpy(), atol=1.0e-5)
+
 
 if __name__ == "__main__":
     unittest.main()

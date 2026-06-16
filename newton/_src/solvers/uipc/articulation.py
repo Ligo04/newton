@@ -10,6 +10,7 @@ logic that creates these objects lives in :mod:`.articulation_builder`.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -20,6 +21,28 @@ from uipc.geometry import SimplicialComplex, SimplicialComplexSlot
 from newton._src.solvers.uipc.utils import _view_attr
 
 from ...sim import JointTargetMode, JointType
+from ...sim.articulation import com_twist_to_point_velocity
+
+
+@dataclass
+class FreeJointReadbackContext:
+    """Device-side body / model arrays for FREE-joint readback.
+
+    Bundled so :meth:`Articulation.write_readback` stays decoupled from
+    :class:`Model`. The builder rebuilds it each step (``body_q`` / ``body_qd``
+    come from the output ``State``).
+    """
+
+    body_q: wp.array
+    body_qd: wp.array
+    body_com: wp.array
+    joint_parent: wp.array
+    joint_child: wp.array
+    joint_X_p: wp.array
+    joint_X_c: wp.array
+    joint_q_start: wp.array
+    joint_qd_start: wp.array
+
 
 # -- Warp kernels (CPU) ---------------------------------------------------
 
@@ -89,6 +112,88 @@ def _write_readback_kernel(
     joint_q_out[local_q_start[local]] = wp.float32(joint_position[local])  # ty:ignore[invalid-assignment]
     if has_qd != 0:
         joint_qd_out[local_qd_start[local]] = wp.float32(joint_velocity[local])  # ty:ignore[invalid-assignment]
+
+
+@wp.kernel(enable_backward=False)
+def _free_joint_readback_kernel(
+    free_joint_indices: wp.array[wp.int32],
+    body_q: wp.array[wp.transform],
+    body_qd: wp.array[wp.spatial_vector],
+    body_com: wp.array[wp.vec3],
+    joint_parent: wp.array[wp.int32],
+    joint_child: wp.array[wp.int32],
+    joint_X_p: wp.array[wp.transform],
+    joint_X_c: wp.array[wp.transform],
+    joint_q_start: wp.array[wp.int32],
+    joint_qd_start: wp.array[wp.int32],
+    joint_q: wp.array[float],
+    joint_qd: wp.array[float],
+):
+    """Recover ``joint_q[0:7]`` / ``joint_qd[0:6]`` for FREE joints from body state.
+
+    FREE joints are soft transform constraints, not active joints, so the
+    finite-difference readback in :meth:`Articulation.write_readback` cannot
+    reach them. Mirrors the FREE branch of
+    :func:`newton._src.sim.articulation.eval_articulation_ik` (linear velocity
+    referenced at the child COM, expressed in the joint parent frame).
+    """
+    tid = wp.tid()
+    joint_idx = free_joint_indices[tid]
+
+    parent = joint_parent[joint_idx]
+    child = joint_child[joint_idx]
+
+    X_pj = joint_X_p[joint_idx]
+    X_cj = joint_X_c[joint_idx]
+
+    # Parent anchor frame in world space (world frame when parent == -1).
+    X_wpj = X_pj
+    v_wp = wp.spatial_vector()
+    w_p = wp.vec3()
+    X_wp = wp.transform_identity()
+    if parent >= 0:
+        X_wp = body_q[parent]
+        X_wpj = X_wp * X_pj
+        v_wp = body_qd[parent]
+        w_p = wp.spatial_bottom(v_wp)
+
+    X_wc = body_q[child]
+    X_wcj = X_wc * X_cj
+    v_wc = body_qd[child]
+    w_c = wp.spatial_bottom(v_wc)
+
+    q_p = wp.transform_get_rotation(X_wpj)
+    q_c = wp.transform_get_rotation(X_wcj)
+    x_err = wp.transform_get_translation(X_wcj) - wp.transform_get_translation(X_wpj)
+    w_err = w_c - w_p
+
+    q_pc = wp.quat_inverse(q_p) * q_c
+    x_err_c = wp.quat_rotate_inv(q_p, x_err)
+
+    x_child_com_world = wp.transform_point(X_wc, body_com[child])
+    v_com_err = wp.spatial_top(v_wc)
+    if parent >= 0:
+        v_com_err = v_com_err - com_twist_to_point_velocity(v_wp, X_wp, body_com[parent], x_child_com_world)
+    v_err_c = wp.quat_rotate_inv(q_p, v_com_err)
+    w_err_c = wp.quat_rotate_inv(q_p, w_err)
+
+    q_start = joint_q_start[joint_idx]
+    qd_start = joint_qd_start[joint_idx]
+
+    joint_q[q_start + 0] = x_err_c[0]
+    joint_q[q_start + 1] = x_err_c[1]
+    joint_q[q_start + 2] = x_err_c[2]
+    joint_q[q_start + 3] = q_pc[0]
+    joint_q[q_start + 4] = q_pc[1]
+    joint_q[q_start + 5] = q_pc[2]
+    joint_q[q_start + 6] = q_pc[3]
+
+    joint_qd[qd_start + 0] = v_err_c[0]
+    joint_qd[qd_start + 1] = v_err_c[1]
+    joint_qd[qd_start + 2] = v_err_c[2]
+    joint_qd[qd_start + 3] = w_err_c[0]
+    joint_qd[qd_start + 4] = w_err_c[1]
+    joint_qd[qd_start + 5] = w_err_c[2]
 
 
 # -- Placeholder for empty warp arrays passed to kernels -------------------
@@ -210,6 +315,11 @@ class Articulation:
         self._is_constrained_dev: wp.array | None = None
         self._is_force_constrained_dev: wp.array | None = None
 
+        # -- FREE joint readback (populated by register_free_joint) -----
+        # Tracked separately from active joints; recovered from body state.
+        self._free_joint_indices: list[int] = []
+        self._free_joint_indices_wp: wp.array | None = None  # (F,) int32, on solver device
+
     # ------------------------------------------------------------------
     # Properties
     # ------------------------------------------------------------------
@@ -218,6 +328,11 @@ class Articulation:
     def num_active_joints(self) -> int:
         """Number of active (driven) joints in this articulation."""
         return len(self.active_joint_indices)
+
+    @property
+    def num_free_joints(self) -> int:
+        """Number of FREE joints in this articulation (read back from body state)."""
+        return len(self._free_joint_indices)
 
     # ------------------------------------------------------------------
     # Build-time registration
@@ -245,6 +360,17 @@ class Articulation:
         self._joint_q_start[newton_idx] = q_start
         self._joint_qd_start[newton_idx] = qd_start
         return local
+
+    def register_free_joint(self, newton_idx: int) -> None:
+        """Register a FREE joint for body-state readback.
+
+        Only the global Newton joint index is stored; the kernel reads
+        ``q_start`` / ``qd_start`` from the model arrays directly.
+
+        Args:
+            newton_idx: Newton joint index of the FREE joint.
+        """
+        self._free_joint_indices.append(newton_idx)
 
     # ------------------------------------------------------------------
     # State allocation
@@ -507,43 +633,73 @@ class Articulation:
         self,
         joint_q_out: wp.array,
         joint_qd_out: wp.array | None,
+        free_joint_ctx: FreeJointReadbackContext | None = None,
     ) -> None:
-        """Scatter cached positions/velocities into Newton arrays via kernel.
+        """Scatter joint positions/velocities into Newton arrays via kernels.
 
-        Called once per step **after** ``world.advance()``.
+        Called once per step **after** ``world.advance()``. Handles both
+        active (driven REVOLUTE / PRISMATIC) joints — whose values come from
+        the animator finite-difference cache — and FREE joints, whose
+        generalized coordinates are recovered from body state (see
+        :func:`_free_joint_readback_kernel`).
 
         Args:
             joint_q_out: Mutable joint-position array on the solver device.
             joint_qd_out: Mutable joint-velocity array on the solver
                 device, or ``None``.
+            free_joint_ctx: Device-side body / model arrays for FREE-joint
+                readback. Required when this articulation has FREE joints;
+                ignored otherwise.
         """
-        if not self._ensure_state():
-            return
-
-        J = self.num_active_joints
         device = self._device
 
-        # Mirror animator-updated CPU joint state up to the solver device.
-        # The kernel launch below is enqueued on the same device stream so
-        # it observes these copies without an explicit sync.
-        wp.copy(self._joint_position_dev, self.joint_position)
-        if joint_qd_out is not None:
-            wp.copy(self._joint_velocity_dev, self.joint_velocity)
+        # -- Active (driven) joints: scatter the animator-cached state. ----
+        # Skipped for FREE-only articulations, which never run setup_state.
+        if self.num_active_joints > 0 and self._ensure_state():
+            # Mirror animator-updated CPU joint state up to the solver device.
+            # The kernel launch below is enqueued on the same device stream so
+            # it observes these copies without an explicit sync.
+            wp.copy(self._joint_position_dev, self.joint_position)
+            if joint_qd_out is not None:
+                wp.copy(self._joint_velocity_dev, self.joint_velocity)
 
-        wp.launch(
-            _write_readback_kernel,
-            dim=J,
-            inputs=[
-                self._local_q_start_wp,
-                self._local_qd_start_wp,
-                self._joint_position_dev,
-                self._joint_velocity_dev,
-                joint_q_out,
-                joint_qd_out if joint_qd_out is not None else _empty_f32(device),
-                int(joint_qd_out is not None),
-            ],
-            device=device,
-        )
+            wp.launch(
+                _write_readback_kernel,
+                dim=self.num_active_joints,
+                inputs=[
+                    self._local_q_start_wp,
+                    self._local_qd_start_wp,
+                    self._joint_position_dev,
+                    self._joint_velocity_dev,
+                    joint_q_out,
+                    joint_qd_out if joint_qd_out is not None else _empty_f32(device),
+                    int(joint_qd_out is not None),
+                ],
+                device=device,
+            )
+
+        # -- FREE joints: recover joint_q[0:7] / joint_qd[0:6] from body. --
+        if self.num_free_joints > 0 and joint_qd_out is not None and free_joint_ctx is not None:
+            if self._free_joint_indices_wp is None:
+                self._free_joint_indices_wp = wp.array(self._free_joint_indices, dtype=wp.int32, device=device)
+            wp.launch(
+                _free_joint_readback_kernel,
+                dim=self.num_free_joints,
+                inputs=[
+                    self._free_joint_indices_wp,
+                    free_joint_ctx.body_q,
+                    free_joint_ctx.body_qd,
+                    free_joint_ctx.body_com,
+                    free_joint_ctx.joint_parent,
+                    free_joint_ctx.joint_child,
+                    free_joint_ctx.joint_X_p,
+                    free_joint_ctx.joint_X_c,
+                    free_joint_ctx.joint_q_start,
+                    free_joint_ctx.joint_qd_start,
+                ],
+                outputs=[joint_q_out, joint_qd_out],
+                device=device,
+            )
 
     def read_pre_advance(self) -> None:
         """Snapshot ``angle`` / ``distance`` into ``joint_position``.

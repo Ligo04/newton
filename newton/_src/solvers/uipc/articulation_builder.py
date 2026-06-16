@@ -39,7 +39,7 @@ from newton._src.solvers.uipc.utils import _view_attr
 
 from ...math import normalize_with_norm
 from ...sim import Control, JointType, Model, State
-from .articulation import Articulation
+from .articulation import Articulation, FreeJointReadbackContext
 from .converter import UIpcMappingInfo, newton_transform_to_mat4
 
 
@@ -306,6 +306,11 @@ class ArticulationBuilder:
             self._build_ball_joints_batch(ball_joints, model)
         applied_free_joint_geometry_ids: set[int] = set()
         for jdata in free_joints:
+            # Register for body-state readback (FREE joints are not active, so
+            # the finite-difference readback path skips them).
+            if jdata["child_body"] >= 0:
+                jdata["art"].register_free_joint(int(jdata["j"]))
+
             geometry = jdata["child_slot"].geometry()
             geometry_id = id(geometry)
             if geometry_id in applied_free_joint_geometry_ids:
@@ -1164,7 +1169,14 @@ class ArticulationBuilder:
                 art.read_post_retrieve()
 
     def write_joint_readback(self, state_out: State) -> None:
-        """Write cached joint readback values to Newton state arrays.
+        """Write joint readback values to Newton state arrays.
+
+        Handles both active (driven) joints and FREE joints. Active joints get
+        their values from the animator finite-difference cache; FREE joints —
+        realized as soft transform constraints rather than active joints — have
+        their joint_q[0:7] / joint_qd[0:6] recovered from the UIPC-integrated
+        body state so IsaacLab consumers reading a floating root pose from
+        joint_q see the motion (mjwarp does this natively; UIPC does not).
 
         Args:
             state_out: The output state to write joint positions and
@@ -1184,9 +1196,12 @@ class ArticulationBuilder:
         joint_q = state_out.joint_q.to(self._device)
         joint_qd = state_out.joint_qd.to(self._device) if state_out.joint_qd is not None else None
 
+        # Shared by every articulation; None when no FREE joints are present.
+        free_joint_ctx = self._build_free_joint_context(state_out, joint_qd)
+
         for art in self.articulations.values():
-            if art.num_active_joints > 0:
-                art.write_readback(joint_q, joint_qd)
+            if art.num_active_joints > 0 or art.num_free_joints > 0:
+                art.write_readback(joint_q, joint_qd, free_joint_ctx)
 
         # If .to() returned a fresh allocation (i.e. the original lived
         # on a different device) propagate the result back.
@@ -1194,6 +1209,49 @@ class ArticulationBuilder:
             wp.copy(state_out.joint_q, joint_q)
         if joint_qd is not None and state_out.joint_qd is not None and joint_qd is not state_out.joint_qd:
             wp.copy(state_out.joint_qd, joint_qd)
+
+    def _build_free_joint_context(
+        self,
+        state_out: State,
+        joint_qd: wp.array | None,
+    ) -> FreeJointReadbackContext | None:
+        """Assemble device-side arrays for FREE-joint readback, or ``None``.
+
+        Returns ``None`` when no articulation owns a FREE joint, velocities are
+        unavailable, or any required body/joint array is missing — in which
+        case FREE readback is skipped.
+        """
+        if joint_qd is None:
+            return None
+        if not any(art.num_free_joints > 0 for art in self.articulations.values()):
+            return None
+
+        model = self._model
+        body_q = state_out.body_q
+        body_qd = state_out.body_qd
+        if body_q is None or body_qd is None or model.body_com is None:
+            return None
+        if (
+            model.joint_parent is None
+            or model.joint_child is None
+            or model.joint_X_p is None
+            or model.joint_X_c is None
+            or model.joint_q_start is None
+            or model.joint_qd_start is None
+        ):
+            return None
+
+        return FreeJointReadbackContext(
+            body_q=body_q.to(self._device),
+            body_qd=body_qd.to(self._device),
+            body_com=model.body_com.to(self._device),
+            joint_parent=model.joint_parent.to(self._device),
+            joint_child=model.joint_child.to(self._device),
+            joint_X_p=model.joint_X_p.to(self._device),
+            joint_X_c=model.joint_X_c.to(self._device),
+            joint_q_start=model.joint_q_start.to(self._device),
+            joint_qd_start=model.joint_qd_start.to(self._device),
+        )
 
     def increment_step(self) -> None:
         """Increment the step counter on all articulations."""
