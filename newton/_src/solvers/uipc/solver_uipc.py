@@ -31,13 +31,16 @@ from uipc.stats import SimulationStats as USimulationStats
 from uipc.unit import GPa
 
 import newton
-from newton._src.solvers.uipc.utils import _view_attr
+from newton import BodyFlags, Contacts, Control, JointType, Model, ModelBuilder, State
 
-from ...core.types import override
-from ...sim import Contacts, Control, Model, ModelBuilder, State
-from ...sim.enums import BodyFlags, JointType
 from ..flags import SolverNotifyFlags
 from ..solver import SolverBase
+from .utils import _view_attr
+
+try:
+    from typing import override
+except ImportError:  # Python < 3.12
+    from typing_extensions import override
 from .articulation_builder import ArticulationBuilder
 from .cloth import ClothBuilder
 from .contact_forces import (

@@ -20,9 +20,8 @@ import warp as wp
 from uipc.core import ContactSystemFeature
 from uipc.geometry import Geometry
 
-from newton._src.solvers.uipc.utils import _view_attr
-
 from .converter import UIpcMappingInfo
+from .utils import _view_attr
 
 PRIMITIVE_TYPES: tuple[str, ...] = ("PH", "PP", "PE", "PT", "EE")
 FORCE_CHANNELS: tuple[str, ...] = ("N", "F")

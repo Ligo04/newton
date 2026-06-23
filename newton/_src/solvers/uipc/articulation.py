@@ -18,10 +18,20 @@ import warp as wp
 from uipc.core import Animation
 from uipc.geometry import SimplicialComplex, SimplicialComplexSlot
 
-from newton._src.solvers.uipc.utils import _view_attr
+from newton import JointTargetMode, JointType
+from newton.math import velocity_at_point
 
-from ...sim import JointTargetMode, JointType
-from ...sim.articulation import com_twist_to_point_velocity
+from .utils import _view_attr
+
+
+@wp.func
+def com_twist_to_point_velocity(qd: wp.spatial_vector, X_wb: wp.transform, body_com: wp.vec3, point: wp.vec3):
+    """Evaluate a point velocity from a COM-referenced body twist.
+
+    Local copy of Newton's COM-twist point-velocity helper so the UIPC backend
+    depends only on the public :func:`newton.math.velocity_at_point`.
+    """
+    return velocity_at_point(qd, point - wp.transform_point(X_wb, body_com))
 
 
 @dataclass
@@ -133,9 +143,9 @@ def _free_joint_readback_kernel(
 
     FREE joints are soft transform constraints, not active joints, so the
     finite-difference readback in :meth:`Articulation.write_readback` cannot
-    reach them. Mirrors the FREE branch of
-    :func:`newton._src.sim.articulation.eval_articulation_ik` (linear velocity
-    referenced at the child COM, expressed in the joint parent frame).
+    reach them. Mirrors the FREE branch of Newton's articulation IK readback
+    (linear velocity referenced at the child COM, expressed in the joint parent
+    frame).
     """
     tid = wp.tid()
     joint_idx = free_joint_indices[tid]

@@ -14,10 +14,10 @@ from uipc.core import ContactElement, SubsceneElement
 from uipc.geometry import flip_inward_triangles, label_surface, label_triangle_orient, mesh_partition
 from uipc.geometry import tetmesh as uipc_tetmesh
 
-from newton._src.solvers.uipc.utils import _view_attr
+from newton import Model
 
-from ...sim import Model
 from .converter import UIpcMappingInfo
+from .utils import _view_attr
 
 
 class DeformableBodyBuilder:

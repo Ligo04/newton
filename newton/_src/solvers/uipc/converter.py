@@ -17,10 +17,7 @@ from uipc import Quaternion, Transform
 from uipc.geometry import IAttributeSlot, SimplicialComplex, SimplicialComplexSlot, is_trimesh_closed
 from uipc.geometry import trimesh as uipc_trimesh
 
-from ...core.types import Axis
-from ...geometry import GeoType, Mesh
-from ...geometry.flags import ShapeFlags
-from ...sim import Model
+from newton import Axis, GeoType, Mesh, Model, ShapeFlags
 
 # ---------------------------------------------------------------------------
 # Warp kernels for batch transform conversion

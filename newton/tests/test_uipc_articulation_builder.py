@@ -159,6 +159,7 @@ class TestUIPCArticulationBuilder(unittest.TestCase):
             joint_qd_start = _Array([0])
             joint_q_start = _Array([0])
             joint_q = None
+            joint_target_ke = _Array([0.0])
             joint_limit_lower = _Array([-0.5])
             joint_limit_upper = _Array([0.5])
             joint_limit_ke = _Array([limit_ke])

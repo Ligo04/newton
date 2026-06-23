@@ -35,12 +35,12 @@ from uipc.core import Animation, Object
 from uipc.geometry import SimplicialComplex, SimplicialComplexSlot
 from uipc.unit import MPa
 
-from newton._src.solvers.uipc.utils import _view_attr
+from newton import Control, JointType, Model, State
+from newton.math import normalize_with_norm
 
-from ...math import normalize_with_norm
-from ...sim import Control, JointType, Model, State
 from .articulation import Articulation, FreeJointReadbackContext
 from .converter import UIpcMappingInfo, newton_transform_to_mat4
+from .utils import _view_attr
 
 
 class ArticulationBuilder:

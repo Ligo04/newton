@@ -16,16 +16,15 @@ from uipc.core import ContactElement, SubsceneElement
 from uipc.geometry import affine_body as uipc_affine_body
 from uipc.geometry import halfplane, label_surface
 
-from newton._src.solvers.uipc.utils import _view_attr
+from newton import BodyFlags, GeoType, Model
 
-from ...geometry import GeoType
-from ...sim import BodyFlags, Model
 from .converter import (
     UIpcMappingInfo,
     _transform_to_mat44_kernel,
     build_body_mesh,
     newton_transform_to_mat4,
 )
+from .utils import _view_attr
 
 
 @dataclass

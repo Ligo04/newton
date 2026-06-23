@@ -20,10 +20,10 @@ from uipc.core import ContactElement, SubsceneElement
 from uipc.geometry import is_trimesh_closed, label_surface, mesh_partition
 from uipc.geometry import trimesh as uipc_trimesh
 
-from newton._src.solvers.uipc.utils import _view_attr
+from newton import Model
 
-from ...sim import Model
 from .converter import UIpcMappingInfo
+from .utils import _view_attr
 
 
 class ClothBuilder:
