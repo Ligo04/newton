@@ -1554,26 +1554,49 @@ class SolverUIPC(SolverBase):
         if not self._initialized:
             return
         model = self.model
+        # StateFlags is an IntEnum (not IntFlag), so combinations like
+        # PARTICLE_Q | PARTICLE_QD (48) are not canonical members; keep flags as
+        # a plain int and rely on bitwise tests below.
         flags = int(StateFlags.ALL) if flags is None else int(flags)
 
-        def _rows_for_world(world_index_host: np.ndarray) -> np.ndarray | None:
-            if world_mask is None:
-                return None
+        # Host bool view of the world mask, computed once and reused.
+        mask_host = None
+        if world_mask is not None:
             mask_host = (world_mask.numpy() if isinstance(world_mask, wp.array) else np.asarray(world_mask)).astype(
                 bool
             )
+
+        def _rows_for_world(world_index_host: np.ndarray) -> np.ndarray | None:
+            if mask_host is None:
+                return None
             return np.nonzero(mask_host[world_index_host])[0].astype(np.int64)
 
         # --- rigid bodies ---
         mapping = self.mapping
         if mapping.num_mapped_bodies > 0 and mapping.body_geo_slots and model.body_world is not None:
-            if getattr(self, "_mapped_body_world", None) is None:
+            if self._mapped_body_world is None:
                 self._mapped_body_world = model.body_world.numpy()[mapping.body_indices_wp.numpy()]
             rows = _rows_for_world(self._mapped_body_world)
             if rows is None or rows.size > 0:
-                do_fk = bool(flags & (StateFlags.JOINT_Q | StateFlags.JOINT_QD)) and not bool(flags & StateFlags.BODY_Q)
-                if do_fk and state.joint_q is not None:
-                    newton.eval_fk(model, state.joint_q, state.joint_qd, state)
+                # Only run FK from joint coords when joints are the source (a
+                # JOINT flag set and BODY_Q not) and both joint arrays exist;
+                # otherwise eval_fk would clobber the caller's body_q (or crash
+                # on a None joint_qd).
+                do_fk = (
+                    bool(flags & (StateFlags.JOINT_Q | StateFlags.JOINT_QD))
+                    and not bool(flags & StateFlags.BODY_Q)
+                    and state.joint_q is not None
+                    and state.joint_qd is not None
+                )
+                if do_fk:
+                    # Restrict FK to masked worlds via a per-articulation mask so
+                    # non-masked worlds' state.body_q is not silently recomputed.
+                    articulation_mask = None
+                    if mask_host is not None and model.articulation_world is not None:
+                        aw = model.articulation_world.numpy()
+                        articulation_sel = np.where(aw >= 0, mask_host[np.clip(aw, 0, None)], False)
+                        articulation_mask = wp.array(articulation_sel, dtype=wp.bool, device=model.device)
+                    newton.eval_fk(model, state.joint_q, state.joint_qd, state, mask=articulation_mask)
                 write_transform = bool(flags & StateFlags.BODY_Q) or do_fk
                 write_velocity = bool(flags & StateFlags.BODY_QD) or do_fk
                 if write_transform or write_velocity:
@@ -1594,7 +1617,7 @@ class SolverUIPC(SolverBase):
             and model.particle_world is not None
             and bool(flags & (StateFlags.PARTICLE_Q | StateFlags.PARTICLE_QD))
         ):
-            if getattr(self, "_mapped_particle_world", None) is None:
+            if self._mapped_particle_world is None:
                 self._mapped_particle_world = model.particle_world.numpy()[self._fem_particle_indices_wp.numpy()]
             rows = _rows_for_world(self._mapped_particle_world)
             if rows is None or rows.size > 0:
