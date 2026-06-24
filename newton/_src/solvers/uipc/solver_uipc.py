@@ -1535,30 +1535,33 @@ class SolverUIPC(SolverBase):
         self.world.retrieve()
         self._raise_if_sanity_check_failed()
 
-    def _sync_body_state_to_uipc(self, *, check_sanity: bool = True) -> None:
-        """Push ``model.body_q`` / ``model.body_qd`` into the UIPC backend.
+    def _sync_body_state_to_uipc(
+        self,
+        *,
+        body_q: wp.array | None = None,
+        body_qd: wp.array | None = None,
+        selected_rows: np.ndarray | None = None,
+        write_transform: bool = True,
+        write_velocity: bool = True,
+        check_sanity: bool = True,
+    ) -> None:
+        """Push body transforms / velocities into the UIPC backend.
 
-        Uses Warp kernels to build the 4x4 transform / velocity matrices
-        on-device in one batched launch, then scatters them into a *single*
-        master state geometry that covers every ABD body in the scene
-        (``backend_abd_body_offset=0``, ``instances.size()=body_count()``).
-        A single ``AffineBodyStateAccessorFeature.copy_from`` then pushes
-        the full state back — which triggers exactly **one**
-        ``update_dof_attributes`` resync on the UIPC side instead of one
-        per geometry slot.
-
-        The master geometry is cached lazily on the first call.  Bodies
-        not mapped by Newton (e.g. ground planes, static colliders) are
-        preserved exactly: ``copy_to`` seeds the master geo with the
-        current UIPC state, and those rows are left untouched before the
-        push.
+        Args default to ``model.body_q`` / ``model.body_qd`` and all mapped
+        rows, preserving the original notify behavior.  ``selected_rows`` is an
+        array of row indices into the mapped-body arrays (``[0, n)``); only
+        those rows are scattered, so non-selected bodies keep their current
+        live UIPC pose (the ``copy_to`` seed).  ``write_transform`` /
+        ``write_velocity`` gate which attribute is overwritten.
         """
         mapping = self.mapping
         if mapping.num_mapped_bodies == 0 or not mapping.body_geo_slots:
             return
 
         model = self.model
-        if model.body_q is None:
+        src_q = model.body_q if body_q is None else body_q
+        src_qd = model.body_qd if body_qd is None else body_qd
+        if src_q is None:
             return
         assert mapping.body_indices_wp is not None
         assert mapping.backend_offsets_wp is not None
@@ -1568,35 +1571,22 @@ class SolverUIPC(SolverBase):
         n = mapping.num_mapped_bodies
         device = model.device
 
-        # Batch-convert every mapped body's transform (and velocity, if
-        # available) into UIPC's 4x4 mat64 layout on-device. The same
-        # ``_abd_transform_buf`` / ``_abd_velocity_buf`` pool used by the
-        # read-back path is re-purposed for this write direction to
-        # avoid an extra allocation.
         wp.launch(
             _transform_to_mat44_kernel,
             dim=n,
-            inputs=[model.body_q, mapping.body_indices_wp, self._abd_transform_buf.warp()],
+            inputs=[src_q, mapping.body_indices_wp, self._abd_transform_buf.warp()],
             device=device,
         )
-        if model.body_qd is not None:
+        if write_velocity and src_qd is not None:
             wp.launch(
                 _spatial_to_vel_mat44_kernel,
                 dim=n,
-                inputs=[
-                    model.body_qd,
-                    model.body_q,
-                    mapping.body_indices_wp,
-                    self._abd_velocity_buf.warp(),
-                ],
+                inputs=[src_qd, src_q, mapping.body_indices_wp, self._abd_velocity_buf.warp()],
                 device=device,
             )
         else:
             self._abd_velocity_buf.warp().zero_()
 
-        # Single device→host sync: the kernels above write rows [0, n) of
-        # the shared buffer (dim=n, indexed by tid), so slice to drop the
-        # stale tail used by the non-contiguous read-back path.
         transforms_host = self._abd_transform_buf.warp().numpy()[:n]
         velocities_host = self._abd_velocity_buf.warp().numpy()[:n]
 
@@ -1629,10 +1619,11 @@ class SolverUIPC(SolverBase):
         transform_view = transform_attr.view()
         velocity_view = velocity_attr.view() if velocity_attr is not None else None
 
-        # Vectorised scatter: write all mapped rows in one shot.
-        transform_view[offsets_np] = transforms_host
-        if velocity_view is not None:
-            velocity_view[offsets_np] = velocities_host
+        rows = slice(None) if selected_rows is None else selected_rows
+        if write_transform:
+            transform_view[offsets_np[rows]] = transforms_host[rows]
+        if velocity_view is not None and write_velocity:
+            velocity_view[offsets_np[rows]] = velocities_host[rows]
 
         # Single push into UIPC — triggers one `update_dof_attributes`.
         self._abd_accessor.copy_from(state_geo)
