@@ -1676,7 +1676,16 @@ class SolverUIPC(SolverBase):
         position_attr = state_geo.vertices().find("position")
         assert position_attr is not None
         position_view = _view_attr(position_attr)
-        cols = slice(None) if selected_rows is None else selected_rows
+
+        # The FEM kernels scatter `dst[backend_idx] = src[particle_idx]`, so the
+        # buffers and the view are backend-vertex ordered with the vertex axis
+        # first: `position_view` is `[backend_vertex_count, 3, 1]` and
+        # `positions_host` is `[backend_vertex_count, 3]`. `selected_rows` are
+        # compact mapped-vertex indices; translate to backend slots via the
+        # cached backend offsets (mirroring the body path's `offsets_np[rows]`).
+        if getattr(self, "_fem_backend_offsets_host", None) is None:
+            self._fem_backend_offsets_host = self._fem_backend_offsets_wp.numpy().astype(np.int64, copy=False)
+        rows = slice(None) if selected_rows is None else self._fem_backend_offsets_host[selected_rows]
 
         if write_velocity and src_qd is not None and self._fem_velocity_buf is not None:
             velocity_attr = state_geo.vertices().find("velocity")
@@ -1698,8 +1707,8 @@ class SolverUIPC(SolverBase):
             positions_host = self._fem_position_buf.warp().numpy()
             velocities_host = self._fem_velocity_buf.warp().numpy()
             if write_position:
-                position_view[:, cols, 0] = positions_host[:, cols]
-            velocity_view[:, cols, 0] = velocities_host[:, cols]
+                position_view[rows, :, 0] = positions_host[rows]
+            velocity_view[rows, :, 0] = velocities_host[rows]
         else:
             wp.launch(
                 _write_fem_particle_positions_to_backend_kernel,
@@ -1714,7 +1723,7 @@ class SolverUIPC(SolverBase):
             )
             positions_host = self._fem_position_buf.warp().numpy()
             if write_position:
-                position_view[:, cols, 0] = positions_host[:, cols]
+                position_view[rows, :, 0] = positions_host[rows]
 
         self._fem_accessor.copy_from(state_geo)
         if check_sanity:
