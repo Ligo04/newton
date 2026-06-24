@@ -147,6 +147,14 @@ class SolverUIPC(SolverBase):
 
     _uipc = None
 
+    CONTACTS_PER_ENV: int = 1024
+    """Per-environment contact budget for :meth:`get_max_contact_count`.
+
+    Used to estimate the reported :class:`~newton.Contacts` capacity when
+    ``rigid_contact_max`` is not given: the estimate is this value times
+    ``Model.num_envs`` (mirroring MuJoCo's ``nconmax`` times the world count).
+    """
+
     @override
     @classmethod
     def register_custom_attributes(cls, builder: ModelBuilder) -> None:
@@ -249,6 +257,7 @@ class SolverUIPC(SolverBase):
         auto_sync_inertia: bool = True,
         cloth_soft_position_strength_ratio: float = 100.0,
         enable_soft_position_constraint: bool = True,
+        rigid_contact_max: int | None = None,
     ):
         """Create a UIPC solver instance from a Newton model.
 
@@ -294,6 +303,12 @@ class SolverUIPC(SolverBase):
             enable_soft_position_constraint: Whether to add dormant UIPC
                 ``SoftPositionConstraint`` attributes to cloth and deformable
                 vertices.
+            rigid_contact_max: Capacity of the :class:`~newton.Contacts` buffer
+                reported by :meth:`get_max_contact_count` for contact-sensor
+                reporting. UIPC detects collisions internally and has no fixed
+                contact-buffer size, so when ``None`` (default) the capacity is
+                estimated as :attr:`CONTACTS_PER_ENV` times ``Model.num_envs``.
+                Set an explicit value to override for dense-contact scenes.
         """
         super().__init__(model=model)
         self.import_uipc()
@@ -312,6 +327,7 @@ class SolverUIPC(SolverBase):
         self._dump_enable = dump_enable
         self._cloth_soft_position_strength_ratio = cloth_soft_position_strength_ratio
         self._enable_soft_position_constraint = enable_soft_position_constraint
+        self._rigid_contact_max = rigid_contact_max
 
         # Scene config: start from UIPC defaults, apply Newton model overrides.
         if scene_config is None:
@@ -1706,6 +1722,21 @@ class SolverUIPC(SolverBase):
         raise RuntimeError(
             f"SolverUIPC: UIPC sanity check reported {result.name} after pushing state into UIPC: {report}"
         )
+
+    def get_max_contact_count(self) -> int:
+        """Return the :class:`~newton.Contacts` capacity for contact-sensor reporting.
+
+        UIPC detects collisions internally, so there is no fixed contact-buffer
+        size as there is for solvers driving Newton's collision pipeline. The
+        returned value is the ``rigid_contact_max`` passed at construction, or
+        :attr:`CONTACTS_PER_ENV` times ``Model.num_envs`` when that was ``None``.
+        Contacts reported beyond this capacity by :meth:`update_contacts` are
+        dropped.
+        """
+        if self._rigid_contact_max is not None:
+            return self._rigid_contact_max
+        num_envs = max(int(getattr(self.model, "num_envs", 0) or 0), 1)
+        return self.CONTACTS_PER_ENV * num_envs
 
     @override
     def update_contacts(self, contacts: Contacts, state: State | None = None) -> None:

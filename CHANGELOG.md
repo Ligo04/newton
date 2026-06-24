@@ -11,6 +11,7 @@
 - Add per-range `uipc:cloth_model` and `uipc:deformable_model` custom attributes so UIPC cloth and soft bodies can select constitutions while retaining their existing defaults.
 - Add mimic joint support to `SolverUIPC`: follower joints track `coef0 + coef1 * leader` via position driving (soft coupling); follower and leader must both be active revolute/prismatic joints.
 - Add `--enable-contact` / `--no-enable-contact` to `uipc_brick_stacking` so UIPC contact can be disabled while remaining enabled by default.
+- Add `SolverUIPC.get_max_contact_count()` and a `rigid_contact_max` constructor argument so a `Contacts` buffer can be sized for `SensorContact` reporting; when `rigid_contact_max` is `None` the capacity defaults to `SolverUIPC.CONTACTS_PER_ENV` times `Model.num_envs`.
 - Add UIPC cloth poker-cards demo with stacked card patches, UIPC cloth self-contact, and a dynamic soft-transform sphere knock-off.
 - Add `newton.use_coord_layout_targets` opt-in flag exposing `Model.joint_target_q` / `Control.joint_target_q` shaped `(joint_coord_count,)` (matching `joint_q`) and `joint_target_qd` shaped `(joint_dof_count,)` (matching `joint_qd`); solvers, the actuator library, and `ModelBuilder.finalize()` honor the flag. Defaults to `False` for backwards compatibility; will flip in a future release.
 - Add `cloth_stiff_material_hanging` and `cloth_stiff_material_stretch` examples regression-guarding the new Neo-Hookean triangle material (stability under gravity at extreme stiffness, and bulk area-preservation across a Poisson-ratio sweep)
@@ -35,6 +36,7 @@
 
 ### Fixed
 
+- Fix `example_uipc_sensor_contact` using the deprecated `SensorContact(sensing_obj_shapes=...)` keyword; it now passes `sensing_shapes=...`.
 - Fix `SolverVBD` rigid contact injecting kinetic energy for yawed finite-radius contacts (e.g. small-radius cables blowing up). The normal response now acts at the geometric skeleton point rather than the rotating surface anchor, which was non-conservative under reorientation; friction still uses the surface anchor to preserve finite-radius slip. (#3125)
 - Fix `SolverKamino` contact filtering and constraint stabilization so gap/margin contacts are handled consistently, positive-distance contacts can be filtered as configured, and converted contact forces/wrenches populate matching Newton contact slots for `SensorContact`. (#2908)
 - Fix `newton.eval_jacobian`, `SolverFeatherstone`, and the IK analytic Jacobian building `JointType.D6` angular motion-subspace columns from raw axes, so `J @ joint_qd` now matches `State.body_qd` for two- or three-angular-DOF joints at non-identity configurations.

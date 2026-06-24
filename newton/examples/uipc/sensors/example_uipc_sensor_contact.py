@@ -81,7 +81,7 @@ class Example:
 
         self.contact_sensor = SensorContact(
             self.model,
-            sensing_obj_shapes=["shape_bottom"],
+            sensing_shapes=["shape_bottom"],
             counterpart_shapes=["ground_plane", "shape_top"],
             verbose=True,
         )
