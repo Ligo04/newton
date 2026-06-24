@@ -31,7 +31,7 @@ from uipc.stats import SimulationStats as USimulationStats
 from uipc.unit import GPa
 
 import newton
-from newton import BodyFlags, Contacts, Control, JointType, Model, ModelBuilder, State
+from newton import BodyFlags, Contacts, Control, JointType, Model, ModelBuilder, State, StateFlags
 
 from ..flags import SolverNotifyFlags
 from ..solver import SolverBase
@@ -318,6 +318,10 @@ class SolverUIPC(SolverBase):
         self._dt = dt
         self._step_count = 0
         self._initialized = False
+
+        # Lazily filled per-mapped-world host caches used by reset().
+        self._mapped_body_world = None
+        self._mapped_particle_world = None
 
         # Store construction parameters for deferred init
         self._backend = backend
@@ -1527,6 +1531,81 @@ class SolverUIPC(SolverBase):
             [float(gravity_np[1])],
             [float(gravity_np[2])],
         ]
+
+    def reset(
+        self,
+        state: State,
+        world_mask: wp.array | None = None,
+        flags: StateFlags | int | None = None,
+    ) -> None:
+        """Re-push masked-world state into the live UIPC scene without rebuild.
+
+        Overwrites only the bodies/particles belonging to the worlds selected
+        by *world_mask* with the poses in *state*, leaving every other world at
+        its current simulated configuration.  See
+        :meth:`~newton.solvers.SolverBase.reset` for argument semantics.
+
+        Note:
+            After a body push UIPC's internal revolute/prismatic angle tracker
+            lags by one step; read :attr:`Model.joint_q` rather than
+            ``state.joint_q`` for articulated bodies until the next
+            :meth:`step`.
+        """
+        if not self._initialized:
+            return
+        model = self.model
+        flags = int(StateFlags.ALL) if flags is None else int(flags)
+
+        def _rows_for_world(world_index_host: np.ndarray) -> np.ndarray | None:
+            if world_mask is None:
+                return None
+            mask_host = (world_mask.numpy() if isinstance(world_mask, wp.array) else np.asarray(world_mask)).astype(
+                bool
+            )
+            return np.nonzero(mask_host[world_index_host])[0].astype(np.int64)
+
+        # --- rigid bodies ---
+        mapping = self.mapping
+        if mapping.num_mapped_bodies > 0 and mapping.body_geo_slots and model.body_world is not None:
+            if getattr(self, "_mapped_body_world", None) is None:
+                self._mapped_body_world = model.body_world.numpy()[mapping.body_indices_wp.numpy()]
+            rows = _rows_for_world(self._mapped_body_world)
+            if rows is None or rows.size > 0:
+                do_fk = bool(flags & (StateFlags.JOINT_Q | StateFlags.JOINT_QD)) and not bool(flags & StateFlags.BODY_Q)
+                if do_fk and state.joint_q is not None:
+                    newton.eval_fk(model, state.joint_q, state.joint_qd, state)
+                write_transform = bool(flags & StateFlags.BODY_Q) or do_fk
+                write_velocity = bool(flags & StateFlags.BODY_QD) or do_fk
+                if write_transform or write_velocity:
+                    self._sync_body_state_to_uipc(
+                        body_q=state.body_q,
+                        body_qd=state.body_qd,
+                        selected_rows=rows,
+                        write_transform=write_transform,
+                        write_velocity=write_velocity,
+                        check_sanity=True,
+                    )
+
+        # --- FEM particles ---
+        if (
+            self._fem_accessor is not None
+            and self._fem_mapped_vertex_count > 0
+            and self._fem_particle_indices_wp is not None
+            and model.particle_world is not None
+            and bool(flags & (StateFlags.PARTICLE_Q | StateFlags.PARTICLE_QD))
+        ):
+            if getattr(self, "_mapped_particle_world", None) is None:
+                self._mapped_particle_world = model.particle_world.numpy()[self._fem_particle_indices_wp.numpy()]
+            rows = _rows_for_world(self._mapped_particle_world)
+            if rows is None or rows.size > 0:
+                self._sync_particle_state_to_uipc(
+                    particle_q=state.particle_q,
+                    particle_qd=state.particle_qd,
+                    selected_rows=rows,
+                    write_position=bool(flags & StateFlags.PARTICLE_Q),
+                    write_velocity=bool(flags & StateFlags.PARTICLE_QD),
+                    check_sanity=True,
+                )
 
     def _sync_state_to_uipc(self) -> None:
         """Push Newton-owned body and FEM particle state into UIPC."""

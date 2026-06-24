@@ -139,9 +139,10 @@ class TestUIPCReset(unittest.TestCase):
                     state_0, state_1 = state_1, state_0
                     post = state_0.particle_q.numpy()
 
-                    # World 0 jumped ~1 m higher than before; world 1 essentially unchanged.
+                    # World 0 jumped ~1 m higher than before; world 1 was not reset
+                    # and only advanced by its own (free-falling) one-step motion.
                     self.assertGreater(post[w0, 2].mean(), pre[w0, 2].mean() + 0.5)
-                    self.assertAlmostEqual(post[w1, 2].mean(), pre[w1, 2].mean(), places=2)
+                    self.assertLess(abs(post[w1, 2].mean() - pre[w1, 2].mean()), 0.05)
                     self.assertTrue(np.all(np.isfinite(post)))
 
 
