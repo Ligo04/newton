@@ -1631,11 +1631,27 @@ class SolverUIPC(SolverBase):
             self.world.retrieve()
             self._raise_if_sanity_check_failed()
 
-    def _sync_particle_state_to_uipc(self, *, check_sanity: bool = True) -> None:
-        """Push Newton FEM particle state into the UIPC backend."""
+    def _sync_particle_state_to_uipc(
+        self,
+        *,
+        particle_q: wp.array | None = None,
+        particle_qd: wp.array | None = None,
+        selected_rows: np.ndarray | None = None,
+        write_position: bool = True,
+        write_velocity: bool = True,
+        check_sanity: bool = True,
+    ) -> None:
+        """Push FEM particle state into the UIPC backend.
+
+        Defaults to ``model.particle_q`` / ``model.particle_qd`` and all mapped
+        vertices.  ``selected_rows`` selects columns into the mapped-vertex
+        arrays; non-selected vertices keep their live UIPC position.
+        """
         model = self.model
+        src_q = model.particle_q if particle_q is None else particle_q
+        src_qd = model.particle_qd if particle_qd is None else particle_qd
         if (
-            model.particle_q is None
+            src_q is None
             or self._fem_accessor is None
             or self._fem_mapped_vertex_count == 0
             or self._fem_backend_vertex_count == 0
@@ -1660,8 +1676,9 @@ class SolverUIPC(SolverBase):
         position_attr = state_geo.vertices().find("position")
         assert position_attr is not None
         position_view = _view_attr(position_attr)
+        cols = slice(None) if selected_rows is None else selected_rows
 
-        if model.particle_qd is not None and self._fem_velocity_buf is not None:
+        if write_velocity and src_qd is not None and self._fem_velocity_buf is not None:
             velocity_attr = state_geo.vertices().find("velocity")
             assert velocity_attr is not None
             velocity_view = _view_attr(velocity_attr)
@@ -1671,8 +1688,8 @@ class SolverUIPC(SolverBase):
                 inputs=[
                     self._fem_backend_offsets_wp,
                     self._fem_particle_indices_wp,
-                    model.particle_q,
-                    model.particle_qd,
+                    src_q,
+                    src_qd,
                     self._fem_position_buf.warp(),
                     self._fem_velocity_buf.warp(),
                 ],
@@ -1680,8 +1697,9 @@ class SolverUIPC(SolverBase):
             )
             positions_host = self._fem_position_buf.warp().numpy()
             velocities_host = self._fem_velocity_buf.warp().numpy()
-            position_view[:, :, 0] = positions_host
-            velocity_view[:, :, 0] = velocities_host
+            if write_position:
+                position_view[:, cols, 0] = positions_host[:, cols]
+            velocity_view[:, cols, 0] = velocities_host[:, cols]
         else:
             wp.launch(
                 _write_fem_particle_positions_to_backend_kernel,
@@ -1689,13 +1707,14 @@ class SolverUIPC(SolverBase):
                 inputs=[
                     self._fem_backend_offsets_wp,
                     self._fem_particle_indices_wp,
-                    model.particle_q,
+                    src_q,
                     self._fem_position_buf.warp(),
                 ],
                 device=model.device,
             )
             positions_host = self._fem_position_buf.warp().numpy()
-            position_view[:, :, 0] = positions_host
+            if write_position:
+                position_view[:, cols, 0] = positions_host[:, cols]
 
         self._fem_accessor.copy_from(state_geo)
         if check_sanity:
