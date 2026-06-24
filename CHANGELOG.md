@@ -10,6 +10,7 @@
 - Add `uipc:abd_kappa` body custom attribute for per-rigid-body UIPC ABD stiffness overrides.
 - Add per-range `uipc:cloth_model` and `uipc:deformable_model` custom attributes so UIPC cloth and soft bodies can select constitutions while retaining their existing defaults.
 - Add mimic joint support to `SolverUIPC`: follower joints track `coef0 + coef1 * leader` via position driving (soft coupling); follower and leader must both be active revolute/prismatic joints.
+- Add `SolverUIPC.reset()` to re-push masked-world body/particle state into the live IPC scene without rebuilding the solver.
 - Add `--enable-contact` / `--no-enable-contact` to `uipc_brick_stacking` so UIPC contact can be disabled while remaining enabled by default.
 - Add `SolverUIPC.get_max_contact_count()` and a `rigid_contact_max` constructor argument so a `Contacts` buffer can be sized for `SensorContact` reporting; when `rigid_contact_max` is `None` the capacity defaults to `SolverUIPC.CONTACTS_PER_ENV` times `Model.num_envs`.
 - Add UIPC cloth poker-cards demo with stacked card patches, UIPC cloth self-contact, and a dynamic soft-transform sphere knock-off.

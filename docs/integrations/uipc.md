@@ -344,6 +344,13 @@ Each call to `SolverUIPC.step` uses the same three-phase cycle:
 `dt` is fixed by the constructor. If the first `step` receives a different
 `dt`, Newton warns; UIPC still uses the constructor-configured time step.
 
+Per-world reset is supported at runtime via
+:meth:`~newton.solvers.SolverUIPC.reset`, which re-pushes the selected worlds'
+rigid-body (and FEM particle) state into the live IPC scene without rebuilding
+the solver. After a body-state push, UIPC's internal revolute/prismatic
+joint-angle tracker lags by one step; read ``Model.joint_q`` rather than
+``State.joint_q`` for articulated bodies until the next ``step``.
+
 ## Runtime model updates
 
 Most model properties are baked into UIPC geometry during initialization. After
