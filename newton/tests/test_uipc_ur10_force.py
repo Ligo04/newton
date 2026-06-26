@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for example_uipc_ur10_force (Coriolis helper + M/bias parity across builder paths)."""
+"""Tests for example_uipc_ur10_force (Coriolis reference + M/bias parity across builder paths)."""
 
 from __future__ import annotations
 
@@ -12,8 +12,39 @@ import warp as wp
 
 import newton
 from newton import JointTargetMode
-from newton.examples.uipc.robot.example_uipc_ur10_force import _compute_coriolis_from_mass_derivatives
 from newton.tests.unittest_utils import USD_AVAILABLE, add_function_test, get_test_devices
+
+
+def _compute_coriolis_from_mass_derivatives(dH_dq: np.ndarray, qd: np.ndarray) -> np.ndarray:
+    """Numpy reference: contract mass-matrix derivatives into Coriolis/centrifugal bias.
+
+    The example assembles this term on-device (see ``_coriolis_add_kernel`` in
+    ``example_uipc_ur10_force``); this host-side Christoffel contraction is the
+    independent reference the parity and unit tests below check against.
+
+    Args:
+        dH_dq: Mass-matrix derivatives where ``dH_dq[k, i, j]`` is ``d H[i, j] / d q[k]``.
+        qd: Generalized velocities [m/s or rad/s], shape ``(dof_count,)``.
+
+    Returns:
+        Coriolis/centrifugal bias forces [N or N·m], shape ``(dof_count,)``.
+    """
+    dH_dq = np.asarray(dH_dq, dtype=np.float32)
+    qd = np.asarray(qd, dtype=np.float32)
+    dof_count = int(qd.shape[0])
+    if dH_dq.shape != (dof_count, dof_count, dof_count):
+        raise ValueError(f"dH_dq shape {dH_dq.shape} must be ({dof_count}, {dof_count}, {dof_count})")
+
+    coriolis = np.zeros(dof_count, dtype=np.float32)
+    for i in range(dof_count):
+        total = 0.0
+        for j in range(dof_count):
+            for k in range(dof_count):
+                christoffel = 0.5 * (dH_dq[k, i, j] + dH_dq[j, i, k] - dH_dq[i, j, k])
+                total += float(christoffel) * float(qd[j]) * float(qd[k])
+        coriolis[i] = total
+    return coriolis
+
 
 # Matches ``example_uipc_ur10_force.Example.HOME_POSE`` (6 revolute DOFs).
 _UR10_HOME = np.array(
