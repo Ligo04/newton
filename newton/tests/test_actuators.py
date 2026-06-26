@@ -1528,6 +1528,105 @@ class TestNeuralActuatorUsdParsing(unittest.TestCase):
         self.assertEqual(parsed.controller_kwargs["model_path"], model_path)
 
 
+@unittest.skipUnless(HAS_USD, "pxr not installed")
+class TestStablePDActuatorUsdParsing(unittest.TestCase):
+    """Verify ``parse_actuator_prim`` maps ``NewtonStablePDControlAPI`` to
+    :class:`ControllerStablePD`, including the StablePD-specific ``numWorlds``
+    construction parameter.
+    """
+
+    def _build_stable_pd_stage(self, *, num_worlds: int | None = None) -> "Usd.Stage":
+        """Minimal in-memory stage with a StablePD actuator on a revolute joint."""
+        from pxr import Sdf
+
+        stage = Usd.Stage.CreateInMemory()
+        world = stage.DefinePrim("/World", "Xform")
+        stage.SetDefaultPrim(world)
+        stage.DefinePrim("/World/PhysicsScene", "PhysicsScene")
+
+        robot = stage.DefinePrim("/World/Robot", "Xform")
+        robot_schemas = Sdf.TokenListOp()
+        robot_schemas.prependedItems = ["PhysicsArticulationRootAPI"]
+        robot.SetMetadata("apiSchemas", robot_schemas)
+
+        base = stage.DefinePrim("/World/Robot/Base", "Xform")
+        base_schemas = Sdf.TokenListOp()
+        base_schemas.prependedItems = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+        base.SetMetadata("apiSchemas", base_schemas)
+        base.CreateAttribute("physics:mass", Sdf.ValueTypeNames.Float).Set(1.0)
+        base.CreateAttribute("physics:kinematicEnabled", Sdf.ValueTypeNames.Bool).Set(True)
+
+        link1 = stage.DefinePrim("/World/Robot/Link1", "Xform")
+        link1_schemas = Sdf.TokenListOp()
+        link1_schemas.prependedItems = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+        link1.SetMetadata("apiSchemas", link1_schemas)
+        link1.CreateAttribute("physics:mass", Sdf.ValueTypeNames.Float).Set(0.5)
+
+        joint = stage.DefinePrim("/World/Robot/Joint1", "PhysicsRevoluteJoint")
+        joint_schemas = Sdf.TokenListOp()
+        joint_schemas.prependedItems = ["PhysicsDriveAPI:angular"]
+        joint.SetMetadata("apiSchemas", joint_schemas)
+        joint.CreateRelationship("physics:body0").SetTargets([Sdf.Path("/World/Robot/Base")])
+        joint.CreateRelationship("physics:body1").SetTargets([Sdf.Path("/World/Robot/Link1")])
+        joint.CreateAttribute("physics:axis", Sdf.ValueTypeNames.Token).Set("Z")
+
+        act = stage.DefinePrim("/World/Robot/StablePDActuator", "NewtonActuator")
+        act_schemas = Sdf.TokenListOp()
+        act_schemas.prependedItems = ["NewtonStablePDControlAPI", "NewtonMaxEffortClampingAPI"]
+        act.SetMetadata("apiSchemas", act_schemas)
+        act.CreateRelationship("newton:targets").SetTargets([Sdf.Path("/World/Robot/Joint1")])
+        act.CreateAttribute("newton:kp", Sdf.ValueTypeNames.Float).Set(300.0)
+        act.CreateAttribute("newton:kd", Sdf.ValueTypeNames.Float).Set(30.0)
+        act.CreateAttribute("newton:maxEffort", Sdf.ValueTypeNames.Float).Set(75.0)
+        if num_worlds is not None:
+            act.CreateAttribute("newton:numWorlds", Sdf.ValueTypeNames.Int).Set(num_worlds)
+
+        return stage
+
+    def test_parse_stable_pd_from_usd(self):
+        """NewtonStablePDControlAPI resolves to ControllerStablePD with its params."""
+        stage = self._build_stable_pd_stage()
+        prim = stage.GetPrimAtPath("/World/Robot/StablePDActuator")
+
+        parsed = parse_actuator_prim(prim)
+        self.assertIsNotNone(parsed)
+        self.assertIsInstance(parsed, ActuatorParsed)
+        self.assertEqual(parsed.controller_class, ControllerStablePD)
+        self.assertAlmostEqual(parsed.controller_kwargs["kp"], 300.0)
+        self.assertAlmostEqual(parsed.controller_kwargs["kd"], 30.0)
+        self.assertEqual(parsed.target_path, "/World/Robot/Joint1")
+
+        self.assertEqual(len(parsed.component_specs), 1)
+        cls, kwargs = parsed.component_specs[0]
+        self.assertEqual(cls, ClampingMaxEffort)
+        self.assertAlmostEqual(kwargs["max_effort"], 75.0)
+
+    def test_parse_stable_pd_num_worlds(self):
+        """Authored newton:numWorlds flows through to the controller kwargs."""
+        stage = self._build_stable_pd_stage(num_worlds=4)
+        prim = stage.GetPrimAtPath("/World/Robot/StablePDActuator")
+
+        parsed = parse_actuator_prim(prim)
+        self.assertEqual(parsed.controller_class, ControllerStablePD)
+        self.assertEqual(parsed.controller_kwargs["num_worlds"], 4)
+
+    def test_finalize_stable_pd_from_usd(self):
+        """Full parse_usd path builds a ControllerStablePD actuator after finalize."""
+        stage = self._build_stable_pd_stage()
+        builder = newton.ModelBuilder()
+        result = parse_usd(builder, stage.GetRootLayer().identifier)
+        self.assertEqual(result["actuator_count"], 1)
+
+        model = builder.finalize()
+        self.assertEqual(len(model.actuators), 1)
+        act = model.actuators[0]
+        self.assertIsInstance(act.controller, ControllerStablePD)
+        self.assertAlmostEqual(act.controller.kp.numpy()[0], 300.0, places=3)
+        self.assertAlmostEqual(act.controller.kd.numpy()[0], 30.0, places=3)
+        self.assertIsInstance(act.clamping[0], ClampingMaxEffort)
+        self.assertAlmostEqual(act.clamping[0].max_effort.numpy()[0], 75.0, places=3)
+
+
 # ---------------------------------------------------------------------------
 # 9. target_pos_indices separation from pos_indices
 # ---------------------------------------------------------------------------

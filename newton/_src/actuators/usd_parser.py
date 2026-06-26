@@ -13,7 +13,14 @@ from typing import Any
 from newton._src.usd.utils import _resolve_asset_path, get_applied_api_schemas
 
 from .clamping import Clamping, ClampingDCMotor, ClampingMaxEffort, ClampingPositionBased
-from .controllers import Controller, ControllerNeuralLSTM, ControllerNeuralMLP, ControllerPD, ControllerPID
+from .controllers import (
+    Controller,
+    ControllerNeuralLSTM,
+    ControllerNeuralMLP,
+    ControllerPD,
+    ControllerPID,
+    ControllerStablePD,
+)
 from .delay import Delay
 from .utils import load_metadata
 
@@ -145,6 +152,7 @@ class SchemaNames:
 
     PD_CONTROL = "NewtonPDControlAPI"
     PID_CONTROL = "NewtonPIDControlAPI"
+    STABLE_PD_CONTROL = "NewtonStablePDControlAPI"
     NEURAL_CONTROL = "NewtonNeuralControlAPI"
 
     MAX_EFFORT_CLAMPING = "NewtonMaxEffortClampingAPI"
@@ -157,6 +165,7 @@ class SchemaNames:
 _SCHEMA_REGISTRY: dict[str, _SchemaEntry] = {
     SchemaNames.PD_CONTROL: _SchemaEntry(ControllerPD, ComponentKind.CONTROLLER),
     SchemaNames.PID_CONTROL: _SchemaEntry(ControllerPID, ComponentKind.CONTROLLER),
+    SchemaNames.STABLE_PD_CONTROL: _SchemaEntry(ControllerStablePD, ComponentKind.CONTROLLER),
     SchemaNames.NEURAL_CONTROL: _SchemaEntry(_resolve_neural_control, ComponentKind.CONTROLLER),
     SchemaNames.MAX_EFFORT_CLAMPING: _SchemaEntry(ClampingMaxEffort, ComponentKind.CLAMPING),
     SchemaNames.DC_MOTOR_CLAMPING: _SchemaEntry(ClampingDCMotor, ComponentKind.CLAMPING),

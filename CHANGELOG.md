@@ -8,6 +8,7 @@
 - Add `uipc_nut_bolt` demo with selectable Autodesk ABD or original IsaacGym nut/bolt meshes, SolverUIPC IPC contact, original nut/bolt friction, and no soft-transform aim-target driving.
 - Add `uipc_cloth_franka_stable_pd_force` demo using `ControllerStablePD` EFFORT actuators for Franka contact-based cloth manipulation.
 - Add `uipc:abd_kappa` body custom attribute for per-rigid-body UIPC ABD stiffness overrides.
+- Add USD authoring support for `ControllerStablePD` via the `NewtonStablePDControlAPI` schema, so stable-PD actuators can be declared on `NewtonActuator` prims (with `newton:kp`, `newton:kd`, and optional `newton:numWorlds`) and parsed back through `parse_usd`.
 - Add per-range `uipc:cloth_model` and `uipc:deformable_model` custom attributes so UIPC cloth and soft bodies can select constitutions while retaining their existing defaults.
 - Add mimic joint support to `SolverUIPC`: follower joints track `coef0 + coef1 * leader` via position driving (soft coupling); follower and leader must both be active revolute/prismatic joints.
 - Add `SolverUIPC.reset()` to re-push masked-world body/particle state into the live IPC scene without rebuilding the solver.
@@ -40,6 +41,7 @@
 ### Fixed
 
 - Fix `example_uipc_sensor_contact` using the deprecated `SensorContact(sensing_obj_shapes=...)` keyword; it now passes `sensing_shapes=...`.
+- Fix actuator USD parsing silently dropping authored `newton:` API schemas whose definition is missing from the installed `newton-usd-schemas` plugin (e.g. a schema newer than the plugin); authored schema tokens are now folded in alongside the registered ones.
 - Fix `ViewerFile.is_running()` to return `False` after `ViewerFile.close()` so headless recording loops can terminate like interactive viewers. (#3094)
 - Fix `SolverVBD` rigid contact injecting kinetic energy for yawed finite-radius contacts (e.g. small-radius cables blowing up). The normal response now acts at the geometric skeleton point rather than the rotating surface anchor, which was non-conservative under reorientation; friction still uses the surface anchor to preserve finite-radius slip. (#3125)
 - Fix `SolverKamino` contact filtering and constraint stabilization so gap/margin contacts are handled consistently, positive-distance contacts can be filtered as configured, and converted contact forces/wrenches populate matching Newton contact slots for `SensorContact`. (#2908)
