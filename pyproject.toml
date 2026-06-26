@@ -63,8 +63,8 @@ importers = [
     "usd-core>=25.5,<26.5 ; platform_machine != 'aarch64' and python_version < '3.14'",
     "usd-exchange>=2.2.0 ; platform_machine == 'aarch64' and python_version < '3.13'",
 
-    # Newton USD Schemas
-    "newton-usd-schemas>=0.3.1",
+    # Newton USD Schemas (fork defining NewtonStablePDControlAPI, until it lands upstream)
+    "newton-usd-schemas @ git+https://github.com/Ligo04/newton-usd-schemas.git@main",
 ]
 
 # Remeshing dependencies (for SurfaceReconstructor)
@@ -155,8 +155,6 @@ conflicts = [[{ extra = "torch-cu12" }, { extra = "torch-cu13" }]]
 
 [tool.uv.sources]
 warp-lang = { index = "nvidia" }
-# Use the fork that defines NewtonStablePDControlAPI until it lands upstream.
-newton-usd-schemas = { git = "https://github.com/Ligo04/newton-usd-schemas.git", branch = "main" }
 torch = [
     { index = "pytorch-cu128", extra = "torch-cu12" },
     { index = "pytorch-cu130", extra = "torch-cu13" },
