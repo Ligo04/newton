@@ -155,6 +155,8 @@ conflicts = [[{ extra = "torch-cu12" }, { extra = "torch-cu13" }]]
 
 [tool.uv.sources]
 warp-lang = { index = "nvidia" }
+# Use the fork that defines NewtonStablePDControlAPI until it lands upstream.
+newton-usd-schemas = { git = "https://github.com/Ligo04/newton-usd-schemas.git", branch = "main" }
 torch = [
     { index = "pytorch-cu128", extra = "torch-cu12" },
     { index = "pytorch-cu130", extra = "torch-cu13" },
