@@ -34,7 +34,7 @@ from ..core import quat_between_axes
 from ..core.types import Axis, Transform
 from ..geometry import GeoType, Mesh, ShapeFlags, compute_inertia_shape, compute_inertia_sphere
 from ..sim.builder import ModelBuilder
-from ..sim.enums import EqType, JointTargetMode
+from ..sim.enums import EqType, JointTargetMode, JointType
 from ..sim.model import Model
 from ..solvers.mujoco.equality import _add_equality_constraint
 from ..solvers.mujoco.utils import (
@@ -3961,7 +3961,14 @@ def parse_usd(
     # that couples a follower joint to a leader (reference) joint with a gearing ratio.
     # PhysX convention: jointPos + gearing * refJointPos + offset = 0
     # Newton/URDF convention: joint0 = coef0 + coef1 * joint1
-    # Therefore: coef1 = -gearing, coef0 = -offset
+    # Therefore: coef1 = -gearing, coef0 = -offset, but expressed in USD units
+    # (degrees for angular DOFs, meters for linear). Newton stores angular coords in
+    # radians, so the coefficients must be rescaled per follower/leader DOF type:
+    #   - coef0 carries the follower unit: deg -> rad when the follower is angular.
+    #   - coef1 maps leader units to follower units; the deg<->deg (or m<->m) factors
+    #     cancel for same-type pairs, leaving a net scale only for mixed angular/linear
+    #     pairs. The follower's angular-ness comes from the axis instance ("rot*" vs
+    #     "trans*"); the leader's from its joint type.
     for joint_path, joint_idx in path_joint_map.items():
         joint_prim = stage.GetPrimAtPath(joint_path)
         if not joint_prim or not joint_prim.IsValid():
@@ -4021,11 +4028,22 @@ def parse_usd(
             offset_attr = joint_prim.GetAttribute(f"physxMimicJoint:{axis_instance}:offset")
             offset = float(offset_attr.Get()) if offset_attr and offset_attr.HasValue() else 0.0
 
+            # Convert USD units (deg for angular, m for linear) to Newton's (rad/m).
+            follower_angular = axis_instance.lower().startswith("rot")
+            leader_angular = builder.joint_type[leader_idx] == JointType.REVOLUTE
+            coef0_scale = DegreesToRadian if follower_angular else 1.0
+            if follower_angular and not leader_angular:
+                coef1_scale = DegreesToRadian
+            elif leader_angular and not follower_angular:
+                coef1_scale = 1.0 / DegreesToRadian
+            else:
+                coef1_scale = 1.0
+
             builder.add_constraint_mimic(
                 joint0=joint_idx,
                 joint1=leader_idx,
-                coef0=-offset,
-                coef1=-gearing,
+                coef0=-offset * coef0_scale,
+                coef1=-gearing * coef1_scale,
                 enabled=True,
                 label=joint_path,
             )

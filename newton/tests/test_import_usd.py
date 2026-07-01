@@ -8795,6 +8795,103 @@ class TestImportUsdMimicJoint(unittest.TestCase):
         self.assertAlmostEqual(coef1, 2.0, places=5)
 
     @unittest.skipUnless(USD_AVAILABLE, "Requires usd-core")
+    def test_physx_mimic_revolute_offset_converted_to_radians(self):
+        """For an angular follower, the PhysX offset (degrees) must be converted to radians."""
+        from pxr import Sdf, Usd, UsdGeom, UsdPhysics
+
+        stage = Usd.Stage.CreateInMemory()
+        UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.z)
+        UsdPhysics.SetStageKilogramsPerUnit(stage, 1.0)
+        UsdGeom.SetStageMetersPerUnit(stage, 1.0)
+
+        root = stage.DefinePrim("/Root", "Xform")
+        stage.SetDefaultPrim(root)
+        art = stage.DefinePrim("/Root/Robot", "Xform")
+        UsdPhysics.ArticulationRootAPI.Apply(art)
+
+        for name in ("base", "link1", "link2"):
+            body = stage.DefinePrim(f"/Root/Robot/{name}", "Cube")
+            UsdPhysics.RigidBodyAPI.Apply(body)
+            UsdPhysics.MassAPI.Apply(body).CreateMassAttr(1.0)
+
+        leader = UsdPhysics.RevoluteJoint.Define(stage, "/Root/Robot/Joints/leader")
+        leader.CreateAxisAttr("Z")
+        leader.CreateBody0Rel().SetTargets(["/Root/Robot/base"])
+        leader.CreateBody1Rel().SetTargets(["/Root/Robot/link1"])
+
+        follower = UsdPhysics.RevoluteJoint.Define(stage, "/Root/Robot/Joints/follower")
+        follower.CreateAxisAttr("Z")
+        follower.CreateBody0Rel().SetTargets(["/Root/Robot/base"])
+        follower.CreateBody1Rel().SetTargets(["/Root/Robot/link2"])
+
+        follower_prim = follower.GetPrim()
+        follower_prim.SetMetadata("apiSchemas", Sdf.TokenListOp.Create(prependedItems=["PhysxMimicJointAPI:rotZ"]))
+        follower_prim.CreateRelationship("physxMimicJoint:rotZ:referenceJoint").SetTargets(
+            ["/Root/Robot/Joints/leader"]
+        )
+        follower_prim.CreateAttribute("physxMimicJoint:rotZ:gearing", Sdf.ValueTypeNames.Float).Set(1.0)
+        # Offset is authored in degrees (USD angular convention).
+        follower_prim.CreateAttribute("physxMimicJoint:rotZ:offset", Sdf.ValueTypeNames.Float).Set(30.0)
+
+        builder = newton.ModelBuilder()
+        builder.add_usd(stage)
+        model = builder.finalize()
+
+        coef0 = model.constraint_mimic_coef0.numpy()[0]
+        coef1 = model.constraint_mimic_coef1.numpy()[0]
+        # Both joints are angular: gearing is a pure ratio, no scaling.
+        self.assertAlmostEqual(coef1, -1.0, places=5)
+        # Offset converts degrees -> radians: coef0 = -offset * (pi/180).
+        self.assertAlmostEqual(coef0, -math.radians(30.0), places=5)
+
+    @unittest.skipUnless(USD_AVAILABLE, "Requires usd-core")
+    def test_physx_mimic_mixed_angular_follower_linear_leader(self):
+        """An angular follower mimicking a linear leader needs gearing scaled deg->rad."""
+        from pxr import Sdf, Usd, UsdGeom, UsdPhysics
+
+        stage = Usd.Stage.CreateInMemory()
+        UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.z)
+        UsdPhysics.SetStageKilogramsPerUnit(stage, 1.0)
+        UsdGeom.SetStageMetersPerUnit(stage, 1.0)
+
+        root = stage.DefinePrim("/Root", "Xform")
+        stage.SetDefaultPrim(root)
+        art = stage.DefinePrim("/Root/Robot", "Xform")
+        UsdPhysics.ArticulationRootAPI.Apply(art)
+
+        for name in ("base", "link1", "link2"):
+            body = stage.DefinePrim(f"/Root/Robot/{name}", "Cube")
+            UsdPhysics.RigidBodyAPI.Apply(body)
+            UsdPhysics.MassAPI.Apply(body).CreateMassAttr(1.0)
+
+        # Linear (prismatic) leader.
+        leader = UsdPhysics.PrismaticJoint.Define(stage, "/Root/Robot/Joints/leader")
+        leader.CreateAxisAttr("Z")
+        leader.CreateBody0Rel().SetTargets(["/Root/Robot/base"])
+        leader.CreateBody1Rel().SetTargets(["/Root/Robot/link1"])
+
+        # Angular (revolute) follower.
+        follower = UsdPhysics.RevoluteJoint.Define(stage, "/Root/Robot/Joints/follower")
+        follower.CreateAxisAttr("Z")
+        follower.CreateBody0Rel().SetTargets(["/Root/Robot/base"])
+        follower.CreateBody1Rel().SetTargets(["/Root/Robot/link2"])
+
+        follower_prim = follower.GetPrim()
+        follower_prim.SetMetadata("apiSchemas", Sdf.TokenListOp.Create(prependedItems=["PhysxMimicJointAPI:rotZ"]))
+        follower_prim.CreateRelationship("physxMimicJoint:rotZ:referenceJoint").SetTargets(
+            ["/Root/Robot/Joints/leader"]
+        )
+        follower_prim.CreateAttribute("physxMimicJoint:rotZ:gearing", Sdf.ValueTypeNames.Float).Set(2.0)
+
+        builder = newton.ModelBuilder()
+        builder.add_usd(stage)
+        model = builder.finalize()
+
+        coef1 = model.constraint_mimic_coef1.numpy()[0]
+        # follower angular (rad), leader linear (m): coef1 = -gearing * (pi/180).
+        self.assertAlmostEqual(coef1, -2.0 * math.radians(1.0), places=7)
+
+    @unittest.skipUnless(USD_AVAILABLE, "Requires usd-core")
     def test_physx_mimic_joint_no_api_no_constraint(self):
         """Joints without PhysxMimicJointAPI produce no mimic constraints."""
         from pxr import Gf, Usd, UsdGeom, UsdPhysics
