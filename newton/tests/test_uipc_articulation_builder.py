@@ -10,9 +10,13 @@ from unittest.mock import patch
 import numpy as np
 import warp as wp
 
+import newton
+
 _HAS_UIPC = importlib.util.find_spec("uipc") is not None
 
 if _HAS_UIPC:
+    import uipc
+
     import newton._src.solvers.uipc.articulation_builder as uipc_articulation_builder
     from newton._src.solvers.uipc.articulation_builder import ArticulationBuilder
 
@@ -180,6 +184,51 @@ class TestUIPCArticulationBuilder(unittest.TestCase):
             "child_slot": object(),
             "child_instance_id": 0,
         }
+
+
+@unittest.skipUnless(_HAS_UIPC, "uipc is not installed")
+class TestUIPCShapelessProxyInertia(unittest.TestCase):
+    def test_shapeless_proxy_uses_authored_mass_com_inertia(self):
+        """A shapeless link's ABD proxy must carry the Newton-authored mass
+        properties, not the historical hardcoded ``mass=1.0`` / zero COM."""
+        builder = newton.ModelBuilder(up_axis=newton.Axis.Z, gravity=0.0)
+
+        # link0 has a shape -> real geometry ABD body.
+        link0 = builder.add_link(mass=1.0)
+        builder.add_shape_box(link0, hx=0.05, hy=0.05, hz=0.05)
+        # link1 has NO shape -> shapeless ABD proxy; nonzero COM offset and a
+        # non-identity inertia so a hardcoded default would be clearly wrong.
+        link1 = builder.add_link(
+            com=wp.vec3(0.1, 0.0, 0.0),
+            inertia=wp.mat33(0.03, 0.0, 0.0, 0.0, 0.04, 0.0, 0.0, 0.0, 0.05),
+            mass=2.5,
+        )
+        j0 = builder.add_joint_revolute(parent=-1, child=link0, axis=newton.Axis.Z)
+        j1 = builder.add_joint_fixed(
+            parent=link0,
+            child=link1,
+            parent_xform=wp.transform(wp.vec3(0.2, 0.0, 0.0), wp.quat_identity()),
+        )
+        builder.add_articulation([j0, j1], label="arm")
+        model = builder.finalize()
+
+        solver = newton.solvers.SolverUIPC(
+            model, backend="none", logger_level=uipc.Logger.Error, auto_sync_inertia=False
+        )
+        solver.initialize(model.state())
+
+        # link1 is shapeless -> mapped to an ABD proxy.
+        self.assertIn(link1, solver.mapping.body_geo_slots)
+
+        model_mass = float(model.body_mass.numpy()[link1])
+        model_com = model.body_com.numpy()[link1].astype(np.float64)
+        model_inertia = model.body_inertia.numpy()[link1].astype(np.float64)
+        self.assertGreater(model_mass, 1.5)  # guard: authored mass must differ from the 1.0 default
+
+        props = solver.read_uipc_body_inertia(link1)
+        self.assertAlmostEqual(props["mass"], model_mass, places=5)
+        np.testing.assert_allclose(props["mass_center"], model_com, atol=1e-6)
+        np.testing.assert_allclose(props["inertia"], model_inertia, atol=1e-6)
 
 
 if __name__ == "__main__":

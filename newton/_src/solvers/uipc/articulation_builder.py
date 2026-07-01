@@ -349,6 +349,10 @@ class ArticulationBuilder:
         *,
         is_fixed: bool = False,
         kappa: float | None = None,
+        mass: float | None = None,
+        mass_center: np.ndarray | None = None,
+        inertia: np.ndarray | None = None,
+        volume: float | None = None,
     ) -> SimplicialComplexSlot:
         """Create a 1-vertex ABD proxy body.
 
@@ -366,6 +370,15 @@ class ArticulationBuilder:
             is_fixed: If ``True`` the proxy is marked kinematic.
             kappa: Optional ABD stiffness parameter [Pa]. If ``None``, uses
                 this builder's default.
+            mass: Scalar mass [kg]. If ``None``, a negligible unit mass is
+                used (appropriate for kinematic world anchors, whose mass has
+                no dynamical effect).
+            mass_center: COM in the proxy body frame [m], shape ``(3,)``. If
+                ``None``, the origin is used.
+            inertia: Inertia tensor at the COM [kg·m²], shape ``(3, 3)``. If
+                ``None``, a negligible isotropic inertia is used.
+            volume: Body volume [m³] feeding UIPC's ABD stiffness energy. If
+                ``None``, a negligible default is used.
 
         Returns:
             The UIPC geometry slot for the proxy body.
@@ -373,12 +386,20 @@ class ArticulationBuilder:
         if name in self._proxy_slots:
             return self._proxy_slots[name]
 
-        mass = 1.0
-        mass_center = np.zeros(3, dtype=np.float64)
-        inertia = np.eye(3, dtype=np.float64) * 1e-6
-        volume = 1e-9
+        proxy_mass = 1.0 if mass is None else float(mass)
+        proxy_center = (
+            np.zeros(3, dtype=np.float64)
+            if mass_center is None
+            else np.asarray(mass_center, dtype=np.float64).reshape(3)
+        )
+        proxy_inertia = (
+            np.eye(3, dtype=np.float64) * 1e-6
+            if inertia is None
+            else np.asarray(inertia, dtype=np.float64).reshape(3, 3)
+        )
+        proxy_volume = 1e-9 if volume is None else float(volume)
         applied_kappa = self._kappa if kappa is None else kappa
-        sc = self._abd.create_proxy(applied_kappa, mass, mass_center, inertia, volume)
+        sc = self._abd.create_proxy(applied_kappa, proxy_mass, proxy_center, proxy_inertia, proxy_volume)
 
         _view_attr(sc.transforms())[:] = transform
 
@@ -406,10 +427,43 @@ class ArticulationBuilder:
             tf = np.eye(4, dtype=np.float64)
 
         kappa = self._resolve_body_kappa(body_idx)
-        geo_slot = self._create_proxy(f"shapeless_proxy_{body_idx}", tf, kappa=kappa)
+        mass, mass_center, inertia = self._shapeless_mass_properties(body_idx)
+        geo_slot = self._create_proxy(
+            f"shapeless_proxy_{body_idx}",
+            tf,
+            kappa=kappa,
+            mass=mass,
+            mass_center=mass_center,
+            inertia=inertia,
+        )
         self._mapping.body_geo_slots[body_idx] = geo_slot
         self._mapping.body_instance_ids[body_idx] = 0
         return geo_slot
+
+    def _shapeless_mass_properties(self, body_idx: int) -> tuple[float | None, np.ndarray | None, np.ndarray | None]:
+        """Newton-authored ``(mass, COM, inertia)`` for a shapeless body's proxy.
+
+        Returns ``(None, None, None)`` when the model omits inertial data or
+        authored zero mass, so :meth:`_create_proxy` falls back to its
+        negligible unit proxy (the historical behaviour). The proxy's ``volume``
+        is left at the negligible default: it only scales UIPC's ABD stiffness
+        energy and does not enter the affine mass matrix.
+        """
+        model = self._model
+        if model.body_mass is None:
+            return None, None, None
+        mass = float(model.body_mass.numpy()[body_idx])
+        if mass <= 0.0:
+            return None, None, None
+        mass_center = None
+        if model.body_com is not None:
+            mass_center = np.asarray(model.body_com.numpy()[body_idx], dtype=np.float64).reshape(3)
+        inertia = None
+        if model.body_inertia is not None:
+            inertia = np.asarray(model.body_inertia.numpy()[body_idx], dtype=np.float64).reshape(3, 3)
+            # UIPC expects a symmetric inertia tensor; guard against float drift.
+            inertia = 0.5 * (inertia + inertia.T)
+        return mass, mass_center, inertia
 
     def _resolve_body_kappa(self, body_idx: int) -> float:
         """Return the effective ABD stiffness [Pa] for a Newton body."""
