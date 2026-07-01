@@ -54,13 +54,11 @@
 # ``C(q, q̇)`` fed into the controller state each substep.  Here we wire:
 #
 #     ctrl_state.mass_matrix = newton.eval_mass_matrix(model, state)
-#     ctrl_state.bias_forces = -τ_g + τ_c        # gravity + finite-diff Coriolis
+#     ctrl_state.bias_forces = newton.eval_inverse_dynamics(model, state)  # C(q,q̇)q̇ + g(q)
 #
-# ``τ_c`` is computed from finite differences of ``M(q)`` using the
-# Christoffel contraction.  This keeps the demo on public Newton APIs; a
-# production controller would usually consume an exact RNEA bias-force API.
-# Since gravity is already baked into ``bias_forces``, --stable-pd is
-# mutually exclusive with --gravity-comp.
+# ``eval_inverse_dynamics`` returns the exact RNEA bias force (gravity plus
+# Coriolis/centrifugal) at q̈ = 0.  Since gravity is already baked into
+# ``bias_forces``, --stable-pd is mutually exclusive with --gravity-comp.
 #
 # Command:
 #   python -m newton.examples uipc_ur10_force --world-count 1
@@ -80,92 +78,6 @@ from newton import JointTargetMode
 from newton.actuators import Actuator as _NewtonActuator
 from newton.actuators import ClampingMaxEffort, ControllerPD, ControllerStablePD
 from newton.selection import ArticulationView
-
-
-@wp.kernel
-def _set_perturbed_q_kernel(
-    q0: wp.array[float],
-    n_per_world: int,
-    dof: int,
-    delta: float,
-    out_q: wp.array[float],
-):
-    """Write ``q0`` into ``out_q`` with DOF ``dof`` of every world shifted by ``delta``.
-
-    ``q0``/``out_q`` are the flat ``(world_count·n_per_world,)`` joint-position
-    layout; element ``i`` belongs to DOF ``i % n_per_world``.
-    """
-    i = wp.tid()
-    v = q0[i]
-    if (i % n_per_world) == dof:
-        v = v + delta
-    out_q[i] = v
-
-
-@wp.kernel
-def _mass_matrix_fd_kernel(
-    h_plus: wp.array3d[float],
-    h_minus: wp.array3d[float],
-    dof: int,
-    inv_2eps: float,
-    dh_dq: wp.array4d[float],
-):
-    """Central difference of the mass matrix w.r.t. DOF ``dof``.
-
-    ``dh_dq[w, dof, i, j] = (h_plus[w, i, j] - h_minus[w, i, j]) / (2·eps)``,
-    i.e. ``d H[i, j] / d q[dof]``.
-    """
-    w, i, j = wp.tid()
-    dh_dq[w, dof, i, j] = (h_plus[w, i, j] - h_minus[w, i, j]) * inv_2eps
-
-
-@wp.kernel
-def _gravity_bias_kernel(
-    J: wp.array3d[float],
-    body_mass: wp.array[float],
-    gravity: wp.array[wp.vec3],
-    bodies_per_world: int,
-    max_rows: int,
-    bias: wp.array2d[float],
-):
-    """Jacobian-transpose gravity term, written into ``bias`` (overwrites).
-
-    ``bias[w, dof] = sum_b sum_c J[w, 6b+c, dof] · m_b · g[w][c]``, which equals
-    ``-tau_g`` (the negation of the gravity-compensation torque). The Coriolis
-    kernel then accumulates ``tau_c`` on top, giving Tan 2011 ``C = -tau_g + tau_c``.
-    """
-    w, dof = wp.tid()
-    g = gravity[w]
-    acc = float(0.0)
-    for b in range(bodies_per_world):
-        m = body_mass[w * bodies_per_world + b]
-        if m > 0.0:
-            for c in range(3):
-                row = 6 * b + c
-                if row < max_rows:
-                    acc += J[w, row, dof] * m * g[c]
-    bias[w, dof] = acc
-
-
-@wp.kernel
-def _coriolis_add_kernel(
-    dh_dq: wp.array4d[float],
-    qd: wp.array2d[float],
-    n_per_world: int,
-    bias: wp.array2d[float],
-):
-    """Accumulate Coriolis/centrifugal bias into ``bias`` via the Christoffel contraction.
-
-    ``bias[w, i] += sum_jk 0.5·(dH[k,i,j] + dH[j,i,k] - dH[i,j,k])·qd[j]·qd[k]``
-    where ``dH[a,b,c] = dh_dq[w, a, b, c] = d H[b, c] / d q[a]``.
-    """
-    w, i = wp.tid()
-    total = float(0.0)
-    for j in range(n_per_world):
-        for k in range(n_per_world):
-            christoffel = 0.5 * (dh_dq[w, k, i, j] + dh_dq[w, j, i, k] - dh_dq[w, i, j, k])
-            total += christoffel * qd[w, j] * qd[w, k]
-    bias[w, i] = bias[w, i] + total
 
 
 class Example:
@@ -350,17 +262,12 @@ class Example:
         # ControllerStablePD needs ``mass_matrix`` + ``bias_forces`` in
         # its State each step; populated below in ``_apply_feedback``.
         self._act_state: _NewtonActuator.State | None = None
-        self._coriolis_eps = 1.0e-3
         if self.stable_pd:
             self._act_state = self.pd_actuator.state()
 
             # Pre-allocated scratch reused across every eval_mass_matrix /
-            # eval_jacobian call this substep (P1: no per-call cudaMalloc/Free),
-            # and the device buffers backing the on-device finite-difference
-            # Coriolis + Jacobian-transpose gravity assembly (P0: no .numpy()
-            # round-trips, no Python Christoffel loop).
+            # eval_jacobian call this substep (P1: no per-call cudaMalloc/Free).
             W = self.world_count
-            n = self.dofs_per_world
             max_dofs = self.model.max_dofs_per_articulation
             max_links = self.model.max_joints_per_articulation
             dev = self.model.device
@@ -368,10 +275,6 @@ class Example:
             self._mm_body_I_s = wp.zeros(self.model.body_count, dtype=wp.spatial_matrix, device=dev)
             self._mm_joint_S_s = wp.zeros(self.model.joint_dof_count, dtype=wp.spatial_vector, device=dev)
             self._H_buf = wp.empty((W, max_dofs, max_dofs), dtype=float, device=dev)
-            self._H_plus = wp.empty((W, max_dofs, max_dofs), dtype=float, device=dev)
-            self._H_minus = wp.empty((W, max_dofs, max_dofs), dtype=float, device=dev)
-            self._dH_dq = wp.empty((W, n, n, n), dtype=float, device=dev)
-            self._q0 = wp.empty(W * n, dtype=float, device=dev)
 
         # CUDA-graph state for the plain-PD actuator step (see
         # _capture_actuator_graphs). None until captured / when capture is
@@ -418,56 +321,6 @@ class Example:
             return newton.solvers.SolverFeatherstone(self.model), False
         raise ValueError(f"unsupported --solver: {name!r}")
 
-    def _assemble_bias_forces(self, state, bias: wp.array) -> None:
-        """Fill ``bias`` (shape ``(W, n)``) with Tan 2011 ``C = -tau_g + tau_c``, on device.
-
-        No host round-trips: both the Jacobian-transpose gravity term and the
-        finite-difference Coriolis term are assembled with Warp kernels, reusing
-        the same ``J`` / ``body_I_s`` / ``joint_S_s`` scratch as the mass matrix.
-
-        ``self._mm_J`` must already hold the Jacobian at the *current* (unperturbed)
-        pose on entry — the caller evaluates it for the mass matrix and the gravity
-        kernel reuses it before the Coriolis loop overwrites it. ``state.joint_q``
-        is perturbed in place during the central differences and restored on exit.
-        """
-        W = self.world_count
-        n = self.dofs_per_world
-        dev = self.model.device
-
-        # bias <- -tau_g (Jacobian-transpose gravity), reusing the pose Jacobian.
-        wp.launch(
-            _gravity_bias_kernel,
-            dim=(W, n),
-            inputs=[self._mm_J, self.model.body_mass, self.model.gravity, self.bodies_per_world, self._mm_J.shape[1]],
-            outputs=[bias],
-            device=dev,
-        )
-
-        # Central-difference dH/dq, perturbing one DOF (of every world) per pass.
-        jq = state.joint_q
-        wp.copy(self._q0, jq)
-        eps = float(self._coriolis_eps)
-        inv_2eps = float(1.0 / (2.0 * eps))
-        for p in range(n):
-            wp.launch(_set_perturbed_q_kernel, dim=W * n, inputs=[self._q0, n, p, eps], outputs=[jq], device=dev)
-            newton.eval_jacobian(self.model, state, self._mm_J, joint_S_s=self._mm_joint_S_s)
-            newton.eval_mass_matrix(self.model, state, H=self._H_plus, J=self._mm_J, body_I_s=self._mm_body_I_s)
-            wp.launch(_set_perturbed_q_kernel, dim=W * n, inputs=[self._q0, n, p, -eps], outputs=[jq], device=dev)
-            newton.eval_jacobian(self.model, state, self._mm_J, joint_S_s=self._mm_joint_S_s)
-            newton.eval_mass_matrix(self.model, state, H=self._H_minus, J=self._mm_J, body_I_s=self._mm_body_I_s)
-            wp.launch(
-                _mass_matrix_fd_kernel,
-                dim=(W, n, n),
-                inputs=[self._H_plus, self._H_minus, p, inv_2eps],
-                outputs=[self._dH_dq],
-                device=dev,
-            )
-        wp.copy(jq, self._q0)  # restore the unperturbed joint positions
-
-        # bias += tau_c (Christoffel contraction of dH/dq with the velocities).
-        qd2d = state.joint_qd.reshape((W, n))
-        wp.launch(_coriolis_add_kernel, dim=(W, n), inputs=[self._dH_dq, qd2d, n], outputs=[bias], device=dev)
-
     def _apply_feedback(self, state):
         """Run every registered actuator -> ``control.joint_f``.
 
@@ -497,8 +350,7 @@ class Example:
                 raise ValueError("ControllerStablePD state was not initialized")
             ctrl_state = self._act_state.controller_state
 
-            # One Jacobian at the current pose, shared by the mass matrix and the
-            # Jacobian-transpose gravity term. eval_mass_matrix consumes the
+            # Mass matrix at the current pose. eval_mass_matrix consumes the
             # supplied J (and reuses body_I_s) instead of allocating per call.
             newton.eval_jacobian(self.model, state, self._mm_J, joint_S_s=self._mm_joint_S_s)
             newton.eval_mass_matrix(self.model, state, H=self._H_buf, J=self._mm_J, body_I_s=self._mm_body_I_s)
@@ -506,9 +358,11 @@ class Example:
             # (W, n_per_world, n_per_world) for max_dofs == n_per_world == 6.
             ctrl_state.mass_matrix.assign(self._H_buf)  # ty:ignore[unresolved-attribute]  # pyright: ignore[reportAttributeAccessIssue, reportOptionalMemberAccess]
 
-            # Tan 2011 C = -τ_g + τ_coriolis, assembled on device (no host
-            # round-trips, no Python loop) into the controller's bias buffer.
-            self._assemble_bias_forces(state, ctrl_state.bias_forces)  # ty:ignore[unresolved-attribute]  # pyright: ignore[reportAttributeAccessIssue, reportOptionalMemberAccess]
+            # Bias forces C(q, q̇) q̇ + g(q) via the exact RNEA inverse-dynamics
+            # API (q̈ = 0). Writes straight into the controller's (W, n) buffer;
+            # the physical-dynamics sign is exactly what the Stable-PD rhs
+            # subtracts.
+            newton.eval_inverse_dynamics(self.model, state, tau=ctrl_state.bias_forces)  # ty:ignore[unresolved-attribute]  # pyright: ignore[reportAttributeAccessIssue, reportOptionalMemberAccess]
 
         # ControllerStablePD's update_state is a no-op (per-step scratch, no
         # cross-step information), so passing the same State object as both
@@ -529,11 +383,10 @@ class Example:
         The actuator pipeline (zero ``joint_f`` -> ``ControllerPD`` ->
         ``ClampingMaxEffort`` -> scatter-add) is pure ``wp.launch`` with no
         host<->device transfers, so it is CUDA-graph capturable. The
-        ``--stable-pd`` path is left eager and this method is skipped: although
-        its bias assembly is now fully on-device (see
-        :meth:`_assemble_bias_forces`), it perturbs ``state.joint_q`` in place
-        each substep, which the ping-pong capture below does not yet account
-        for. Wiring it into a graph is a follow-up (report P3).
+        ``--stable-pd`` path is left eager and this method is skipped: its bias
+        assembly calls :func:`newton.eval_inverse_dynamics`, which allocates
+        scratch per call, and CUDA-graph capture forbids allocation. Preallocating
+        that scratch to enable capture is a follow-up (report P3).
 
         ``simulate`` ping-pongs ``state_0``/``state_1`` every substep, and a
         captured graph bakes in the array pointers it was recorded against.

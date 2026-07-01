@@ -400,12 +400,14 @@ class Example:
         ctrl_state = self._act_state.controller_state
         ctrl_state.mass_matrix.assign(self._H_buf)
         # Tan 2011 stable-PD requires gravity on BOTH sides of the implicit solve:
-        #   1. bias_forces = C = τ_grav (= -tau_g) so the predicted q̈ accounts
-        #      for gravity-driven acceleration. Without it, -kd·q̈·dt damping
-        #      term is wrong and the wrist DOFs explode.
-        #   2. feedforward joint_act = tau_g (gravity compensation torque) so
-        #      the static effort = ff - kd·q̈·dt can hold pose when q̈ → 0.
-        ctrl_state.bias_forces.assign(-tau_g.reshape(1, -1))
+        #   1. bias_forces = C = C(q, q̇)·q̇ + g(q) from the exact RNEA
+        #      inverse-dynamics API (q̈ = 0), so the predicted q̈ accounts for
+        #      gravity- and velocity-driven acceleration. Without it the
+        #      -kd·q̈·dt damping term is wrong and the wrist DOFs explode.
+        #   2. feedforward joint_act = tau_g (Jacobian-transpose gravity
+        #      compensation torque) so the static effort = ff - kd·q̈·dt can
+        #      hold pose when q̈ → 0.
+        newton.eval_inverse_dynamics(self.model, self.state_0, tau=ctrl_state.bias_forces)
         self.control.joint_act.assign(tau_g)
         self.pd_actuator.step(
             sim_state=self.state_0,

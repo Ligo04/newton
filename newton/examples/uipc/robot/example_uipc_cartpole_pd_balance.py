@@ -63,10 +63,11 @@
 # depends on pole1 state) and ControllerStablePD only handles per-DOF PD.
 # For the StablePD actuator we wire:
 #
-#     ctrl_state.mass_matrix = H[pole2, pole2]   # eval_mass_matrix slice
-#     ctrl_state.bias_forces = J_lin^T · (m·g)   # pole2 column, gravity
+#     ctrl_state.mass_matrix = H[pole2, pole2]              # eval_mass_matrix slice
+#     ctrl_state.bias_forces = (C(q,q̇)q̇ + g(q))[pole2]      # eval_inverse_dynamics slice
 #
-# Coriolis is neglected (balance task, velocities remain small).
+# The bias is the exact RNEA inverse-dynamics term (gravity plus Coriolis)
+# projected onto the pole2 DOF.
 #
 # Command: python -m newton.examples uipc_cartpole_pd_balance --world-count 1
 #          python -m newton.examples uipc_cartpole_pd_balance --stable-pd
@@ -205,16 +206,11 @@ class Example:
 
         # ControllerStablePD state + scratch for the per-substep Tan 2011
         # solve.  The composed ``Actuator.State`` wraps the controller's
-        # ``State`` under ``.controller_state``.  ``eval_mass_matrix`` and
-        # ``eval_jacobian`` want reusable output buffers so we don't
-        # re-allocate every substep.
+        # ``State`` under ``.controller_state``.  ``eval_mass_matrix`` wants a
+        # reusable output buffer so we don't re-allocate every substep.
         self._pole2_actuator: _NewtonActuator | None = None
         self._act_state: _NewtonActuator.State | None = None
         self._H_buf: wp.array | None = None
-        self._J_buf: wp.array | None = None
-        self._gravity_np: np.ndarray | None = None
-        self._body_mass_np: np.ndarray | None = None
-        self._bodies_per_world: int = 0
         if self.stable_pd:
             pole2_actuator = next(
                 (
@@ -232,9 +228,6 @@ class Example:
             )
             self._pole2_actuator = pole2_actuator
             self._act_state = pole2_actuator.state()
-            self._gravity_np = self.model.gravity.numpy()  # (world_count, 3)
-            self._body_mass_np = self.model.body_mass.numpy()  # (body_count,)
-            self._bodies_per_world = self.model.body_count // self.world_count
 
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
         self.viewer.set_model(self.model)
@@ -280,38 +273,6 @@ class Example:
                 False,
             )
         raise ValueError(f"unsupported --solver: {name!r}")
-
-    def _compute_pole2_bias(self) -> np.ndarray:
-        """Jacobian-transpose gravity torque on the pole2 DOF.
-
-        Returns the ``(world_count,)`` bias-force vector consumed by the
-        Tan 2011 ``ControllerStablePD`` — namely ``C = g(q) = Σ J_lin[:, pole2]^T · (m · g)``,
-        i.e. the torque gravity *imposes* on the pole2 joint.  Coriolis /
-        centrifugal terms are omitted (velocities stay small in the
-        balance task — for trajectory tracking a full RNEA would be
-        needed).
-
-        ``eval_fk`` is called first because most solvers leave the
-        maximal-coordinate ``body_q`` stale after ``step`` and
-        ``eval_jacobian`` samples ``body_q``.
-        """
-        newton.eval_fk(self.model, self.state_0.joint_q, self.state_0.joint_qd, self.state_0)
-        self._J_buf = newton.eval_jacobian(self.model, self.state_0, self._J_buf)
-        J_np = self._J_buf.numpy()  # (A, max_links*6, max_dofs)
-
-        bias = np.zeros(self.world_count, dtype=np.float32)
-        for w in range(self.world_count):
-            g = self._gravity_np[w]
-            for b in range(self._bodies_per_world):
-                body_global = w * self._bodies_per_world + b
-                m = float(self._body_mass_np[body_global])
-                if m <= 0.0:
-                    continue
-                # Rows [6b:6b+3] of J are the linear (COM) Jacobian of body b;
-                # the pole2 column maps joint velocity to that body's linear velocity.
-                J_lin_col = J_np[w, 6 * b : 6 * b + 3, self.pole2_dof]  # (3,)
-                bias[w] += float(J_lin_col @ (m * g))
-        return bias
 
     def _apply_feedback(self):
         """Cross-DOF state feedback -> ``control.joint_f``.
@@ -370,7 +331,10 @@ class Example:
             pole2_m = np.ascontiguousarray(self._H_buf.numpy()[:, p2 : p2 + 1, p2 : p2 + 1], dtype=np.float32)
             ctrl_state = self._act_state.controller_state
             ctrl_state.mass_matrix.assign(pole2_m)
-            ctrl_state.bias_forces.assign(self._compute_pole2_bias().reshape(self.world_count, 1))
+            # bias_forces = pole2 component of the exact RNEA bias C(q,q̇)q̇ + g(q)
+            # (previously Jacobian-transpose gravity only, Coriolis neglected).
+            bias_full = newton.eval_inverse_dynamics(self.model, self.state_0)
+            ctrl_state.bias_forces.assign(np.ascontiguousarray(bias_full.numpy()[:, p2 : p2 + 1], dtype=np.float32))
 
             # ControllerStablePD.update_state is a no-op (per-step scratch,
             # no cross-step information), so passing the same State as both
@@ -461,10 +425,10 @@ class Example:
                 "Drive the stiff pole2 joint-lock with ControllerStablePD "
                 "(Tan et al. 2011) instead of the hand-rolled scalar PD. "
                 "The per-substep State is populated with pole2's diagonal "
-                "entry from newton.eval_mass_matrix and the Jacobian-T "
-                "gravity bias (Coriolis neglected). Cart state feedback "
-                "is untouched. Multi-world is supported via the controller's "
-                "block-diagonal batched Cholesky."
+                "entry from newton.eval_mass_matrix and its bias force from "
+                "newton.eval_inverse_dynamics (gravity plus Coriolis). Cart "
+                "state feedback is untouched. Multi-world is supported via the "
+                "controller's block-diagonal batched Cholesky."
             ),
         )
         parser.set_defaults(world_count=1)

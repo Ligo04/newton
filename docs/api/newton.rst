@@ -59,6 +59,7 @@ newton
    AxisType
    eval_fk
    eval_ik
+   eval_inverse_dynamics
    eval_jacobian
    eval_mass_matrix
    intersect_ray
