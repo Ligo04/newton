@@ -73,7 +73,7 @@ class Example:
         newton.solvers.SolverUIPC.register_custom_attributes(builder)
         self._build_franka(builder)
         self._build_table(builder)
-        # self._build_cloth(builder)
+        self._build_cloth(builder)
         builder.add_ground_plane()
         # builder.gravity = 0.0
         self.model = builder.finalize()
