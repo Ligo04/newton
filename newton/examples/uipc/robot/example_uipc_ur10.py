@@ -16,10 +16,11 @@
 # --implicit-pd switches the joint drives from the gain-agnostic aim drive
 # (strength from ``drive_strength_ratio``) to implicit PD with physical
 # gain semantics: ``joint_target_ke`` / ``joint_target_kd`` act as
-# stiffness and damping springs inside UIPC's incremental potential.
+# stiffness and damping springs inside UIPC's incremental potential
+# (gravity sag = tau/ke, kd damps transients).
 #
 # Command: python -m newton.examples uipc_ur10 --world-count 4
-#          python -m newton.examples uipc_ur10 --implicit-pd
+#          python -m newton.examples uipc_ur10 --implicit-pd [--hold]
 #
 ###########################################################################
 
@@ -35,9 +36,10 @@ from newton import JointTargetMode
 
 class Example:
     # Shared task spec — keep in sync with example_uipc_ur10_force.py.
+    # Gains match the original example_robot_ur10 (uniform 500/50).
     HOME_POSE = np.array([0.0, -np.pi / 3, np.pi / 2, -np.pi / 6, np.pi / 2, 0.0], dtype=np.float32)
-    KP = np.array([300.0, 300.0, 200.0, 100.0, 60.0, 30.0], dtype=np.float32)
-    KD = np.array([40.0, 40.0, 30.0, 15.0, 10.0, 5.0], dtype=np.float32)
+    KP = np.array([500.0] * 6, dtype=np.float32)
+    KD = np.array([50.0] * 6, dtype=np.float32)
     TRAJ_AMP = 0.4  # [rad]
     TRAJ_OMEGA = 1.2  # [rad/s]
     TRAJ_PHASE = 0.8  # [rad] per DOF index

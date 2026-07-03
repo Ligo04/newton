@@ -165,10 +165,12 @@ class Example:
         for d in range(min(9, len(builder.joint_q))):
             builder.joint_target_q[d] = builder.joint_q[d]
             builder.joint_target_mode[d] = int(JointTargetMode.POSITION)
-            # joint_target_ke is inert for UIPC: its aim-drive strength comes
-            # from the solver's drive_strength_ratio (default 100), independent
-            # of this value, which is kept only for cross-solver portability.
-            builder.joint_target_ke[d] = 1.0e6
+            # joint_target_ke/kd are inert for UIPC's default aim drive (its
+            # strength is the solver's drive_strength_ratio, default 100);
+            # kept as physical Franka-class gains for cross-solver
+            # portability and for SolverUIPC(implicit_pd=True).
+            builder.joint_target_ke[d] = 650.0
+            builder.joint_target_kd[d] = 100.0
 
         gripper_open = 1.0
         gripper_close = 0.1

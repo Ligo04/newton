@@ -48,7 +48,7 @@ class Example:
         # joint_target_ke/kd are cross-solver metadata only: UIPC's aim
         # drive strength comes from the solver's drive_strength_ratio
         # (default 100) and has no damping channel, independent of kp/kd.
-        self.kp = 1.0e6
+        self.kp = 2000.0
         self.kd = 200.0
 
         cartpole = newton.ModelBuilder(up_axis=newton.Axis.Z)

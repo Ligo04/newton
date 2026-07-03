@@ -154,7 +154,7 @@ class Example:
         # drive strength comes from the solver's drive_strength_ratio
         # (default 100) and has no damping channel, independent of these
         # values.
-        builder.joint_target_ke[:9] = [1.0e6] * 9
+        builder.joint_target_ke[:9] = [650.0] * 9
         builder.joint_target_kd[:9] = [100.0] * 9
         builder.joint_effort_limit[:7] = [80.0] * 7
         builder.joint_effort_limit[7:9] = [20.0] * 2

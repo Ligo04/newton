@@ -120,8 +120,10 @@ class Example:
         # exists); the purpose here is to show the EFFORT pipeline actually
         # moves the arm in response to ``control.joint_f``, not to build an
         # industrial-grade tracker.
-        self.kp = np.array([300.0, 300.0, 200.0, 100.0, 60.0, 30.0], dtype=np.float32)
-        self.kd = np.array([40.0, 40.0, 30.0, 15.0, 10.0, 5.0], dtype=np.float32)
+        # Gains match the original example_robot_ur10 (uniform 500/50) and
+        # example_uipc_ur10's shared benchmark task.
+        self.kp = np.array([500.0] * 6, dtype=np.float32)
+        self.kd = np.array([50.0] * 6, dtype=np.float32)
         # Torque clamps sized roughly to UR10's real effort limits.
         self.max_torque = np.array([330.0, 330.0, 150.0, 54.0, 54.0, 54.0], dtype=np.float32)
         # Reflected rotor inertia per revolute DOF (I_rotor * gear_ratio^2,
