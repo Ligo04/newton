@@ -49,6 +49,15 @@ TUBE_OUTER_RADIUS = 0.002755
 TUBE_HEIGHT = BRICK_HEIGHT - TOP_THICKNESS
 CYLINDER_SEGMENTS = 48
 
+# Gain scale applied to the physical Franka gains under --implicit-pd so the
+# drive is stiff enough for reliable stacking (see _configure_franka). A
+# sweep of the first APPROACH settled error vs the 6 mm task-advance
+# threshold puts the minimum stable scale at ~5 (4.6 mm); 20 keeps ample
+# margin for the contact/grip loads later in the stack. ke_arm = 8000,
+# kd ~= 179 — a stiff but still physical robot gain, not the near-rigid
+# default clamp.
+IMPLICIT_PD_KE_SCALE = 20.0
+
 # Gripper finger positions [m]
 GRIPPER_OPEN = 0.5 * (2 * PITCH * BRICK_SCALE + 0.004)
 GRIPPER_RELEASE = 0.5 * (2 * PITCH * BRICK_SCALE * 2.0)
@@ -204,6 +213,24 @@ class TaskType(enum.IntEnum):
 
 def quat_to_vec4(q: wp.quat) -> wp.vec4:
     return wp.vec4(q[0], q[1], q[2], q[3])
+
+
+@wp.kernel(enable_backward=False)
+def apply_gravity_comp_offset_kernel(
+    bias: wp.array[float],
+    inv_ke: wp.array[float],
+    # in/out
+    target_q: wp.array[float],
+):
+    """Shift the position target by ``tau_g / ke`` so implicit PD holds it.
+
+    Pure position-domain gravity compensation: the implicit-PD steady state
+    ``ke * (q_ref - q) = tau_g`` sags by ``tau_g / ke``, so pre-adding that
+    offset to the commanded target lands the joint on the true target
+    without any coexisting force control.
+    """
+    i = wp.tid()
+    target_q[i] = target_q[i] + bias[i] * inv_ke[i]
 
 
 @wp.kernel(enable_backward=False)
@@ -366,6 +393,8 @@ class Example:
         self.viewer = viewer
         self.test_mode = getattr(args, "test", False)
         self.enable_contact = getattr(args, "enable_contact", True)
+        self.implicit_pd = bool(getattr(args, "implicit_pd", False))
+        self.ipd_ke_scale = float(getattr(args, "implicit_pd_ke_scale", IMPLICIT_PD_KE_SCALE))
 
         self.uipc_gap = float(getattr(args, "uipc_gap", UIPC_GAP))
         if self.uipc_gap <= 0.0:
@@ -424,12 +453,30 @@ class Example:
         self.control = self.model.control()
         self.contacts = self.model.contacts()
 
+        # Pure position-domain gravity compensation for --implicit-pd:
+        # without it the arm sags by tau_g/ke at each joint (the original
+        # MuJoCo example relies on jnt_actgravcomp, which UIPC has no
+        # equivalent for). Each step the RNEA bias is turned into an aim
+        # offset tau_g/ke — no coexisting force control.
+        self._gravity_comp_tau = wp.zeros(
+            (self.model.articulation_count, self.model.max_dofs_per_articulation),
+            dtype=float,
+            device=self.model.device,
+        )
+        ke = self.model.joint_target_ke.numpy()[:9]
+        self._gravity_comp_inv_ke = wp.array(
+            np.where(ke > 0.0, 1.0 / np.where(ke > 0.0, ke, 1.0), 0.0).astype(np.float32),
+            dtype=float,
+            device=self.model.device,
+        )
+
         self.solver = newton.solvers.SolverUIPC(
             workspace="/tmp/newton_uipc/brick_stacking",
             dump_enable=True,
             model=self.model,
             dt=self.sim_dt,
             logger_level=uipc.Logger.Warn,
+            implicit_pd=self.implicit_pd,
         )
         self.solver.set_contact(enable=self.enable_contact, d_hat=self.uipc_gap)
         self.solver.configure_contact_tabular(self._configure_contact_tabular)
@@ -466,6 +513,24 @@ class Example:
             type=float,
             default=UIPC_GAP,
             help="Initial UIPC barrier clearance [m] used to size the brick tube-to-stud interlock.",
+        )
+        parser.add_argument(
+            "--implicit-pd",
+            action="store_true",
+            help=(
+                "Drive the Franka joints with implicit PD (joint_target_ke/kd act as physical "
+                "stiffness/damping, gravity and grip forces deflect by tau/ke) instead of the "
+                "gain-agnostic near-rigid aim drive."
+            ),
+        )
+        parser.add_argument(
+            "--implicit-pd-ke-scale",
+            type=float,
+            default=IMPLICIT_PD_KE_SCALE,
+            help=(
+                "Scale applied to the physical Franka gains under --implicit-pd (ke*s, kd*sqrt(s)); "
+                "higher stiffens the drive for reliable stacking, 1.0 keeps the bare physical gains."
+            ),
         )
         return parser
 
@@ -514,16 +579,28 @@ class Example:
     def _configure_franka(self, builder: newton.ModelBuilder, arm_q: np.ndarray | list[float]) -> None:
         builder.joint_q[:9] = [*np.asarray(arm_q, dtype=np.float32)[:7].tolist(), GRIPPER_OPEN, GRIPPER_OPEN]
         builder.joint_target_q[:9] = builder.joint_q[:9]
-        # joint_target_ke/kd are cross-solver metadata only: UIPC's aim
-        # drive strength comes from the solver's drive_strength_ratio
-        # (default 100) and has no damping channel, independent of these
-        # values.
-        builder.joint_target_ke[:9] = [1.0e6] * 9
-        builder.joint_target_kd[:9] = [100.0] * 9
-        builder.joint_effort_limit[:7] = [80.0] * 7
-        builder.joint_effort_limit[7:9] = [20.0] * 2
-        builder.joint_armature[:7] = [0.1] * 7
-        builder.joint_armature[7:9] = [0.5] * 2
+        # Gains match the original example_brick_stacking (MuJoCo PD). Under
+        # UIPC's default aim drive they are cross-solver metadata only (drive
+        # strength = drive_strength_ratio, default 100, near-rigid); under
+        # --implicit-pd they become physical gains [N·m/rad]: kd damps
+        # transients, the aim offset in set_joint_targets cancels the static
+        # sag, and grip forces deflect the fingers by tau_grip/ke.
+        #
+        # The physical Franka gains (~400 N·m/rad) make the implicit-PD drive
+        # much softer than the near-rigid default clamp, so the arm complies
+        # and the ~0.15 N finger grip slips during fast moves. Under
+        # --implicit-pd the gains are scaled by IMPLICIT_PD_KE_SCALE (ke*s,
+        # kd*sqrt(s) to hold the damping ratio) to stiffen the drive enough
+        # for reliable stacking; s=1 keeps the bare physical gains.
+        ke = np.array([400.0] * 7 + [100.0] * 2, dtype=np.float64)
+        kd = np.array([40.0] * 7 + [10.0] * 2, dtype=np.float64)
+        if self.implicit_pd:
+            ke = ke * self.ipd_ke_scale
+            kd = kd * self.ipd_ke_scale
+        builder.joint_target_ke[:9] = ke.tolist()
+        builder.joint_target_kd[:9] = kd.tolist()
+        builder.joint_effort_limit[:9] = [87.0] * 4 + [12.0] * 3 + [100.0] * 2
+        builder.joint_armature[:9] = [0.3] * 4 + [0.11] * 3 + [0.15] * 2
 
         for d in range(9):
             builder.joint_target_mode[d] = int(JointTargetMode.POSITION)
@@ -810,6 +887,17 @@ class Example:
 
         wp.copy(dest=self.control.joint_target_q[:7], src=self.joint_q_ik.flatten()[:7])
         wp.copy(dest=self.control.joint_target_q[7:9], src=self.gripper_target.flatten()[:2])
+
+        # Pure position-domain gravity compensation: offset the aim by
+        # tau_g/ke so implicit PD holds the commanded pose instead of sagging.
+        if self.implicit_pd:
+            newton.eval_inverse_dynamics(self.model, self.state_0, tau=self._gravity_comp_tau)
+            wp.launch(
+                apply_gravity_comp_offset_kernel,
+                dim=9,
+                inputs=[self._gravity_comp_tau.flatten(), self._gravity_comp_inv_ke],
+                outputs=[self.control.joint_target_q],
+            )
 
         wp.launch(
             advance_task_kernel,
