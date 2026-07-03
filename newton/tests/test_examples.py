@@ -1433,6 +1433,13 @@ class TestUIPCSoftbodyExamples(unittest.TestCase):
 if _HAS_UIPC:
     add_example_test(
         TestUIPCSoftbodyExamples,
+        name="uipc.basic.example_uipc_revolute_multi_turn",
+        devices=cuda_test_devices,
+        test_options={"num-frames": 240},
+        use_viewer=True,
+    )
+    add_example_test(
+        TestUIPCSoftbodyExamples,
         name="uipc.softbody.example_uipc_soft_hanging",
         devices=cuda_test_devices,
         test_options={"num-frames": 60},
