@@ -532,6 +532,9 @@ class RigidBodyBuilder:
                 extra = armature_extra.get(ref.body_idx)
                 if extra is not None:
                     inertia_cm = inertia_cm + extra
+                    # Record the fold; the density branch below never reaches
+                    # here, so unfolded bodies stay absent and are left untouched.
+                    self._mapping.body_armature_folded[ref.body_idx] = extra
                 # UIPC expects a symmetric inertia tensor; symmetrise to guard
                 # against float-roundoff drift in Newton's stored matrix.
                 inertia_cm = 0.5 * (inertia_cm + inertia_cm.T)

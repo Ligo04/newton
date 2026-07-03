@@ -63,7 +63,7 @@ from .converter import (
     populate_backend_offsets,
 )
 from .deformable_body import DeformableBodyBuilder
-from .rigid_body import RigidBodyBuilder, _armature_rotational_inertia
+from .rigid_body import RigidBodyBuilder
 
 # ---------------------------------------------------------------------------
 # UIPC ABD meta-attribute names (see libuipc AffineBodyConstitution).
@@ -849,12 +849,12 @@ class SolverUIPC(SolverBase):
         inv_mass_np = model.body_inv_mass.numpy().copy() if model.body_inv_mass is not None else None
         inv_inertia_np = model.body_inv_inertia.numpy().copy() if model.body_inv_inertia is not None else None
 
-        # The UIPC-side inertia of armature children includes the reflected
-        # rotor inertia folded in by the ABD armature bridge. Newton keeps
-        # armature in joint space (Model.joint_armature), so subtract it on
-        # the way back — otherwise host-side utilities that add armature
-        # themselves (eval_mass_matrix's include_armature) would double-count.
-        armature_extra = _armature_rotational_inertia(model, self._implicit_pd)
+        # Subtract back the armature inertia folded in at build time, so host
+        # utilities that add armature themselves (eval_mass_matrix) don't
+        # double-count. Replay the build-time record, not a recompute: a body
+        # the build side skipped (degenerate mesh) is absent here, so it is not
+        # over-subtracted into negative inertia → NaN.
+        armature_folded = self.mapping.body_armature_folded
 
         written: list[int] = []
         for b in body_indices:
@@ -866,7 +866,7 @@ class SolverUIPC(SolverBase):
                 continue  # proxy or otherwise missing ABD metadata
             if m <= 0.0:
                 continue
-            extra = armature_extra.get(b)
+            extra = armature_folded.get(b)
             if extra is not None:
                 i_cm = i_cm - extra
 

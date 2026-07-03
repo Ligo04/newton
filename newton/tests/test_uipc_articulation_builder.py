@@ -528,6 +528,61 @@ class TestUIPCRevoluteArmatureInertia(unittest.TestCase):
 
 
 @unittest.skipUnless(_HAS_UIPC, "uipc is not installed")
+class TestUIPCArmatureInertiaSyncSymmetry(unittest.TestCase):
+    """``sync_model_inertia_from_uipc`` must subtract back exactly the armature
+    inertia that ``build_affine_bodies`` folded in.
+
+    Regression: a revolute child with a degenerate mesh (``mesh_vol <= 1e-12``)
+    skips the fold, but the read-back used to subtract it unconditionally,
+    driving ``body_inertia`` negative (diagonal ``≈ -a``) → StablePD Cholesky
+    NaN. Fold and unfold now share one record, so an unfolded body is untouched.
+    """
+
+    def _build_initialize(self, half_extent: float, armature: float):
+        """World-anchored revolute pendulum with a cubic child of the given
+        half-extent; ``half_extent`` small enough drives ``mesh_vol`` below the
+        ``1e-12`` custom-inertia gate."""
+        builder = newton.ModelBuilder(up_axis=newton.Axis.Z, gravity=0.0)
+        child = builder.add_link()
+        builder.add_shape_box(child, hx=half_extent, hy=half_extent, hz=half_extent)
+        joint = builder.add_joint_revolute(parent=-1, child=child, axis=newton.Axis.Z, armature=armature)
+        builder.add_articulation([joint], label="armature_sync")
+        model = builder.finalize()
+
+        solver = newton.solvers.SolverUIPC(
+            model, backend="none", logger_level=uipc.Logger.Error, auto_sync_inertia=False
+        )
+        solver.initialize(model.state())
+        return model, solver, child
+
+    def test_degenerate_mesh_armature_does_not_produce_negative_inertia(self):
+        """Degenerate-mesh revolute child: the build side skips the armature
+        fold, so the sync side must not subtract it -- inertia stays PSD."""
+        # half_extent 1e-5 -> mesh volume ~8e-15, three orders below the gate.
+        model, solver, child = self._build_initialize(half_extent=1e-5, armature=1.0)
+        solver.sync_model_inertia_from_uipc([child])
+
+        inertia = model.body_inertia.numpy()[child].astype(np.float64)
+        min_eig = float(np.linalg.eigvalsh(0.5 * (inertia + inertia.T)).min())
+        self.assertGreaterEqual(
+            min_eig,
+            -1e-6,
+            f"synced inertia is not PSD (min eigenvalue {min_eig}); armature was over-subtracted",
+        )
+
+    def test_normal_mesh_sync_roundtrip_restores_authored_inertia(self):
+        """Non-degenerate revolute child: fold-then-unfold must cancel, so the
+        synced inertia reproduces the Newton-authored inertia."""
+        model, solver, child = self._build_initialize(half_extent=0.1, armature=0.4)
+        authored = model.body_inertia.numpy()[child].astype(np.float64).copy()
+
+        solver.sync_model_inertia_from_uipc([child])
+
+        synced = model.body_inertia.numpy()[child].astype(np.float64)
+        np.testing.assert_allclose(synced, authored, rtol=1e-4, atol=1e-6)
+
+
+@unittest.skipUnless(_HAS_UIPC, "uipc is not installed")
 class TestUIPCImplicitPD(unittest.TestCase):
     """Physical gain semantics of ``SolverUIPC(implicit_pd=True)``.
 

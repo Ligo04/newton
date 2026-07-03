@@ -427,6 +427,9 @@ class UIpcMappingInfo:
     body_objects: dict[int, Any] = field(default_factory=dict)
     # body_idx -> list of shape indices
     body_shapes: dict[int, list[int]] = field(default_factory=lambda: defaultdict(list))
+    # body_idx -> armature inertia (a·axis⊗axis) actually folded into its ABD
+    # mass matrix; sync_model_inertia_from_uipc subtracts back exactly these.
+    body_armature_folded: dict[int, np.ndarray] = field(default_factory=dict)
 
     # Pre-computed warp arrays for batch GPU sync (populated after world.init)
     body_indices_wp: wp.array | None = None  # sorted body indices, int32
