@@ -63,7 +63,7 @@ from .converter import (
     populate_backend_offsets,
 )
 from .deformable_body import DeformableBodyBuilder
-from .rigid_body import RigidBodyBuilder
+from .rigid_body import RigidBodyBuilder, _armature_rotational_inertia
 
 # ---------------------------------------------------------------------------
 # UIPC ABD meta-attribute names (see libuipc AffineBodyConstitution).
@@ -143,6 +143,10 @@ class SolverUIPC(SolverBase):
           (StableNeoHookean by default).
         - Joint types: REVOLUTE, PRISMATIC, FIXED, FREE.
         - BALL, DISTANCE, D6, and CABLE joints are not supported.
+        - :attr:`~newton.Model.joint_armature` on REVOLUTE joints is folded
+          into the child link's AffineBody inertia about the joint axis (the
+          extra inertia therefore also resists non-joint rotations of that
+          link). Armature on other joint types is ignored with a warning.
     """
 
     _uipc = None
@@ -813,6 +817,13 @@ class SolverUIPC(SolverBase):
         inv_mass_np = model.body_inv_mass.numpy().copy() if model.body_inv_mass is not None else None
         inv_inertia_np = model.body_inv_inertia.numpy().copy() if model.body_inv_inertia is not None else None
 
+        # The UIPC-side inertia of armature children includes the reflected
+        # rotor inertia folded in by the ABD armature bridge. Newton keeps
+        # armature in joint space (Model.joint_armature), so subtract it on
+        # the way back — otherwise host-side utilities that add armature
+        # themselves (eval_mass_matrix's include_armature) would double-count.
+        armature_extra = _armature_rotational_inertia(model)
+
         written: list[int] = []
         for b in body_indices:
             props = self.read_uipc_body_inertia(b)
@@ -823,6 +834,9 @@ class SolverUIPC(SolverBase):
                 continue  # proxy or otherwise missing ABD metadata
             if m <= 0.0:
                 continue
+            extra = armature_extra.get(b)
+            if extra is not None:
+                i_cm = i_cm - extra
 
             body_mass_np[b] = np.float32(m)
             body_com_np[b] = np.asarray(c, dtype=np.float32)

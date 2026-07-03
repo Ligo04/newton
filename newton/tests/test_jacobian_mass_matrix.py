@@ -469,6 +469,63 @@ def test_floating_base_simple_pendulum_mass_matrix_matches_analytical(test, devi
     np.testing.assert_allclose(H, expected, rtol=1.0e-6, atol=1.0e-6)
 
 
+def test_mass_matrix_include_armature_adds_diagonal(test, device):
+    """``include_armature=True`` must add ``diag(joint_armature)`` to H and leave every
+    off-diagonal entry identical to the ``include_armature=False`` result."""
+    armature_values = [0.3, 0.5, 0.7]
+
+    builder = newton.ModelBuilder(gravity=0.0, up_axis=newton.Axis.Z)
+
+    b1 = builder.add_link(mass=1.0)
+    b2 = builder.add_link(mass=1.2)
+    b3 = builder.add_link(mass=0.8)
+    builder.add_shape_box(b1, hx=0.1, hy=0.1, hz=0.1)
+    builder.add_shape_box(b2, hx=0.1, hy=0.1, hz=0.1)
+    builder.add_shape_box(b3, hx=0.1, hy=0.1, hz=0.1)
+
+    j1 = builder.add_joint_revolute(
+        parent=-1,
+        child=b1,
+        axis=newton.Axis.Z,
+        armature=armature_values[0],
+    )
+    j2 = builder.add_joint_revolute(
+        parent=b1,
+        child=b2,
+        axis=newton.Axis.Z,
+        child_xform=wp.transform(wp.vec3(-1.0, 0.0, 0.0), wp.quat_identity()),
+        armature=armature_values[1],
+    )
+    j3 = builder.add_joint_revolute(
+        parent=b2,
+        child=b3,
+        axis=newton.Axis.Z,
+        child_xform=wp.transform(wp.vec3(-1.0, 0.0, 0.0), wp.quat_identity()),
+        armature=armature_values[2],
+    )
+    builder.add_articulation([j1, j2, j3], label="armature_chain")
+
+    model = builder.finalize(device=device)
+    state = model.state()
+
+    # Non-identity configuration so H is not degenerate.
+    q = state.joint_q.numpy()
+    q[:] = [0.3, -0.4, 0.6]
+    state.joint_q.assign(q)
+    newton.eval_fk(model, state.joint_q, state.joint_qd, state)
+
+    num_dofs = model.joint_dof_count
+    H_with = newton.eval_mass_matrix(model, state, include_armature=True).numpy()[0, :num_dofs, :num_dofs]
+    H_without = newton.eval_mass_matrix(model, state, include_armature=False).numpy()[0, :num_dofs, :num_dofs]
+
+    diff = H_with - H_without
+    expected_diag = np.array(armature_values, dtype=np.float64)
+
+    np.testing.assert_allclose(np.diag(diff), expected_diag, atol=1.0e-6)
+    off_diagonal_mask = ~np.eye(num_dofs, dtype=bool)
+    np.testing.assert_allclose(diff[off_diagonal_mask], 0.0, atol=1.0e-6)
+
+
 def test_jacobian_multiple_articulations(test, device):
     """Test Jacobian computation with multiple articulations."""
     builder = newton.ModelBuilder()
@@ -978,6 +1035,12 @@ add_function_test(
     TestJacobianMassMatrix,
     "test_floating_base_simple_pendulum_mass_matrix_matches_analytical",
     test_floating_base_simple_pendulum_mass_matrix_matches_analytical,
+    devices=devices,
+)
+add_function_test(
+    TestJacobianMassMatrix,
+    "test_mass_matrix_include_armature_adds_diagonal",
+    test_mass_matrix_include_armature_adds_diagonal,
     devices=devices,
 )
 add_function_test(

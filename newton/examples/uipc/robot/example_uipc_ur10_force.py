@@ -38,9 +38,10 @@
 #     (reduced-coordinate rigid-body solvers honour ``joint_f`` directly).
 #   - ``uipc`` is the default to keep this example in the uipc/ folder;
 #     its ABD implicit integration couples the external torque through
-#     an affine-body constraint solve, which is quite sensitive to
-#     ``sim_substeps``.  Running at 240 Hz (substeps=4) keeps the
-#     simulation bounded but you will see chatter on the wrist DOFs.
+#     an affine-body constraint solve.  The light wrist DOFs limit-cycle
+#     under plain PD unless reflected rotor inertia is added, so this
+#     example sets ``Model.joint_armature`` (``self.armature`` below) —
+#     SolverUIPC folds it into each child link's ABD inertia internally.
 #   - ``semi_implicit`` runs but tends to absorb ``joint_f`` into its
 #     joint attachment constraints and barely moves the arm here.
 #
@@ -116,6 +117,11 @@ class Example:
         self.kd = np.array([40.0, 40.0, 30.0, 15.0, 10.0, 5.0], dtype=np.float32)
         # Torque clamps sized roughly to UR10's real effort limits.
         self.max_torque = np.array([330.0, 330.0, 150.0, 54.0, 54.0, 54.0], dtype=np.float32)
+        # Reflected rotor inertia per revolute DOF (I_rotor * gear_ratio^2,
+        # ballpark for UR10-class harmonic drives). The heavier wrist values
+        # are what keeps plain PD free of the high-gain limit cycle on the
+        # light wrist links under the uipc backend.
+        self.armature = np.array([0.01, 0.01, 0.01, 0.2, 0.2, 0.2], dtype=np.float32)
 
         ur10 = newton.ModelBuilder()
 
@@ -160,8 +166,20 @@ class Example:
             ur10.joint_target_ke[i] = 0.0
             ur10.joint_target_kd[i] = 0.0
             ur10.joint_target_mode[i] = int(JointTargetMode.EFFORT)
-            if ur10.joint_type[i] == newton.JointType.REVOLUTE:
-                ur10.joint_armature[i] = 1e-2
+
+        # ``joint_armature`` is the portable cross-solver interface:
+        # Featherstone/MuJoCo add it to their joint-space mass matrix, and
+        # SolverUIPC folds it into the child link's ABD inertia about the
+        # joint axis (see the armature notes in ``docs/integrations/uipc.md``).
+        # ``newton.eval_mass_matrix`` includes it by default, keeping the
+        # Stable-PD plant model consistent on every backend.
+        rev_dof = 0
+        for j in range(len(ur10.joint_type)):
+            if ur10.joint_type[j] != newton.JointType.REVOLUTE:
+                continue
+            ur10.joint_armature[ur10.joint_qd_start[j]] = float(self.armature[rev_dof])
+            rev_dof += 1
+        assert rev_dof == len(self.armature), f"expected {len(self.armature)} revolute joints, found {rev_dof}"
 
         # Register one PD actuator per UR10 DOF. ``--stable-pd`` swaps plain
         # ``ControllerPD`` for ``ControllerStablePD`` (Tan et al. 2011): the

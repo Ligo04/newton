@@ -1378,6 +1378,29 @@ def eval_articulation_mass_matrix(
                 H[art_idx, dof_i, dof_j] = H[art_idx, dof_i, dof_j] + sum_val
 
 
+@wp.kernel
+def _add_armature_to_mass_matrix(
+    articulation_start: wp.array[int],
+    articulation_end: wp.array[int],
+    joint_qd_start: wp.array[int],
+    articulation_mask: wp.array[bool],
+    joint_armature: wp.array[float],
+    # outputs
+    H: wp.array3d[float],
+):
+    """Add per-DOF armature to the mass matrix diagonal (H += diag(armature))."""
+    art_idx, i = wp.tid()
+
+    if articulation_mask:
+        if not articulation_mask[art_idx]:
+            return
+
+    dof_start = joint_qd_start[articulation_start[art_idx]]
+    dof_end = joint_qd_start[articulation_end[art_idx]]
+    if dof_start + i < dof_end:
+        H[art_idx, i, i] = H[art_idx, i, i] + joint_armature[dof_start + i]
+
+
 def eval_mass_matrix(
     model: Model,
     state: State,
@@ -1386,6 +1409,7 @@ def eval_mass_matrix(
     body_I_s: wp.array | None = None,
     joint_S_s: wp.array | None = None,
     mask: wp.array | None = None,
+    include_armature: bool = True,
 ) -> wp.array | None:
     """Evaluate generalized mass matrix for articulations.
 
@@ -1393,6 +1417,10 @@ def eval_mass_matrix(
     Jacobian and M is the block-diagonal spatial mass matrix. The mass matrix
     relates joint accelerations to joint forces/torques and is consistent with
     kinetic energy computed from COM-referenced body twists.
+
+    Reflected rotor inertia is part of the generalized mass matrix, so
+    :attr:`~newton.Model.joint_armature` is added to the diagonal by default;
+    pass ``include_armature=False`` for the pure link-inertia J^T * M * J.
 
     Args:
         model: The model containing articulation definitions.
@@ -1407,6 +1435,7 @@ def eval_mass_matrix(
                    shape (joint_dof_count,), dtype wp.spatial_vector. If None, allocates internally.
         mask: Optional boolean mask to select which articulations to compute.
               Shape [articulation_count]. If None, computes for all articulations.
+        include_armature: Add :attr:`~newton.Model.joint_armature` to the diagonal.
 
     Returns:
         The mass matrix array H, or None if the model has no articulations.
@@ -1474,6 +1503,21 @@ def eval_mass_matrix(
         outputs=[H],
         device=model.device,
     )
+
+    if include_armature and model.joint_armature is not None:
+        wp.launch(
+            kernel=_add_armature_to_mass_matrix,
+            dim=(model.articulation_count, H.shape[1]),
+            inputs=[
+                model.articulation_start,
+                model.articulation_end,
+                model.joint_qd_start,
+                mask,
+                model.joint_armature,
+            ],
+            outputs=[H],
+            device=model.device,
+        )
 
     return H
 

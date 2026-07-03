@@ -292,5 +292,63 @@ class TestUIPCShapelessProxyInertia(unittest.TestCase):
         np.testing.assert_allclose(props["inertia"], model_inertia, atol=1e-6)
 
 
+@unittest.skipUnless(_HAS_UIPC, "uipc is not installed")
+class TestUIPCRevoluteArmatureInertia(unittest.TestCase):
+    """A REVOLUTE joint's ``joint_armature`` must fold into the child ABD
+    body's inertia as ``a * axis ⊗ axis`` (see ``_armature_rotational_inertia``
+    in ``rigid_body.py``), auto-selecting the custom-inertia path with no
+    explicit ``sync_uipc_inertia_with_model`` call required."""
+
+    def _build_and_initialize(self, armature: float | None):
+        """A world-anchored revolute pendulum with a boxed child link.
+
+        The child's mass/inertia come entirely from the box shape's default
+        density (no extra point mass from ``add_link``): UIPC's default,
+        non-custom-inertia path rebuilds inertia from
+        ``mass_density = body_mass / mesh_volume``, so an added point mass
+        at the COM would inflate ``body_mass`` without changing
+        ``body_inertia`` (a point mass at the COM has no rotational
+        inertia), breaking that reconstruction independently of armature.
+        ``child_xform`` is left at its identity default, so the joint's
+        parent-anchor axis (``newton.Axis.Z``) equals the child body-frame
+        axis directly -- no extra rotation to account for when checking the
+        folded inertia.
+        """
+        builder = newton.ModelBuilder(up_axis=newton.Axis.Z, gravity=0.0)
+        child = builder.add_link()
+        builder.add_shape_box(child, hx=0.1, hy=0.08, hz=0.06)
+        joint = builder.add_joint_revolute(parent=-1, child=child, axis=newton.Axis.Z, armature=armature)
+        builder.add_articulation([joint], label="armature_pendulum")
+        model = builder.finalize()
+
+        solver = newton.solvers.SolverUIPC(
+            model, backend="none", logger_level=uipc.Logger.Error, auto_sync_inertia=False
+        )
+        solver.initialize(model.state())
+        return model, solver, child
+
+    def test_revolute_armature_adds_axis_outer_product_to_child_inertia(self):
+        """With armature set, UIPC's ABD inertia must equal the Newton-authored
+        child inertia plus ``armature * axis ⊗ axis``."""
+        armature = 0.4
+        model, solver, child = self._build_and_initialize(armature)
+
+        axis = np.array(newton.Axis.Z.to_vector(), dtype=np.float64)
+        model_inertia = model.body_inertia.numpy()[child].astype(np.float64)
+        expected = model_inertia + armature * np.outer(axis, axis)
+
+        inertia = solver.read_uipc_body_inertia(child)["inertia"]
+        np.testing.assert_allclose(inertia, expected, rtol=1e-4, atol=1e-6)
+
+    def test_revolute_without_armature_leaves_child_inertia_unchanged(self):
+        """With no armature, the child body must take the default
+        density-derived ABD path and reproduce the Newton-authored inertia."""
+        model, solver, child = self._build_and_initialize(armature=None)
+
+        model_inertia = model.body_inertia.numpy()[child].astype(np.float64)
+        inertia = solver.read_uipc_body_inertia(child)["inertia"]
+        np.testing.assert_allclose(inertia, model_inertia, rtol=1e-4, atol=1e-6)
+
+
 if __name__ == "__main__":
     unittest.main()

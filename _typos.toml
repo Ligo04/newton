@@ -5,5 +5,7 @@ abd = "abd"
 Shepperd = "Shepperd"
 # Level of Detail — standard 3D graphics term (viser LOD simplification)
 LOD = "LOD"
-# Loop variable for y-index
+# Loop variables for x/y/z-index (also mirrored in pyproject [tool.typos])
+ix = "ix"
 iy = "iy"
+iz = "iz"

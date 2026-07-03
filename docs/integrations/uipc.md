@@ -158,6 +158,21 @@ If you need UIPC to preserve Newton-authored inertial values instead, call
 Newton-authored values untouched after initialization, construct the solver with
 `auto_sync_inertia=False`.
 
+### Joint armature
+
+AffineBody dynamics has no joint-space mass slot, so `Model.joint_armature` on
+a revolute joint is folded into the child link's ABD inertia as
+`armature * axis ⊗ axis` about the joint axis. This is exact for rotation
+about the joint's own axis, but the extra inertia also resists other rotations
+of that link (upstream joints, contact impulses) — unlike true joint-space
+armature. Armature children are automatically built through the
+Newton-authored mass-matrix path described above (their mass and COM then come
+from the Newton model rather than `mass_density * mesh_volume`). Armature on
+non-revolute joints has no ABD equivalent and is dropped with a warning.
+`sync_model_inertia_from_uipc` subtracts the folded armature on the way back,
+so `Model.body_inertia` always stays armature-free and
+`eval_mass_matrix(include_armature=True)` does not double-count.
+
 (uipc-custom-attributes)=
 ## UIPC-specific custom attributes
 
