@@ -258,6 +258,7 @@ class SolverUIPC(SolverBase):
         cloth_soft_position_strength_ratio: float = 100.0,
         enable_soft_position_constraint: bool = True,
         rigid_contact_max: int | None = None,
+        joint_strength_ratio: float = 100.0,
     ):
         """Create a UIPC solver instance from a Newton model.
 
@@ -309,6 +310,11 @@ class SolverUIPC(SolverBase):
                 contact-buffer size, so when ``None`` (default) the capacity is
                 estimated as :attr:`CONTACTS_PER_ENV` times ``Model.num_envs``.
                 Set an explicit value to override for dense-contact scenes.
+            joint_strength_ratio: UIPC ``strength_ratio`` of the joint
+                anchoring constraints (revolute/prismatic/fixed/ball). This is
+                a solver-quality knob for how rigidly joints hold their bodies
+                together; it is independent of the drive stiffness, which is
+                derived from ``joint_target_ke``.
         """
         super().__init__(model=model)
         self.import_uipc()
@@ -332,6 +338,7 @@ class SolverUIPC(SolverBase):
         self._cloth_soft_position_strength_ratio = cloth_soft_position_strength_ratio
         self._enable_soft_position_constraint = enable_soft_position_constraint
         self._rigid_contact_max = rigid_contact_max
+        self._joint_strength_ratio = joint_strength_ratio
 
         # Scene config: start from UIPC defaults, apply Newton model overrides.
         if scene_config is None:
@@ -958,7 +965,13 @@ class SolverUIPC(SolverBase):
         # Create one builder per type (reused across worlds)
         self._rigid_body_builder = RigidBodyBuilder(model, scene, self.mapping, self._kappa, self._default_mass_density)
         self._articulation_builder = ArticulationBuilder(
-            model, scene, self.mapping, self._dt, kappa=self._kappa, body_kappa=body_kappa
+            model,
+            scene,
+            self.mapping,
+            self._dt,
+            kappa=self._kappa,
+            body_kappa=body_kappa,
+            joint_strength_ratio=self._joint_strength_ratio,
         )
         self._cloth_builder = ClothBuilder(
             model,

@@ -71,6 +71,7 @@ class ArticulationBuilder:
         dt: float,
         kappa: float = 100 * MPa,
         body_kappa: np.ndarray | None = None,
+        joint_strength_ratio: float = 100.0,
     ) -> None:
         self._model = model
         self._scene = scene
@@ -80,6 +81,7 @@ class ArticulationBuilder:
         self._abd = AffineBodyConstitution()
         self._kappa = kappa
         self._body_kappa = body_kappa
+        self._joint_strength_ratio = joint_strength_ratio
 
         # Per-articulation runtime objects (populated by build_joints)
         self.articulations: dict[int, Articulation] = {}
@@ -561,9 +563,8 @@ class ArticulationBuilder:
             parent_ids.append(p_id)
             child_slots.append(c_slot)
             child_ids.append(c_id)
-            target_ke = self._extract_target_strength(j, model.joint_qd_start, model.joint_target_ke)
-            strengths.append(target_ke)
-            drive_strengths.append(target_ke)
+            strengths.append(self._joint_strength_ratio)
+            drive_strengths.append(self._extract_drive_strength(j, jdata, model))
 
             # Limits
             lower, upper = self._extract_limits(
@@ -728,9 +729,8 @@ class ArticulationBuilder:
             parent_ids.append(p_id)
             child_slots.append(c_slot)
             child_ids.append(c_id)
-            target_ke = self._extract_target_strength(j, model.joint_qd_start, model.joint_target_ke)
-            strengths.append(target_ke)
-            drive_strengths.append(target_ke)
+            strengths.append(self._joint_strength_ratio)
+            drive_strengths.append(self._extract_drive_strength(j, jdata, model))
 
             # Limits
             lower, upper = self._extract_limits(
@@ -840,7 +840,7 @@ class ArticulationBuilder:
                 raise RuntimeError(f"Missing parent geometry slot for fixed joint {j}.")
             parent_slots.append(p_slot)
             parent_ids.append(p_id)
-            strengths.append(100.0)
+            strengths.append(self._joint_strength_ratio)
             joint_indices.append(j)
 
         if not child_slots:
@@ -913,7 +913,7 @@ class ArticulationBuilder:
             child_ids.append(c_id)
             l_positions.append(l_pos)
             r_positions.append(r_pos)
-            strengths.append(100.0)
+            strengths.append(self._joint_strength_ratio)
             joint_indices.append(j)
 
         jm = AffineBodySphericalJoint().create_geometry(
@@ -1137,18 +1137,39 @@ class ArticulationBuilder:
         qd_start = int(joint_qd_start.numpy()[j])
         return float(joint_limit_ke.numpy()[qd_start])
 
+    def _extract_drive_strength(self, j: int, jdata: dict, model: Any) -> float:
+        """UIPC drive ``strength_ratio`` equivalent to Newton's ``joint_target_ke``.
+
+        libuipc's aim-drive energy ``0.5 * ratio * (m_parent + m_child) * err**2``
+        enters the incremental potential without a ``dt**2`` factor, so its
+        effective physical stiffness is ``ratio * (m_parent + m_child) / dt**2``.
+        Inverting preserves ``joint_target_ke``'s cross-solver meaning
+        (drive torque/force = ke * error): ``ratio = ke * dt**2 / mass_sum``.
+        Zero or unset ``ke`` yields no drive, matching the PD behaviour of the
+        other backends.
+        """
+        if model.joint_target_ke is None or model.joint_qd_start is None:
+            return 0.0
+        qd_start = int(model.joint_qd_start.numpy()[j])
+        target_ke = float(model.joint_target_ke.numpy()[qd_start])
+        if target_ke <= 0.0:
+            return 0.0
+        mass_sum = self._joint_body_mass(jdata["parent_body"], model) + self._joint_body_mass(
+            jdata["child_body"], model
+        )
+        return target_ke * self._dt * self._dt / mass_sum
+
     @staticmethod
-    def _extract_target_strength(
-        j: int,
-        joint_qd_start: wp.array,
-        joint_target_ke: wp.array | None,
-    ) -> float:
-        """Extract UIPC joint drive strength from Newton's per-DOF target stiffness."""
-        if joint_target_ke is None:
-            return 100.0
-        qd_start = int(joint_qd_start.numpy()[j])
-        val = float(joint_target_ke.numpy()[qd_start])
-        return val if val else 100.0
+    def _joint_body_mass(body_idx: int, model: Any) -> float:
+        """Mass [kg] of a joint-side body as UIPC's joint kappa will see it.
+
+        Mirrors the fallbacks in :meth:`_create_proxy`: world anchors and
+        shapeless/massless bodies get the proxy unit mass.
+        """
+        if body_idx < 0 or model.body_mass is None:
+            return 1.0
+        mass = float(model.body_mass.numpy()[body_idx])
+        return mass if mass > 0.0 else 1.0
 
     # ------------------------------------------------------------------
     # Per-step interface (called by SolverUIPC.step)

@@ -105,8 +105,8 @@ is its commanded target when the leader is itself position-driven (no lag),
 otherwise its measured start-of-step position (one-step lag).
 
 The coupling is **soft**: the follower tracks its target through the driving
-joint's stiffness (`joint_target_ke` / `joint_target_kd`) and may lag under
-load, unlike a hard equality constraint. Both follower and leader must be active
+joint's stiffness (`joint_target_ke`, converted to a UIPC drive strength) and
+may lag under load, unlike a hard equality constraint. Both follower and leader must be active
 `REVOLUTE` / `PRISMATIC` joints; a constraint whose follower or leader is not an
 active UIPC joint is skipped with a warning. Coefficients are baked at
 initialization — editing them requires reconstructing the solver.
@@ -248,10 +248,16 @@ callbacks.
 | `VELOCITY` | Passive; no UIPC velocity-only drive is written. |
 | `NONE` | Passive. |
 
-`joint_target_ke` is used as UIPC drive strength for active joints, defaulting
-to `100.0` when unset or zero. `joint_limit_lower` / `joint_limit_upper` create
-UIPC joint-limit constitutions, with `joint_limit_ke` as the limit strength
-(default `100.0`).
+`joint_target_ke` keeps its cross-solver meaning of a physical drive stiffness
+[N·m/rad or N/m]: it is converted to the UIPC drive `strength_ratio` as
+`ke * dt**2 / (m_parent + m_child)`, so the effective drive torque/force is
+`ke * error`, matching the PD drives of the other backends. A zero or unset
+`ke` produces no drive (`joint_target_kd` has no UIPC counterpart — the
+implicit integrator provides damping). The joint anchoring constraints
+themselves use the solver-level `joint_strength_ratio` parameter (default
+`100.0`), independent of the drive gains. `joint_limit_lower` /
+`joint_limit_upper` create UIPC joint-limit constitutions, with
+`joint_limit_ke` as the limit strength (default `100.0`).
 
 ## Contact pipeline
 

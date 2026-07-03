@@ -107,9 +107,7 @@ class TestUIPCArticulationBuilder(unittest.TestCase):
             def apply_to(self, _geometry, _lowers, _uppers, strengths):
                 captured["strengths"] = strengths.copy()
 
-        builder = ArticulationBuilder.__new__(ArticulationBuilder)
-        builder._scene = _FakeScene()
-        builder._mapping = _FakeMapping()
+        builder = self._make_builder()
 
         model = self._make_single_dof_model(limit_ke=234.0)
         joints = [self._make_joint_data()]
@@ -134,9 +132,7 @@ class TestUIPCArticulationBuilder(unittest.TestCase):
             def apply_to(self, _geometry, _lowers, _uppers, strengths):
                 captured["strengths"] = strengths.copy()
 
-        builder = ArticulationBuilder.__new__(ArticulationBuilder)
-        builder._scene = _FakeScene()
-        builder._mapping = _FakeMapping()
+        builder = self._make_builder()
 
         model = self._make_single_dof_model(limit_ke=567.0)
         joints = [self._make_joint_data()]
@@ -156,22 +152,85 @@ class TestUIPCArticulationBuilder(unittest.TestCase):
 
         np.testing.assert_array_equal(captured["strengths"], np.array([567.0], dtype=np.float64))
 
+    def test_revolute_strengths_decoupled_from_target_ke(self):
+        """Constraint strength must come from joint_strength_ratio; drive
+        strength must be the converted ratio ke*dt^2/(m_parent+m_child)."""
+        captured = {}
+
+        class _JointConstitution:
+            def create_geometry(self, *args):
+                captured["strengths"] = args[-1].copy()
+                return object()
+
+        class _DrivingConstitution:
+            def apply_to(self, _geometry, strengths):
+                captured["drive_strengths"] = strengths.copy()
+
+        builder = self._make_builder(dt=0.1, joint_strength_ratio=42.0)
+
+        model = self._make_single_dof_model(limit_ke=1.0, target_ke=720.0, body_mass=[3.0, 5.0])
+        joints = [self._make_joint_data(parent_body=0, child_body=1)]
+
+        with (
+            patch.object(uipc_articulation_builder, "AffineBodyRevoluteJoint", return_value=_JointConstitution()),
+            patch.object(
+                uipc_articulation_builder, "AffineBodyDrivingRevoluteJoint", return_value=_DrivingConstitution()
+            ),
+            patch.object(
+                uipc_articulation_builder, "AffineBodyRevoluteJointExternalForce", return_value=_NoOpConstitution()
+            ),
+            patch.object(uipc_articulation_builder, "AffineBodyRevoluteJointLimit", return_value=_NoOpConstitution()),
+            patch.object(ArticulationBuilder, "_validate_revolute_anchors", return_value=None),
+        ):
+            builder._build_revolute_joints_batch(joints, model)
+
+        np.testing.assert_array_equal(captured["strengths"], np.array([42.0], dtype=np.float64))
+        # ratio = ke * dt^2 / (m_parent + m_child) = 720 * 0.01 / 8
+        np.testing.assert_allclose(captured["drive_strengths"], np.array([0.9], dtype=np.float64))
+
+    def test_extract_drive_strength_world_parent_uses_unit_proxy_mass(self):
+        builder = self._make_builder(dt=0.1)
+        model = self._make_single_dof_model(limit_ke=1.0, target_ke=720.0, body_mass=[5.0])
+
+        strength = builder._extract_drive_strength(0, {"parent_body": -1, "child_body": 0}, model)
+
+        # world anchor proxy has unit mass: ratio = 720 * 0.01 / (1 + 5)
+        self.assertAlmostEqual(strength, 1.2)
+
+    def test_extract_drive_strength_zero_ke_disables_drive(self):
+        builder = self._make_builder()
+        model = self._make_single_dof_model(limit_ke=1.0, target_ke=0.0, body_mass=[3.0, 5.0])
+
+        strength = builder._extract_drive_strength(0, {"parent_body": 0, "child_body": 1}, model)
+
+        self.assertEqual(strength, 0.0)
+
     @staticmethod
-    def _make_single_dof_model(limit_ke: float):
+    def _make_builder(dt: float = 1.0 / 60.0, joint_strength_ratio: float = 100.0):
+        builder = ArticulationBuilder.__new__(ArticulationBuilder)
+        builder._scene = _FakeScene()
+        builder._mapping = _FakeMapping()
+        builder._dt = dt
+        builder._joint_strength_ratio = joint_strength_ratio
+        return builder
+
+    @staticmethod
+    def _make_single_dof_model(limit_ke: float, target_ke: float = 0.0, body_mass: list[float] | None = None):
         class _Model:
             joint_axis = _Array([[1.0, 0.0, 0.0]])
             joint_qd_start = _Array([0])
             joint_q_start = _Array([0])
             joint_q = None
-            joint_target_ke = _Array([0.0])
+            joint_target_ke = _Array([target_ke])
             joint_limit_lower = _Array([-0.5])
             joint_limit_upper = _Array([0.5])
             joint_limit_ke = _Array([limit_ke])
 
+        _Model.body_mass = _Array(body_mass) if body_mass is not None else None
         return _Model()
 
     @staticmethod
-    def _make_joint_data():
+    def _make_joint_data(parent_body: int = -1, child_body: int = 0):
         return {
             "j": 0,
             "art": _FakeArticulation(),
@@ -179,8 +238,10 @@ class TestUIPCArticulationBuilder(unittest.TestCase):
             "parent_rot": np.eye(3, dtype=np.float64),
             "child_pivot": np.zeros(3, dtype=np.float64),
             "child_rot": np.eye(3, dtype=np.float64),
+            "parent_body": parent_body,
             "parent_slot": object(),
             "parent_instance_id": 0,
+            "child_body": child_body,
             "child_slot": object(),
             "child_instance_id": 0,
         }
