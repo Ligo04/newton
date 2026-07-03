@@ -70,6 +70,7 @@ def _cache_control_kernel(
     has_target_pos: int,
     has_target_vel: int,
     has_joint_f: int,
+    blend_aims: int,
     # outputs (double precision for UIPC)
     out_target_pos: wp.array[wp.float64],
     out_target_vel: wp.array[wp.float64],
@@ -88,22 +89,33 @@ def _cache_control_kernel(
     qd_idx = local_qd_start[local]
     mode = joint_target_mode[qd_idx]
 
-    # Position driving (POSITION or POSITION_VELOCITY)
+    # Position driving (POSITION or POSITION_VELOCITY). Under aim blending
+    # (implicit PD / filtered aim), VELOCITY joints are driven too: an aim
+    # toward q_prev + dt*dq_ref is a velocity servo (blend weight 1 — the
+    # cached position target is never read).
     if mode == JointTargetMode.POSITION or mode == JointTargetMode.POSITION_VELOCITY:
         out_is_constrained[local] = 1  # ty:ignore[invalid-assignment]
         if has_target_pos != 0:
             out_target_pos[local] = wp.float64(target_pos[q_idx])  # ty:ignore[invalid-assignment]
+    elif blend_aims != 0 and mode == JointTargetMode.VELOCITY:
+        out_is_constrained[local] = 1  # ty:ignore[invalid-assignment]
     else:
         out_is_constrained[local] = 0  # ty:ignore[invalid-assignment]
 
-    # Aim velocity target — only POSITION_VELOCITY forwards it; the
-    # implicit-PD blend then damps toward rest in plain POSITION mode.
-    if mode == JointTargetMode.POSITION_VELOCITY and has_target_vel != 0:
+    # Aim velocity target — POSITION_VELOCITY forwards it, as does VELOCITY
+    # under aim blending; the blend damps toward rest in plain POSITION mode.
+    forward_vel = mode == JointTargetMode.POSITION_VELOCITY
+    if blend_aims != 0 and mode == JointTargetMode.VELOCITY:
+        forward_vel = True
+    if forward_vel and has_target_vel != 0:
         out_target_vel[local] = wp.float64(target_vel[qd_idx])  # ty:ignore[invalid-assignment]
     else:
         out_target_vel[local] = wp.float64(0.0)  # ty:ignore[invalid-assignment]
 
-    # Force/torque control (EFFORT mode)
+    # Force/torque control (EFFORT mode). A joint is either position-driven
+    # or force-controlled, never both — gravity compensation under implicit
+    # PD is done in the position domain via an aim offset, not a coexisting
+    # feedforward torque.
     if mode == JointTargetMode.EFFORT and has_joint_f != 0:
         out_target_force[local] = wp.float64(joint_f[qd_idx])  # ty:ignore[invalid-assignment]
         out_is_force_constrained[local] = 1  # ty:ignore[invalid-assignment]
@@ -328,12 +340,13 @@ class Articulation:
         self._is_constrained_dev: wp.array | None = None
         self._is_force_constrained_dev: wp.array | None = None
 
-        # -- Implicit-PD aim blending (populated by ArticulationBuilder) --
-        # local index → damping blend weight w_d = ratio_d/(ratio_p+ratio_d).
-        # The anim callbacks blend the aim toward theta_prev + dt*dq_ref by
-        # this weight, which is exactly a damping spring merged with the
-        # position spring (equal-variable quadratics add). Empty = off.
-        self.implicit_pd_weight: dict[int, float] = {}
+        # -- Aim blending (populated by ArticulationBuilder) --
+        # local index → (w_damp, w_arm) blend weights over the summed drive
+        # stiffness. The anim callbacks blend the aim toward
+        # theta_prev + dt*dq_ref (implicit-PD damping spring) and
+        # theta_prev + dt*qd_prev (prismatic armature kinetic spring) by
+        # these weights — equal-variable quadratics add. Empty = off.
+        self.aim_blend_weights: dict[int, tuple[float, float]] = {}
 
         # -- FREE joint readback (populated by register_free_joint) -----
         # Tracked separately from active joints; recovered from body state.
@@ -533,7 +546,7 @@ class Articulation:
         # space thanks to the ``init_angle`` edge offset, so write the
         # Newton target directly.
         if driving:
-            aim_angle = self._blend_implicit_pd_aim(local, aim_angle)
+            aim_angle = self._blend_aim(local, aim_angle)
             _view_attr(geo.edges().find("aim_angle"))[edge_idx] = aim_angle
 
     def prismatic_joint_anim(
@@ -578,31 +591,45 @@ class Articulation:
             _view_attr(geo.edges().find("external_force"))[edge_idx] = external_force
 
         if driving:
-            aim_distance = self._blend_implicit_pd_aim(local, aim_distance)
+            aim_distance = self._blend_aim(local, aim_distance)
             _view_attr(geo.edges().find("aim_distance"))[edge_idx] = aim_distance
 
-    def _blend_implicit_pd_aim(self, local: int, aim: float) -> float:
-        """Blend the aim target with the implicit-PD damping spring.
+    def _blend_aim(self, local: int, aim: float) -> float:
+        """Blend the aim target with the damping and armature springs.
 
         The damping term of an implicit PD, ``0.5*kd_ratio*(q - q_prev -
-        dt*dq_ref)^2``, is an aim spring toward ``q_prev + dt*dq_ref``.
-        Merged with the position spring (stiffnesses add, targets average
-        by weight) it stays a single libuipc drive channel:
+        dt*dq_ref)^2``, is an aim spring toward ``q_prev + dt*dq_ref``;
+        a prismatic joint's armature kinetic term ``0.5*(m_a/dt^2)*(q -
+        q_prev - dt*qd_prev)^2`` is one toward ``q_prev + dt*qd_prev``
+        (the inertial free-flight prediction — no gravity: rotor weight
+        does not couple through the transmission). Merged with the
+        position spring (stiffnesses add, targets average by weight) they
+        stay a single libuipc drive channel:
 
-            aim = (1-w)*q_ref + w*(q_prev + dt*dq_ref)
+            aim = (1-w_d-w_a)*q_ref + w_d*(q_prev + dt*dq_ref)
+                                    + w_a*(q_prev + dt*qd_prev)
 
-        ``q_prev`` is the pre-advance snapshot from :meth:`read_pre_advance`,
-        so the blended aim is constant across the animator's line-search /
+        ``q_prev``/``qd_prev`` are the pre-advance snapshot from
+        :meth:`read_pre_advance` / :meth:`read_post_retrieve`, so the
+        blended aim is constant across the animator's line-search /
         Newton re-invocations within one ``world.advance()``.
         """
-        w = self.implicit_pd_weight.get(local)
-        if w is None:
+        weights = self.aim_blend_weights.get(local)
+        if weights is None:
             return aim
+        w_d, w_a = weights
         assert self.joint_position is not None
+        assert self.joint_velocity is not None
         assert self.target_velocity is not None
         q_prev = float(self.joint_position.numpy()[local])
-        dq_ref = float(self.target_velocity.numpy()[local])
-        return (1.0 - w) * aim + w * (q_prev + self._dt * dq_ref)
+        blended = (1.0 - w_d - w_a) * aim
+        if w_d > 0.0:
+            dq_ref = float(self.target_velocity.numpy()[local])
+            blended += w_d * (q_prev + self._dt * dq_ref)
+        if w_a > 0.0:
+            qd_prev = float(self.joint_velocity.numpy()[local])
+            blended += w_a * (q_prev + self._dt * qd_prev)
+        return blended
 
     # ------------------------------------------------------------------
     # Per-step control caching & state readback
@@ -615,6 +642,7 @@ class Articulation:
         target_pos: wp.array | None,
         target_vel: wp.array | None,
         joint_f: wp.array | None,
+        blend_aims: bool = False,
     ) -> None:
         """Cache Newton control values via a warp kernel.
 
@@ -659,6 +687,7 @@ class Articulation:
                 int(target_pos is not None),
                 int(target_vel is not None),
                 int(joint_f is not None),
+                int(blend_aims),
             ],
             outputs=[
                 self._target_position_dev,

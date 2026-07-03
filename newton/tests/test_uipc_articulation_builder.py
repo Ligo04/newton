@@ -11,7 +11,7 @@ import numpy as np
 import warp as wp
 
 import newton
-from newton import JointTargetMode
+from newton import JointTargetMode, JointType
 
 _HAS_UIPC = importlib.util.find_spec("uipc") is not None
 
@@ -219,27 +219,29 @@ class TestUIPCArticulationBuilder(unittest.TestCase):
         builder = self._make_builder(dt=0.1, implicit_pd=True)
         model = self._make_single_dof_model(limit_ke=1.0, target_ke=720.0, target_kd=80.0, body_mass=[3.0, 5.0])
 
-        strength, blend = builder._implicit_pd_params(0, {"parent_body": 0, "child_body": 1}, model)
+        strength, damp_blend, arm_blend = builder._implicit_pd_params(0, {"parent_body": 0, "child_body": 1}, model)
 
         # ratio_p = ke*dt^2/mass = 720*0.01/8 = 0.9; ratio_d = kd*dt/mass = 80*0.1/8 = 1.0
         self.assertAlmostEqual(strength, 1.9)
-        self.assertAlmostEqual(blend, 1.0 / 1.9)
+        self.assertAlmostEqual(damp_blend, 1.0 / 1.9)
+        self.assertEqual(arm_blend, 0.0)
 
     def test_implicit_pd_params_world_parent_uses_unit_proxy_mass(self):
         builder = self._make_builder(dt=0.1, implicit_pd=True)
         model = self._make_single_dof_model(limit_ke=1.0, target_ke=720.0, body_mass=[5.0])
 
-        strength, blend = builder._implicit_pd_params(0, {"parent_body": -1, "child_body": 0}, model)
+        strength, damp_blend, arm_blend = builder._implicit_pd_params(0, {"parent_body": -1, "child_body": 0}, model)
 
         # world anchor proxy has unit mass: ratio_p = 720*0.01/(1+5) = 1.2, no damping
         self.assertAlmostEqual(strength, 1.2)
-        self.assertEqual(blend, 0.0)
+        self.assertEqual(damp_blend, 0.0)
+        self.assertEqual(arm_blend, 0.0)
 
     def test_implicit_pd_params_zero_gains_disable_drive(self):
         builder = self._make_builder(implicit_pd=True)
         model = self._make_single_dof_model(limit_ke=1.0, target_ke=0.0, target_kd=0.0, body_mass=[3.0, 5.0])
 
-        self.assertEqual(builder._implicit_pd_params(0, {"parent_body": 0, "child_body": 1}, model), (0.0, 0.0))
+        self.assertEqual(builder._implicit_pd_params(0, {"parent_body": 0, "child_body": 1}, model), (0.0, 0.0, 0.0))
 
     def test_implicit_pd_params_non_position_mode_disables_drive(self):
         builder = self._make_builder(implicit_pd=True)
@@ -247,7 +249,115 @@ class TestUIPCArticulationBuilder(unittest.TestCase):
             limit_ke=1.0, target_ke=720.0, target_kd=80.0, body_mass=[3.0, 5.0], target_mode=int(JointTargetMode.EFFORT)
         )
 
-        self.assertEqual(builder._implicit_pd_params(0, {"parent_body": 0, "child_body": 1}, model), (0.0, 0.0))
+        self.assertEqual(builder._implicit_pd_params(0, {"parent_body": 0, "child_body": 1}, model), (0.0, 0.0, 0.0))
+
+    def test_implicit_pd_params_velocity_mode_is_pure_damping_servo(self):
+        builder = self._make_builder(dt=0.1, implicit_pd=True)
+        model = self._make_single_dof_model(
+            limit_ke=1.0,
+            target_ke=720.0,  # must be ignored in VELOCITY mode
+            target_kd=80.0,
+            body_mass=[3.0, 5.0],
+            target_mode=int(JointTargetMode.VELOCITY),
+        )
+
+        strength, damp_blend, arm_blend = builder._implicit_pd_params(0, {"parent_body": 0, "child_body": 1}, model)
+
+        # ratio_d = kd*dt/mass = 80*0.1/8 = 1.0; ke does not contribute
+        self.assertAlmostEqual(strength, 1.0)
+        self.assertEqual(damp_blend, 1.0)
+        self.assertEqual(arm_blend, 0.0)
+
+    def test_implicit_pd_params_velocity_mode_without_kd_disables_drive(self):
+        builder = self._make_builder(implicit_pd=True)
+        model = self._make_single_dof_model(
+            limit_ke=1.0, target_ke=720.0, body_mass=[3.0, 5.0], target_mode=int(JointTargetMode.VELOCITY)
+        )
+
+        self.assertEqual(builder._implicit_pd_params(0, {"parent_body": 0, "child_body": 1}, model), (0.0, 0.0, 0.0))
+
+    def test_implicit_pd_params_prismatic_armature_adds_kinetic_spring(self):
+        builder = self._make_builder(dt=0.1, implicit_pd=True)
+        model = self._make_single_dof_model(
+            limit_ke=1.0,
+            target_ke=720.0,
+            target_kd=80.0,
+            body_mass=[3.0, 5.0],
+            joint_type=int(JointType.PRISMATIC),
+            armature=2.0,
+        )
+
+        strength, damp_blend, arm_blend = builder._implicit_pd_params(0, {"parent_body": 0, "child_body": 1}, model)
+
+        # PRISMATIC doubles mass_sum to 16 (libuipc's two-anchor-term drive
+        # energy): ratio_p = 720*0.01/16 = 0.45, ratio_d = 80*0.1/16 = 0.5,
+        # ratio_a = armature/16 = 0.125 (dt cancels)
+        self.assertAlmostEqual(strength, 1.075)
+        self.assertAlmostEqual(damp_blend, 0.5 / 1.075)
+        self.assertAlmostEqual(arm_blend, 0.125 / 1.075)
+
+    def test_implicit_pd_params_prismatic_armature_alone_still_drives(self):
+        builder = self._make_builder(dt=0.1, implicit_pd=True)
+        model = self._make_single_dof_model(
+            limit_ke=1.0, body_mass=[3.0, 5.0], joint_type=int(JointType.PRISMATIC), armature=2.0
+        )
+
+        strength, damp_blend, arm_blend = builder._implicit_pd_params(0, {"parent_body": 0, "child_body": 1}, model)
+
+        # zero gains: the drive channel carries the pure kinetic spring.
+        # PRISMATIC doubles mass_sum to 16: ratio_a = armature/16 = 0.125.
+        self.assertAlmostEqual(strength, 0.125)
+        self.assertEqual(damp_blend, 0.0)
+        self.assertEqual(arm_blend, 1.0)
+
+    def test_implicit_pd_params_revolute_armature_not_absorbed(self):
+        # revolute armature folds into the child body inertia, not the drive
+        builder = self._make_builder(dt=0.1, implicit_pd=True)
+        model = self._make_single_dof_model(limit_ke=1.0, target_ke=720.0, body_mass=[3.0, 5.0], armature=2.0)
+
+        strength, _damp_blend, arm_blend = builder._implicit_pd_params(0, {"parent_body": 0, "child_body": 1}, model)
+
+        self.assertAlmostEqual(strength, 0.9)
+        self.assertEqual(arm_blend, 0.0)
+
+    def test_implicit_pd_params_effort_prismatic_armature_not_absorbed(self):
+        builder = self._make_builder(implicit_pd=True)
+        model = self._make_single_dof_model(
+            limit_ke=1.0,
+            body_mass=[3.0, 5.0],
+            joint_type=int(JointType.PRISMATIC),
+            armature=2.0,
+            target_mode=int(JointTargetMode.EFFORT),
+        )
+
+        self.assertEqual(builder._implicit_pd_params(0, {"parent_body": 0, "child_body": 1}, model), (0.0, 0.0, 0.0))
+
+    def test_drive_params_plain_mode_folds_prismatic_armature(self):
+        builder = self._make_builder(drive_strength_ratio=250.0)
+        model = self._make_single_dof_model(
+            limit_ke=1.0, body_mass=[3.0, 5.0], joint_type=int(JointType.PRISMATIC), armature=2.0
+        )
+
+        strength, damp_blend, arm_blend = builder._drive_params(0, {"parent_body": 0, "child_body": 1}, model)
+
+        # plain drive knob + physical armature ratio; PRISMATIC doubles
+        # mass_sum to 16: ratio_a = armature/16 = 0.125.
+        self.assertAlmostEqual(strength, 250.125)
+        self.assertEqual(damp_blend, 0.0)
+        self.assertAlmostEqual(arm_blend, 0.125 / 250.125)
+
+    def test_drive_params_plain_mode_velocity_prismatic_armature_dropped(self):
+        # VELOCITY joints only drive under implicit_pd — plain mode cannot absorb
+        builder = self._make_builder(drive_strength_ratio=250.0)
+        model = self._make_single_dof_model(
+            limit_ke=1.0,
+            body_mass=[3.0, 5.0],
+            joint_type=int(JointType.PRISMATIC),
+            armature=2.0,
+            target_mode=int(JointTargetMode.VELOCITY),
+        )
+
+        self.assertEqual(builder._drive_params(0, {"parent_body": 0, "child_body": 1}, model), (0.0, 0.0, 0.0))
 
     @staticmethod
     def _make_builder(
@@ -265,6 +375,7 @@ class TestUIPCArticulationBuilder(unittest.TestCase):
         builder._drive_strength_ratio = drive_strength_ratio
         builder._limit_strength_ratio = limit_strength_ratio
         builder._implicit_pd = implicit_pd
+        builder._drive_armature_cache = None
         return builder
 
     @staticmethod
@@ -274,8 +385,11 @@ class TestUIPCArticulationBuilder(unittest.TestCase):
         target_kd: float = 0.0,
         body_mass: list[float] | None = None,
         target_mode: int = int(JointTargetMode.POSITION),
+        joint_type: int = int(JointType.REVOLUTE),
+        armature: float = 0.0,
     ):
         class _Model:
+            joint_count = 1
             joint_axis = _Array([[1.0, 0.0, 0.0]])
             joint_qd_start = _Array([0])
             joint_q_start = _Array([0])
@@ -287,6 +401,8 @@ class TestUIPCArticulationBuilder(unittest.TestCase):
             joint_limit_upper = _Array([0.5])
             joint_limit_ke = _Array([limit_ke])
 
+        _Model.joint_type = _Array([joint_type])
+        _Model.joint_armature = _Array([armature])
         _Model.body_mass = _Array(body_mass) if body_mass is not None else None
         return _Model()
 
@@ -424,11 +540,12 @@ class TestUIPCImplicitPD(unittest.TestCase):
     """
 
     @staticmethod
-    def _run_pendulum(kp: float, kd: float, frames: int = 180):
+    def _run_pendulum(kp: float, kd: float, frames: int = 180, gravity_comp: bool = False):
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z, gravity=-9.81)
         link = builder.add_link()
         builder.add_shape_box(link, hx=0.5, hy=0.02, hz=0.02, xform=wp.transform(wp.vec3(0.5, 0.0, 0.0)))
         j = builder.add_joint_revolute(parent=-1, child=link, axis=newton.Axis.Y)
+        builder.add_articulation([j])
         dof = builder.joint_qd_start[j]
         builder.joint_target_ke[dof] = kp
         builder.joint_target_kd[dof] = kd
@@ -449,9 +566,15 @@ class TestUIPCImplicitPD(unittest.TestCase):
         state_0, state_1 = model.state(), model.state()
         control = model.control()
         control.joint_target_q.fill_(0.0)
+        tau_ff = wp.zeros((model.articulation_count, model.max_dofs_per_articulation), dtype=float, device=model.device)
 
         traj = []
         for _ in range(frames):
+            if gravity_comp:
+                # Pure position-domain compensation: offset the aim by
+                # tau_g/ke (q_ref = 0), no force channel.
+                newton.eval_inverse_dynamics(model, state_0, tau=tau_ff)
+                control.joint_target_q.fill_(float(tau_ff.numpy().flatten()[0]) / kp)
             state_0.clear_forces()
             solver.step(state_0, state_1, control, None, dt)
             state_0, state_1 = state_1, state_0
@@ -463,6 +586,12 @@ class TestUIPCImplicitPD(unittest.TestCase):
         traj, tau_g = self._run_pendulum(kp=200.0, kd=20.0)
         sag = tau_g / 200.0
         self.assertAlmostEqual(float(traj[-1]), sag, delta=0.05 * sag)
+
+    def test_gravity_compensation_cancels_steady_state_sag(self):
+        """A per-step aim offset of tau_g/ke (pure position control, no force
+        channel) must cancel the tau_g/kp sag and land the joint on q_ref."""
+        traj, _tau_g = self._run_pendulum(kp=200.0, kd=20.0, gravity_comp=True)
+        self.assertLess(abs(float(traj[-1])), 0.005)
 
     def test_damping_removes_oscillation(self):
         undamped, tau_g = self._run_pendulum(kp=50.0, kd=0.0)
@@ -476,6 +605,205 @@ class TestUIPCImplicitPD(unittest.TestCase):
         # kd=0 rings past the steady state; kd=20 settles without overshoot.
         self.assertGreater(float(undamped.max()), 1.5 * sag)
         self.assertLess(float(damped.max()), 1.1 * sag)
+
+    def test_velocity_mode_tracks_target_velocity(self):
+        """VELOCITY mode must act as a velocity servo: a rotor spinning about
+        a gravity-parallel axis (zero gravity torque) converges to the
+        commanded joint velocity."""
+        builder = newton.ModelBuilder(up_axis=newton.Axis.Z, gravity=-9.81)
+        link = builder.add_link()
+        builder.add_shape_box(link, hx=0.5, hy=0.02, hz=0.02, xform=wp.transform(wp.vec3(0.5, 0.0, 0.0)))
+        j = builder.add_joint_revolute(parent=-1, child=link, axis=newton.Axis.Z)
+        dof = builder.joint_qd_start[j]
+        builder.joint_target_kd[dof] = 5.0
+        builder.joint_target_mode[dof] = int(newton.JointTargetMode.VELOCITY)
+        model = builder.finalize()
+
+        dt = 1.0 / 60.0
+        solver = newton.solvers.SolverUIPC(
+            model,
+            workspace="/tmp/newton_uipc_velocity_servo_test",
+            dt=dt,
+            logger_level=uipc.Logger.Error,
+            implicit_pd=True,
+        )
+        solver.sync_uipc_inertia_with_model()
+        solver.initialize()
+
+        state_0, state_1 = model.state(), model.state()
+        control = model.control()
+        control.joint_target_qd.fill_(0.5)
+
+        qd_hist = []
+        for _ in range(120):
+            state_0.clear_forces()
+            solver.step(state_0, state_1, control, None, dt)
+            state_0, state_1 = state_1, state_0
+            qd_hist.append(float(state_0.joint_qd.numpy()[0]))
+
+        # Converged and holding the commanded rate over the final second.
+        tail = np.asarray(qd_hist[-60:])
+        np.testing.assert_allclose(tail, 0.5, rtol=0.05)
+
+    def test_notify_joint_dof_properties_refreshes_drive_strength(self):
+        """Runtime ke/kd edits must re-derive the ``driving/strength_ratio``
+        edge attribute and the aim-blend weight via notify_model_changed."""
+        builder = newton.ModelBuilder(up_axis=newton.Axis.Z, gravity=0.0)
+        link = builder.add_link()
+        builder.add_shape_box(link, hx=0.5, hy=0.02, hz=0.02, xform=wp.transform(wp.vec3(0.5, 0.0, 0.0)))
+        j = builder.add_joint_revolute(parent=-1, child=link, axis=newton.Axis.Y)
+        dof = builder.joint_qd_start[j]
+        builder.joint_target_ke[dof] = 200.0
+        builder.joint_target_kd[dof] = 20.0
+        builder.joint_target_mode[dof] = int(newton.JointTargetMode.POSITION)
+        model = builder.finalize()
+
+        dt = 0.1
+        solver = newton.solvers.SolverUIPC(
+            model, backend="none", dt=dt, logger_level=uipc.Logger.Error, implicit_pd=True
+        )
+        solver.initialize()
+
+        art_builder = solver._articulation_builder
+        art = next(iter(art_builder.articulations.values()))
+        local = art._joint_to_local[j]
+        mass_sum = 1.0 + float(model.body_mass.numpy()[link])  # world anchor proxy + child
+
+        def read_strength() -> float:
+            geo = art.joint_geo_slots[j].geometry()
+            attr = geo.edges().find("driving/strength_ratio")
+            return float(uipc_articulation_builder._view_attr(attr)[art._joint_edge_idx[j]])
+
+        self.assertAlmostEqual(read_strength(), (200.0 * dt * dt + 20.0 * dt) / mass_sum, places=6)
+        self.assertIn(local, art.aim_blend_weights)
+
+        ke_np = model.joint_target_ke.numpy()
+        ke_np[dof] = 400.0
+        model.joint_target_ke.assign(ke_np)
+        kd_np = model.joint_target_kd.numpy()
+        kd_np[dof] = 0.0
+        model.joint_target_kd.assign(kd_np)
+        solver.notify_model_changed(newton.solvers.SolverNotifyFlags.JOINT_DOF_PROPERTIES)
+
+        self.assertAlmostEqual(read_strength(), 400.0 * dt * dt / mass_sum, places=6)
+        # kd -> 0: pure position spring, blend entry must be dropped.
+        self.assertNotIn(local, art.aim_blend_weights)
+
+    def test_runtime_gain_update_changes_steady_state(self):
+        """A live ke change through notify_model_changed must move the
+        gravity sag to tau_g / ke_new — the MJWarp-style DR gain path."""
+        builder = newton.ModelBuilder(up_axis=newton.Axis.Z, gravity=-9.81)
+        link = builder.add_link()
+        builder.add_shape_box(link, hx=0.5, hy=0.02, hz=0.02, xform=wp.transform(wp.vec3(0.5, 0.0, 0.0)))
+        j = builder.add_joint_revolute(parent=-1, child=link, axis=newton.Axis.Y)
+        dof = builder.joint_qd_start[j]
+        builder.joint_target_ke[dof] = 100.0
+        builder.joint_target_kd[dof] = 20.0
+        builder.joint_target_mode[dof] = int(newton.JointTargetMode.POSITION)
+        model = builder.finalize()
+
+        dt = 1.0 / 60.0
+        solver = newton.solvers.SolverUIPC(
+            model,
+            workspace="/tmp/newton_uipc_gain_update_test",
+            dt=dt,
+            logger_level=uipc.Logger.Error,
+            implicit_pd=True,
+        )
+        solver.sync_uipc_inertia_with_model()
+        solver.initialize()
+
+        state_0, state_1 = model.state(), model.state()
+        control = model.control()
+        control.joint_target_q.fill_(0.0)
+        tau_g = float(model.body_mass.numpy()[link]) * 9.81 * 0.5
+
+        def run(frames: int) -> float:
+            nonlocal state_0, state_1
+            for _ in range(frames):
+                state_0.clear_forces()
+                solver.step(state_0, state_1, control, None, dt)
+                state_0, state_1 = state_1, state_0
+            return float(state_0.joint_q.numpy()[0])
+
+        sag_soft = run(120)
+        self.assertAlmostEqual(sag_soft, tau_g / 100.0, delta=0.05 * tau_g / 100.0)
+
+        ke_np = model.joint_target_ke.numpy()
+        ke_np[dof] = 400.0
+        model.joint_target_ke.assign(ke_np)
+        solver.notify_model_changed(newton.solvers.SolverNotifyFlags.JOINT_DOF_PROPERTIES)
+
+        sag_stiff = run(120)
+        self.assertAlmostEqual(sag_stiff, tau_g / 400.0, delta=0.05 * tau_g / 400.0)
+
+
+@unittest.skipUnless(_HAS_UIPC, "uipc is not installed")
+class TestUIPCPrismaticArmature(unittest.TestCase):
+    """A PRISMATIC joint's ``joint_armature`` has no ABD inertia equivalent
+    (the translational mass block is isotropic), so it must be absorbed by
+    the implicit-PD aim drive instead (see ``_prismatic_drive_armature`` in
+    ``rigid_body.py``): a third kinetic spring toward the free-flight
+    prediction ``q_prev + dt*qd_prev``, which does not couple to gravity.
+    """
+
+    @staticmethod
+    def _run_slider(kp: float, kd: float, armature: float | None, frames: int = 180):
+        builder = newton.ModelBuilder(up_axis=newton.Axis.Z, gravity=-9.81)
+        link = builder.add_link()
+        builder.add_shape_box(link, hx=0.05, hy=0.05, hz=0.05)
+        j = builder.add_joint_prismatic(parent=-1, child=link, axis=newton.Axis.Z, armature=armature)
+        dof = builder.joint_qd_start[j]
+        builder.joint_target_ke[dof] = kp
+        builder.joint_target_kd[dof] = kd
+        builder.joint_target_mode[dof] = int(newton.JointTargetMode.POSITION)
+        model = builder.finalize()
+
+        dt = 1.0 / 60.0
+        solver = newton.solvers.SolverUIPC(
+            model,
+            workspace="/tmp/newton_uipc_prismatic_armature_test",
+            dt=dt,
+            logger_level=uipc.Logger.Error,
+            implicit_pd=True,
+        )
+        solver.sync_uipc_inertia_with_model()
+        solver.initialize()
+
+        state_0, state_1 = model.state(), model.state()
+        control = model.control()
+        control.joint_target_q.fill_(0.0)
+
+        traj = []
+        for _ in range(frames):
+            state_0.clear_forces()
+            solver.step(state_0, state_1, control, None, dt)
+            state_0, state_1 = state_1, state_0
+            traj.append(float(state_0.joint_q.numpy()[0]))
+        weight = float(model.body_mass.numpy()[link]) * 9.81
+        return np.asarray(traj), weight
+
+    def test_armature_leaves_steady_state_sag_unchanged(self):
+        """Armature is absorbed via a gravity-free aim (q_prev + dt*qd_prev),
+        so it must not shift the static force balance kp*sag = weight."""
+        kp = 200.0
+        no_armature, weight = self._run_slider(kp=kp, kd=20.0, armature=None)
+        with_armature, _ = self._run_slider(kp=kp, kd=20.0, armature=5.0)
+
+        # gravity is -Z; the spring pulls the slider back toward q_ref=0, so
+        # the equilibrium displacement is negative.
+        sag = -weight / kp
+        self.assertAlmostEqual(float(no_armature[-1]), sag, delta=0.05 * abs(sag))
+        self.assertAlmostEqual(float(with_armature[-1]), sag, delta=0.05 * abs(sag))
+
+    def test_armature_slows_the_transient(self):
+        """Armature adds apparent inertia to the drive channel: released from
+        rest at the (unloaded) target, the armature-loaded slider must fall
+        measurably less than the bare slider over the first few frames."""
+        no_armature, _ = self._run_slider(kp=200.0, kd=0.0, armature=None, frames=6)
+        with_armature, _ = self._run_slider(kp=200.0, kd=0.0, armature=20.0, frames=6)
+
+        self.assertLess(abs(float(with_armature[3])), 0.8 * abs(float(no_armature[3])))
 
 
 if __name__ == "__main__":

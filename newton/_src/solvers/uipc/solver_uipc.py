@@ -342,8 +342,12 @@ class SolverUIPC(SolverBase):
                 on the new-state position error, damping on the new-state
                 velocity error), co-solved with contact and unconditionally
                 stable — equivalent to :class:`SolverKamino`'s implicit
-                joint PD. Gains are baked at initialization and cannot be
-                changed at runtime.
+                joint PD. ``VELOCITY``-mode joints become velocity servos
+                (damping spring alone tracking ``joint_target_qd``). Gains
+                are read at initialization; to change them at runtime,
+                write the model arrays and call
+                :meth:`notify_model_changed` with
+                :attr:`~newton.SolverNotifyFlags.JOINT_DOF_PROPERTIES`.
         """
         super().__init__(model=model)
         self.import_uipc()
@@ -850,7 +854,7 @@ class SolverUIPC(SolverBase):
         # armature in joint space (Model.joint_armature), so subtract it on
         # the way back — otherwise host-side utilities that add armature
         # themselves (eval_mass_matrix's include_armature) would double-count.
-        armature_extra = _armature_rotational_inertia(model)
+        armature_extra = _armature_rotational_inertia(model, self._implicit_pd)
 
         written: list[int] = []
         for b in body_indices:
@@ -1005,7 +1009,9 @@ class SolverUIPC(SolverBase):
         scene: UScene = self.scene
 
         # Create one builder per type (reused across worlds)
-        self._rigid_body_builder = RigidBodyBuilder(model, scene, self.mapping, self._kappa, self._default_mass_density)
+        self._rigid_body_builder = RigidBodyBuilder(
+            model, scene, self.mapping, self._kappa, self._default_mass_density, implicit_pd=self._implicit_pd
+        )
         self._articulation_builder = ArticulationBuilder(
             model,
             scene,
@@ -1468,11 +1474,19 @@ class SolverUIPC(SolverBase):
             - :attr:`~newton.SolverNotifyFlags.MODEL_PROPERTIES`: propagate
               ``model.gravity`` into the live UIPC ``scene.config()``; the
               new gravity takes effect on the next ``world.advance()``.
+            - :attr:`~newton.SolverNotifyFlags.JOINT_DOF_PROPERTIES`
+              (``implicit_pd`` only): re-derive the joint drive strengths
+              and aim-blend weights from the current ``joint_target_ke`` /
+              ``joint_target_kd``; libuipc re-reads the drive strength every
+              step, so new gains apply on the next ``world.advance()``.
+              Armature, friction, and limit changes remain baked and are
+              not applied.
 
         Unsupported flags (aggregated into a single warning):
-            ``JOINT_DOF_PROPERTIES``, ``BODY_INERTIAL_PROPERTIES``,
-            ``SHAPE_PROPERTIES``, ``CONSTRAINT_PROPERTIES``,
-            ``TENDON_PROPERTIES``, ``ACTUATOR_PROPERTIES``.
+            ``JOINT_DOF_PROPERTIES`` (unless ``implicit_pd``),
+            ``BODY_INERTIAL_PROPERTIES``, ``SHAPE_PROPERTIES``,
+            ``CONSTRAINT_PROPERTIES``, ``TENDON_PROPERTIES``,
+            ``ACTUATOR_PROPERTIES``.
 
         .. note::
 
@@ -1498,20 +1512,29 @@ class SolverUIPC(SolverBase):
         # equivalent concept), so a runtime update is not possible -- the
         # user must recreate the solver.
         unsupported_mask = (
-            SolverNotifyFlags.JOINT_DOF_PROPERTIES
-            | SolverNotifyFlags.BODY_INERTIAL_PROPERTIES
+            SolverNotifyFlags.BODY_INERTIAL_PROPERTIES
             | SolverNotifyFlags.SHAPE_PROPERTIES
             | SolverNotifyFlags.CONSTRAINT_PROPERTIES
             | SolverNotifyFlags.TENDON_PROPERTIES
             | SolverNotifyFlags.ACTUATOR_PROPERTIES
         )
+        if not self._implicit_pd:
+            # Without implicit PD the drive strength is a solver parameter,
+            # not derived from joint_target_ke/kd -- gain edits cannot apply.
+            unsupported_mask |= SolverNotifyFlags.JOINT_DOF_PROPERTIES
         if flags & unsupported_mask:
             warnings.warn(
-                "SolverUIPC.notify_model_changed: joint-DOF, body-inertial, shape, "
-                "constraint, tendon, and actuator property updates are not supported "
-                "by the UIPC backend. Recreate the solver if these properties changed.",
+                "SolverUIPC.notify_model_changed: joint-DOF (without implicit_pd), "
+                "body-inertial, shape, constraint, tendon, and actuator property "
+                "updates are not supported by the UIPC backend. Recreate the "
+                "solver if these properties changed.",
                 stacklevel=2,
             )
+
+        # Implicit-PD gain resync: joint_target_ke/kd re-derive the drive
+        # strengths; libuipc re-reads the edge attribute every step.
+        if self._implicit_pd and flags & SolverNotifyFlags.JOINT_DOF_PROPERTIES:
+            self._articulation_builder.refresh_drive_strengths(self.model)
 
         # Supported flags: dispatch each to its dedicated handler.
         # JOINT_PROPERTIES and BODY_PROPERTIES cooperate via

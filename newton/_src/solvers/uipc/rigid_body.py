@@ -17,7 +17,7 @@ from uipc.core import ContactElement, SubsceneElement
 from uipc.geometry import affine_body as uipc_affine_body
 from uipc.geometry import halfplane, label_surface
 
-from newton import BodyFlags, GeoType, JointType, Model
+from newton import BodyFlags, GeoType, JointTargetMode, JointType, Model
 
 from .converter import (
     UIpcMappingInfo,
@@ -28,7 +28,41 @@ from .converter import (
 from .utils import _view_attr
 
 
-def _armature_rotational_inertia(model: Model) -> dict[int, np.ndarray]:
+def _prismatic_drive_armature(model: Model, implicit_pd: bool) -> dict[int, float]:
+    """Per-joint armature [kg] of PRISMATIC joints absorbable by the aim drive.
+
+    The ABD mass matrix cannot express a prismatic joint's reflected rotor
+    mass (its translational block is isotropic ``m*I3``), but the armature
+    kinetic term ``0.5*(m_a/dt^2)*(s - s_prev - dt*sd_prev)^2`` is a
+    quadratic in the slide coordinate and folds into the joint's aim-drive
+    spring (see :meth:`ArticulationBuilder._implicit_pd_params`). That only
+    works for joints whose drive channel is active: POSITION /
+    POSITION_VELOCITY targets, plus VELOCITY under ``implicit_pd`` (where
+    aim blending drives VELOCITY joints too).
+    """
+    if model.joint_count == 0 or model.joint_armature is None or model.joint_target_mode is None:
+        return {}
+    joint_type = model.joint_type.numpy()
+    joint_qd_start = model.joint_qd_start.numpy()
+    armature = model.joint_armature.numpy()
+    target_mode = model.joint_target_mode.numpy()
+
+    driven_modes = {int(JointTargetMode.POSITION), int(JointTargetMode.POSITION_VELOCITY)}
+    if implicit_pd:
+        driven_modes.add(int(JointTargetMode.VELOCITY))
+
+    out: dict[int, float] = {}
+    for j in range(model.joint_count):
+        if joint_type[j] != int(JointType.PRISMATIC):
+            continue
+        dof_start = int(joint_qd_start[j])
+        a = float(armature[dof_start])
+        if a > 0.0 and int(target_mode[dof_start]) in driven_modes:
+            out[j] = a
+    return out
+
+
+def _armature_rotational_inertia(model: Model, implicit_pd: bool = False) -> dict[int, np.ndarray]:
     """Per-child-body 3x3 inertia equivalent of :attr:`Model.joint_armature`.
 
     ABD dynamics has no joint-space armature slot, so a revolute joint's
@@ -36,11 +70,14 @@ def _armature_rotational_inertia(model: Model) -> dict[int, np.ndarray]:
     the child link's COM inertia — exact for rotation about the joint's own
     axis, but the extra inertia also resists other rotations of that link.
     ``joint_axis`` lives in the joint (parent-anchor) frame; ``joint_X_c``
-    rotates it into the child body frame. Armature on non-revolute joints
-    has no ABD equivalent and is dropped with a warning.
+    rotates it into the child body frame. Prismatic armature on driven
+    joints is absorbed by the aim-drive spring instead (see
+    :func:`_prismatic_drive_armature`); any remaining armature has no ABD
+    equivalent and is dropped with a warning.
     """
     if model.joint_count == 0 or model.joint_armature is None or model.joint_axis is None:
         return {}
+    drive_absorbed = _prismatic_drive_armature(model, implicit_pd)
     joint_type = model.joint_type.numpy()
     joint_child = model.joint_child.numpy()
     joint_qd_start = model.joint_qd_start.numpy()
@@ -53,7 +90,7 @@ def _armature_rotational_inertia(model: Model) -> dict[int, np.ndarray]:
     for j in range(model.joint_count):
         dof_start, dof_end = int(joint_qd_start[j]), int(joint_qd_start[j + 1])
         if joint_type[j] != int(JointType.REVOLUTE):
-            if any(armature[d] > 0.0 for d in range(dof_start, dof_end)):
+            if j not in drive_absorbed and any(armature[d] > 0.0 for d in range(dof_start, dof_end)):
                 dropped.add(JointType(int(joint_type[j])).name)
             continue
         a = float(armature[dof_start])
@@ -66,8 +103,9 @@ def _armature_rotational_inertia(model: Model) -> dict[int, np.ndarray]:
         out[child] = out.get(child, np.zeros((3, 3), dtype=np.float64)) + a * np.outer(n_np, n_np)
     if dropped:
         warnings.warn(
-            f"SolverUIPC: joint_armature on {sorted(dropped)} joints has no ABD equivalent and was ignored "
-            "(only REVOLUTE armature is folded into the child body inertia).",
+            f"SolverUIPC: joint_armature on {sorted(dropped)} joints was ignored. REVOLUTE armature is "
+            "folded into the child body inertia; PRISMATIC armature is absorbed by the aim drive, which "
+            "requires a position/velocity target mode (NONE/EFFORT prismatic armature has no ABD equivalent).",
             stacklevel=3,
         )
     return out
@@ -146,12 +184,16 @@ class RigidBodyBuilder:
         mapping: UIpcMappingInfo,
         kappa: float,
         default_mass_density: float,
+        implicit_pd: bool = False,
     ):
         self._model = model
         self._scene = scene
         self._mapping = mapping
         self._kappa = kappa
         self._default_mass_density = default_mass_density
+        # Gates which prismatic joints absorb armature via the aim drive
+        # (VELOCITY-mode joints only drive under implicit PD).
+        self._implicit_pd = implicit_pd
 
         # Body world transforms — populated by init_body_transforms()
         self._body_transforms: np.ndarray | None = None
@@ -398,7 +440,7 @@ class RigidBodyBuilder:
         # so armature children are auto-flagged as custom-inertia bodies
         # (side effect: their mass/COM also come from the Newton model, not
         # from mass_density * mesh_volume).
-        armature_extra = _armature_rotational_inertia(model)
+        armature_extra = _armature_rotational_inertia(model, self._implicit_pd)
         custom_inertia |= armature_extra.keys()
         # Custom-inertia bodies must each live in their own SimplicialComplex
         # so ABD meta (per-geometry, not per-instance) reflects the unique

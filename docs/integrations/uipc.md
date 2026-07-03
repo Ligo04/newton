@@ -167,11 +167,21 @@ about the joint's own axis, but the extra inertia also resists other rotations
 of that link (upstream joints, contact impulses) — unlike true joint-space
 armature. Armature children are automatically built through the
 Newton-authored mass-matrix path described above (their mass and COM then come
-from the Newton model rather than `mass_density * mesh_volume`). Armature on
-non-revolute joints has no ABD equivalent and is dropped with a warning.
+from the Newton model rather than `mass_density * mesh_volume`).
 `sync_model_inertia_from_uipc` subtracts the folded armature on the way back,
 so `Model.body_inertia` always stays armature-free and
 `eval_mass_matrix(include_armature=True)` does not double-count.
+
+A prismatic joint's armature (a reflected translational mass) has no ABD
+inertia equivalent either — the AffineBody mass matrix's translational block
+is isotropic (`m * I3`), and the slide axis' world direction changes as the
+child link rotates, so it cannot be folded into a fixed body-frame tensor.
+Instead, on a POSITION/POSITION_VELOCITY drive (also VELOCITY under
+`implicit_pd=True`), prismatic armature is absorbed as a third aim-drive
+spring toward the free-flight prediction `q_prev + dt * qd_prev` (no gravity
+coupling — the armature's aim is inertial, not gravitational). Prismatic
+armature on a non-driven joint (NONE/EFFORT mode, or VELOCITY without
+`implicit_pd`) has no ABD equivalent and is dropped with a warning.
 
 (uipc-custom-attributes)=
 ## UIPC-specific custom attributes
@@ -283,8 +293,23 @@ into the single drive channel) — so it is co-solved with contact,
 unconditionally stable, and equivalent to `SolverKamino`'s implicit joint PD:
 steady-state sag under load is `tau / ke`, and `kd` damps transients.
 `POSITION_VELOCITY` mode feeds `joint_target_qd` as the damping reference;
-plain `POSITION` damps toward rest. Gains are baked at initialization and
-cannot be changed at runtime.
+plain `POSITION` damps toward rest; `VELOCITY` mode becomes a velocity servo
+(the damping spring alone tracks `joint_target_qd`, `joint_target_ke` is
+ignored). Gains are read at initialization; to change them at runtime, write
+`joint_target_ke` / `joint_target_kd` and call
+`notify_model_changed(SolverNotifyFlags.JOINT_DOF_PROPERTIES)` — the drive
+strengths are re-derived and take effect on the next step (libuipc re-reads
+them every frame). Armature, friction, and joint-limit changes remain baked.
+
+`ke`/`kd` sag under gravity or other sustained loads because implicit PD has
+no gravity-compensation channel of its own. A joint is either position-driven
+or force-controlled, never both, so compensate in the position domain rather
+than adding a coexisting feedforward torque: the implicit-PD steady state
+satisfies `ke * (q_ref - q) = tau_g` (sag `tau_g / ke`), so pre-adding that
+offset to `control.joint_target_q` lands the joint on the true target.
+Compute the bias with `newton.eval_inverse_dynamics(model, state, tau=...)`
+(`joint_acc=None`) and add `bias / joint_target_ke` to the target each step;
+see `example_uipc_brick_stacking.py --implicit-pd`.
 `joint_limit_lower` / `joint_limit_upper` create UIPC joint-limit
 constitutions whose strength comes from the solver-level
 `limit_strength_ratio` parameter (default `10.0`, same global-or-per-joint
@@ -449,8 +474,11 @@ Smaller limitations are documented inline above. The most common ones are:
 - **Velocity-only joint drives are not forwarded.** `VELOCITY` target mode is
   passive in UIPC; `POSITION_VELOCITY` forwards only the position target.
 - **Most edits require solver reconstruction.** Shape changes, actuator changes,
-  inertial changes, constraints, tendons, and joint-DOF property changes are not
-  pushed into live UIPC objects.
+  inertial changes, constraints, and tendons are not pushed into live UIPC
+  objects. Joint-DOF properties are the exception under `implicit_pd`:
+  `joint_target_ke` / `joint_target_kd` edits apply at runtime via
+  `notify_model_changed(JOINT_DOF_PROPERTIES)`; armature, friction, and limit
+  edits remain baked.
 - **Newton-native contact features are separate.** SDF and hydroelastic contact
   pipelines are not fed into UIPC.
 

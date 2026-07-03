@@ -40,6 +40,7 @@ from newton.math import normalize_with_norm
 
 from .articulation import Articulation, FreeJointReadbackContext
 from .converter import UIpcMappingInfo, newton_transform_to_mat4
+from .rigid_body import _prismatic_drive_armature
 from .utils import _view_attr
 
 
@@ -88,6 +89,10 @@ class ArticulationBuilder:
         self._drive_strength_ratio = drive_strength_ratio
         self._limit_strength_ratio = limit_strength_ratio
         self._implicit_pd = implicit_pd
+
+        # Prismatic armature absorbed by the aim drive, keyed by joint index.
+        # Lazy — invalidated by refresh_drive_strengths (target modes may change).
+        self._drive_armature_cache: dict[int, float] | None = None
 
         # Per-articulation runtime objects (populated by build_joints)
         self.articulations: dict[int, Articulation] = {}
@@ -570,10 +575,7 @@ class ArticulationBuilder:
             child_slots.append(c_slot)
             child_ids.append(c_id)
             strengths.append(self._joint_strength_ratio)
-            if self._implicit_pd:
-                drive_strength, pd_blend = self._implicit_pd_params(j, jdata, model)
-            else:
-                drive_strength, pd_blend = self._extract_drive_strength(j, model), 0.0
+            drive_strength, damp_blend, arm_blend = self._drive_params(j, jdata, model)
             drive_strengths.append(drive_strength)
 
             # Limits
@@ -595,8 +597,8 @@ class ArticulationBuilder:
 
             init_angles.append(float(joint_q_np[q_start]) if joint_q_np is not None else 0.0)
             local = art.register_joint(j, q_start, qd_start)
-            if pd_blend > 0.0:
-                art.implicit_pd_weight[local] = pd_blend
+            if damp_blend > 0.0 or arm_blend > 0.0:
+                art.aim_blend_weights[local] = (damp_blend, arm_blend)
             anim_dispatch.append((art, j, edge_idx))
 
         # Build batched linemesh via create_geometry (4-position overload)
@@ -742,10 +744,7 @@ class ArticulationBuilder:
             child_slots.append(c_slot)
             child_ids.append(c_id)
             strengths.append(self._joint_strength_ratio)
-            if self._implicit_pd:
-                drive_strength, pd_blend = self._implicit_pd_params(j, jdata, model)
-            else:
-                drive_strength, pd_blend = self._extract_drive_strength(j, model), 0.0
+            drive_strength, damp_blend, arm_blend = self._drive_params(j, jdata, model)
             drive_strengths.append(drive_strength)
 
             # Limits
@@ -766,8 +765,8 @@ class ArticulationBuilder:
                 limit_strengths.append(self._extract_limit_strength(j))
 
             local = art.register_joint(j, q_start, qd_start)
-            if pd_blend > 0.0:
-                art.implicit_pd_weight[local] = pd_blend
+            if damp_blend > 0.0 or arm_blend > 0.0:
+                art.aim_blend_weights[local] = (damp_blend, arm_blend)
             anim_dispatch.append((art, j, edge_idx))
 
         # Build batched linemesh via create_geometry (4-position overload)
@@ -1172,41 +1171,130 @@ class ArticulationBuilder:
             return float(self._drive_strength_ratio.get(j, 100.0))
         return float(self._drive_strength_ratio)
 
-    def _implicit_pd_params(self, j: int, jdata: dict, model: Any) -> tuple[float, float]:
-        """Implicit-PD aim-drive parameters ``(strength_ratio, damping_blend)``.
+    def _drive_armature(self, model: Any) -> dict[int, float]:
+        """Cached :func:`_prismatic_drive_armature` view for the live model."""
+        if self._drive_armature_cache is None:
+            self._drive_armature_cache = _prismatic_drive_armature(model, self._implicit_pd)
+        return self._drive_armature_cache
+
+    def _drive_mass_sum(self, j: int, jdata: dict, model: Any) -> float:
+        """Effective mass_sum for converting a physical gain to a libuipc ``strength_ratio``.
+
+        libuipc's driving-prismatic energy sums two anchor-pair distance
+        terms against the same target (``0.5*kappa*((a-d)^2+(b-d)^2)``,
+        vs. revolute's single angle term), doubling the effective
+        stiffness for the same ``kappa = strength_ratio*mass_sum``. Double
+        the divisor for PRISMATIC joints so physical kp/kd/armature gains
+        convert correctly.
+        """
+        mass_sum = self._joint_body_mass(jdata["parent_body"], model) + self._joint_body_mass(
+            jdata["child_body"], model
+        )
+        if int(model.joint_type.numpy()[j]) == int(JointType.PRISMATIC):
+            mass_sum *= 2.0
+        return mass_sum
+
+    def _drive_params(self, j: int, jdata: dict, model: Any) -> tuple[float, float, float]:
+        """Aim-drive parameters ``(strength_ratio, damping_blend, armature_blend)``.
+
+        Dispatches to :meth:`_implicit_pd_params` under ``implicit_pd``;
+        otherwise the plain solver-knob drive strength, with prismatic
+        armature folded in as an extra aim spring where absorbable.
+        """
+        if self._implicit_pd:
+            return self._implicit_pd_params(j, jdata, model)
+        strength = self._extract_drive_strength(j, model)
+        armature = self._drive_armature(model).get(j, 0.0)
+        if armature <= 0.0:
+            return strength, 0.0, 0.0
+        ratio_a = armature / self._drive_mass_sum(j, jdata, model)
+        total = strength + ratio_a
+        return total, 0.0, ratio_a / total
+
+    def _implicit_pd_params(self, j: int, jdata: dict, model: Any) -> tuple[float, float, float]:
+        """Implicit-PD aim-drive parameters ``(strength_ratio, damping_blend, armature_blend)``.
 
         Maps physical gains onto the single libuipc drive channel. The
         implicit PD is two quadratics in the new-state joint coordinate —
         the position spring ``0.5*kp*(q - q_ref)^2`` and the damping spring
-        ``0.5*kd/dt*(q - q_prev - dt*dq_ref)^2`` — which merge into one
-        spring with summed stiffness and a weight-blended target (see
-        :meth:`Articulation._blend_implicit_pd_aim`).
+        ``0.5*kd/dt*(q - q_prev - dt*dq_ref)^2``. A prismatic joint's
+        armature adds a third, its BDF1 kinetic term
+        ``0.5*(m_a/dt^2)*(q - q_prev - dt*qd_prev)^2`` (see
+        :func:`_prismatic_drive_armature`). All merge into one spring with
+        summed stiffness and a weight-blended target (see
+        :meth:`Articulation._blend_aim`).
 
-        libuipc's drive energy ``0.5*ratio*(m_parent+m_child)*err^2`` enters
-        the incremental potential without a ``dt^2`` factor, so physical
-        gains convert as ``ratio_p = kp*dt^2/mass_sum`` and
-        ``ratio_d = kd*dt/mass_sum``. Returns ``(0, 0)`` for non-position
-        target modes and for ``kp <= 0 and kd <= 0``.
+        libuipc's drive energy ``0.5*ratio*mass_sum*err^2`` enters the
+        incremental potential without a ``dt^2`` factor, so physical gains
+        convert as ``ratio_p = kp*dt^2/mass_sum``, ``ratio_d =
+        kd*dt/mass_sum`` and — the ``dt^2`` cancelling — ``ratio_a =
+        m_a/mass_sum`` (see :meth:`_drive_mass_sum` for the prismatic
+        ``mass_sum`` doubling this relies on). VELOCITY mode is a velocity
+        servo: the damping spring alone (``kp`` ignored). Returns ``(0, 0,
+        0)`` for NONE/EFFORT modes and for zero effective gains.
         """
         if model.joint_qd_start is None:
-            return 0.0, 0.0
+            return 0.0, 0.0, 0.0
         qd_start = int(model.joint_qd_start.numpy()[j])
+        velocity_only = False
         if model.joint_target_mode is not None:
             mode = int(model.joint_target_mode.numpy()[qd_start])
-            if mode not in (int(JointTargetMode.POSITION), int(JointTargetMode.POSITION_VELOCITY)):
-                return 0.0, 0.0
+            if mode == int(JointTargetMode.VELOCITY):
+                velocity_only = True
+            elif mode not in (int(JointTargetMode.POSITION), int(JointTargetMode.POSITION_VELOCITY)):
+                return 0.0, 0.0, 0.0
         ke = float(model.joint_target_ke.numpy()[qd_start]) if model.joint_target_ke is not None else 0.0
         kd = float(model.joint_target_kd.numpy()[qd_start]) if model.joint_target_kd is not None else 0.0
-        ke = max(ke, 0.0)
+        ke = 0.0 if velocity_only else max(ke, 0.0)
         kd = max(kd, 0.0)
-        if ke <= 0.0 and kd <= 0.0:
-            return 0.0, 0.0
-        mass_sum = self._joint_body_mass(jdata["parent_body"], model) + self._joint_body_mass(
-            jdata["child_body"], model
-        )
+        armature = self._drive_armature(model).get(j, 0.0)
+        if ke <= 0.0 and kd <= 0.0 and armature <= 0.0:
+            return 0.0, 0.0, 0.0
+        mass_sum = self._drive_mass_sum(j, jdata, model)
         ratio_p = ke * self._dt * self._dt / mass_sum
         ratio_d = kd * self._dt / mass_sum
-        return ratio_p + ratio_d, ratio_d / (ratio_p + ratio_d)
+        ratio_a = armature / mass_sum
+        total = ratio_p + ratio_d + ratio_a
+        return total, ratio_d / total, ratio_a / total
+
+    def refresh_drive_strengths(self, model: Any) -> None:
+        """Re-derive implicit-PD drive parameters from the live model gains.
+
+        Handler for :attr:`~newton.SolverNotifyFlags.JOINT_DOF_PROPERTIES`:
+        recomputes each driven joint's ``driving/strength_ratio`` edge
+        attribute and aim-blend weight from the current
+        ``joint_target_ke`` / ``joint_target_kd``. libuipc re-reads that
+        edge attribute every step (the same refresh path as ``aim_angle``),
+        so new gains take effect on the next ``world.advance()``. No-op
+        unless the builder runs in ``implicit_pd`` mode — the plain drive
+        strength is a solver parameter, not derived from the model.
+        """
+        if not self._implicit_pd:
+            return
+        if model.joint_parent is None or model.joint_child is None:
+            return
+        self._drive_armature_cache = None  # target modes may have changed
+        joint_parent = model.joint_parent.numpy()
+        joint_child = model.joint_child.numpy()
+        for art in self.articulations.values():
+            for newton_idx in art.active_joint_indices:
+                if newton_idx not in art._joint_edge_idx:
+                    continue
+                jdata = {
+                    "parent_body": int(joint_parent[newton_idx]),
+                    "child_body": int(joint_child[newton_idx]),
+                }
+                strength, damp_blend, arm_blend = self._implicit_pd_params(newton_idx, jdata, model)
+                geo = art.joint_geo_slots[newton_idx].geometry()
+                attr = geo.edges().find("driving/strength_ratio")
+                if attr is None:
+                    continue
+                _view_attr(attr)[art._joint_edge_idx[newton_idx]] = strength
+                local = art._joint_to_local[newton_idx]
+                if strength > 0.0 and (damp_blend > 0.0 or arm_blend > 0.0):
+                    art.aim_blend_weights[local] = (damp_blend, arm_blend)
+                else:
+                    art.aim_blend_weights.pop(local, None)
 
     @staticmethod
     def _joint_body_mass(body_idx: int, model: Any) -> float:
@@ -1259,6 +1347,7 @@ class ArticulationBuilder:
                     target_pos,
                     target_vel,
                     joint_f,
+                    blend_aims=self._implicit_pd,
                 )
 
         # Each Articulation.cache_control wp.copy's the device-side
