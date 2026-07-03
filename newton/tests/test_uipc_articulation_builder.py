@@ -11,6 +11,7 @@ import numpy as np
 import warp as wp
 
 import newton
+from newton import JointTargetMode
 
 _HAS_UIPC = importlib.util.find_spec("uipc") is not None
 
@@ -154,7 +155,7 @@ class TestUIPCArticulationBuilder(unittest.TestCase):
 
     def test_revolute_strengths_decoupled_from_target_ke(self):
         """Constraint strength must come from joint_strength_ratio; drive
-        strength must be the converted ratio ke*dt^2/(m_parent+m_child)."""
+        strength must come from drive_strength_ratio, not joint_target_ke."""
         captured = {}
 
         class _JointConstitution:
@@ -166,7 +167,7 @@ class TestUIPCArticulationBuilder(unittest.TestCase):
             def apply_to(self, _geometry, strengths):
                 captured["drive_strengths"] = strengths.copy()
 
-        builder = self._make_builder(dt=0.1, joint_strength_ratio=42.0)
+        builder = self._make_builder(dt=0.1, joint_strength_ratio=42.0, drive_strength_ratio=7.5)
 
         model = self._make_single_dof_model(limit_ke=1.0, target_ke=720.0, body_mass=[3.0, 5.0])
         joints = [self._make_joint_data(parent_body=0, child_body=1)]
@@ -185,43 +186,62 @@ class TestUIPCArticulationBuilder(unittest.TestCase):
             builder._build_revolute_joints_batch(joints, model)
 
         np.testing.assert_array_equal(captured["strengths"], np.array([42.0], dtype=np.float64))
-        # ratio = ke * dt^2 / (m_parent + m_child) = 720 * 0.01 / 8
-        np.testing.assert_allclose(captured["drive_strengths"], np.array([0.9], dtype=np.float64))
+        # drive strength is the solver knob verbatim — ke=720 must not leak in
+        np.testing.assert_allclose(captured["drive_strengths"], np.array([7.5], dtype=np.float64))
 
-    def test_extract_drive_strength_world_parent_uses_unit_proxy_mass(self):
-        builder = self._make_builder(dt=0.1)
-        model = self._make_single_dof_model(limit_ke=1.0, target_ke=720.0, body_mass=[5.0])
+    def test_extract_drive_strength_per_joint_override(self):
+        builder = self._make_builder(drive_strength_ratio={0: 250.0})
+        model = self._make_single_dof_model(limit_ke=1.0, target_ke=720.0)
 
-        strength = builder._extract_drive_strength(0, {"parent_body": -1, "child_body": 0}, model)
+        self.assertEqual(builder._extract_drive_strength(0, model), 250.0)
 
-        # world anchor proxy has unit mass: ratio = 720 * 0.01 / (1 + 5)
-        self.assertAlmostEqual(strength, 1.2)
+    def test_extract_drive_strength_dict_falls_back_to_default(self):
+        builder = self._make_builder(drive_strength_ratio={3: 250.0})
+        model = self._make_single_dof_model(limit_ke=1.0)
 
-    def test_extract_drive_strength_zero_ke_disables_drive(self):
-        builder = self._make_builder()
-        model = self._make_single_dof_model(limit_ke=1.0, target_ke=0.0, body_mass=[3.0, 5.0])
+        # joint 0 is not in the override mapping -> class default 100.0
+        self.assertEqual(builder._extract_drive_strength(0, model), 100.0)
 
-        strength = builder._extract_drive_strength(0, {"parent_body": 0, "child_body": 1}, model)
+    def test_extract_drive_strength_non_position_mode_disables_drive(self):
+        builder = self._make_builder(drive_strength_ratio=250.0)
+        for mode in (JointTargetMode.NONE, JointTargetMode.VELOCITY, JointTargetMode.EFFORT):
+            model = self._make_single_dof_model(limit_ke=1.0, target_ke=720.0, target_mode=int(mode))
+            self.assertEqual(builder._extract_drive_strength(0, model), 0.0)
 
-        self.assertEqual(strength, 0.0)
+    def test_extract_drive_strength_position_velocity_mode_drives(self):
+        builder = self._make_builder(drive_strength_ratio=250.0)
+        model = self._make_single_dof_model(limit_ke=1.0, target_mode=int(JointTargetMode.POSITION_VELOCITY))
+
+        self.assertEqual(builder._extract_drive_strength(0, model), 250.0)
 
     @staticmethod
-    def _make_builder(dt: float = 1.0 / 60.0, joint_strength_ratio: float = 100.0):
+    def _make_builder(
+        dt: float = 1.0 / 60.0,
+        joint_strength_ratio: float = 100.0,
+        drive_strength_ratio: float | dict[int, float] = 100.0,
+    ):
         builder = ArticulationBuilder.__new__(ArticulationBuilder)
         builder._scene = _FakeScene()
         builder._mapping = _FakeMapping()
         builder._dt = dt
         builder._joint_strength_ratio = joint_strength_ratio
+        builder._drive_strength_ratio = drive_strength_ratio
         return builder
 
     @staticmethod
-    def _make_single_dof_model(limit_ke: float, target_ke: float = 0.0, body_mass: list[float] | None = None):
+    def _make_single_dof_model(
+        limit_ke: float,
+        target_ke: float = 0.0,
+        body_mass: list[float] | None = None,
+        target_mode: int = int(JointTargetMode.POSITION),
+    ):
         class _Model:
             joint_axis = _Array([[1.0, 0.0, 0.0]])
             joint_qd_start = _Array([0])
             joint_q_start = _Array([0])
             joint_q = None
             joint_target_ke = _Array([target_ke])
+            joint_target_mode = _Array([target_mode])
             joint_limit_lower = _Array([-0.5])
             joint_limit_upper = _Array([0.5])
             joint_limit_ke = _Array([limit_ke])

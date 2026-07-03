@@ -105,8 +105,8 @@ is its commanded target when the leader is itself position-driven (no lag),
 otherwise its measured start-of-step position (one-step lag).
 
 The coupling is **soft**: the follower tracks its target through the driving
-joint's stiffness (`joint_target_ke`, converted to a UIPC drive strength) and
-may lag under load, unlike a hard equality constraint. Both follower and leader must be active
+joint's `drive_strength_ratio` and may lag under load, unlike a hard equality
+constraint. Both follower and leader must be active
 `REVOLUTE` / `PRISMATIC` joints; a constraint whose follower or leader is not an
 active UIPC joint is skipped with a warning. Coefficients are baked at
 initialization — editing them requires reconstructing the solver.
@@ -263,16 +263,17 @@ callbacks.
 | `VELOCITY` | Passive; no UIPC velocity-only drive is written. |
 | `NONE` | Passive. |
 
-`joint_target_ke` keeps its cross-solver meaning of a physical drive stiffness
-[N·m/rad or N/m]: it is converted to the UIPC drive `strength_ratio` as
-`ke * dt**2 / (m_parent + m_child)`, so the effective drive torque/force is
-`ke * error`, matching the PD drives of the other backends. A zero or unset
-`ke` produces no drive (`joint_target_kd` has no UIPC counterpart — the
-implicit integrator provides damping). The joint anchoring constraints
-themselves use the solver-level `joint_strength_ratio` parameter (default
-`100.0`), independent of the drive gains. `joint_limit_lower` /
-`joint_limit_upper` create UIPC joint-limit constitutions, with
-`joint_limit_ke` as the limit strength (default `100.0`).
+The aim-drive strength is a pure solver constraint-stiffness knob, deliberately
+decoupled from `joint_target_ke` / `joint_target_kd` (which UIPC does not
+consume — they remain portable metadata for other backends). Position-driven
+joints get the solver-level `drive_strength_ratio` parameter: a global float
+(default `100.0`, near-rigid tracking) or a per-joint mapping keyed by Newton
+joint index, e.g. `SolverUIPC(model, drive_strength_ratio={3: 10.0})`; joints
+missing from the mapping fall back to `100.0`. Non-position target modes get
+no drive. The joint anchoring constraints themselves use the independent
+solver-level `joint_strength_ratio` parameter (default `100.0`).
+`joint_limit_lower` / `joint_limit_upper` create UIPC joint-limit
+constitutions, with `joint_limit_ke` as the limit strength (default `100.0`).
 
 ## Contact pipeline
 

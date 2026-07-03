@@ -47,10 +47,9 @@ class Example:
         # (-pi, pi] after two seconds and completes several turns per run.
         self.target_speed = math.pi  # [rad/s]
 
-        # Physical drive stiffness [N·m/rad] for UIPC's built-in position aim
-        # drive. The probe needs near-rigid tracking of the ramp, and the
-        # aim drive has no damping channel (kd only applies to other solvers),
-        # so a stiff gain keeps the joint overdamped via implicit integration.
+        # joint_target_ke/kd are cross-solver metadata only: UIPC's aim
+        # drive strength comes from the solver's drive_strength_ratio
+        # (default 100) and has no damping channel, independent of kp/kd.
         self.kp = 1.0e6
         self.kd = 200.0
 

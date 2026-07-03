@@ -130,9 +130,9 @@ class Example:
         for d in range(9):
             builder.joint_target_q[d] = builder.joint_q[d]
             builder.joint_target_mode[d] = int(JointTargetMode.POSITION)
-            # Stiff drive [N·m/rad or N/m]: the key-pose playback expects
-            # near-rigid tracking, and the UIPC aim drive derives its strength
-            # from joint_target_ke (zero ke would leave the arm undriven).
+            # joint_target_ke is inert for UIPC: its aim-drive strength comes
+            # from the solver's drive_strength_ratio (default 100), independent
+            # of this value, which is kept only for cross-solver portability.
             builder.joint_target_ke[d] = 1.0e6
 
         self.robot_key_poses = np.array(

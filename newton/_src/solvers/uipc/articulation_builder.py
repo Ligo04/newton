@@ -35,7 +35,7 @@ from uipc.core import Animation, Object
 from uipc.geometry import SimplicialComplex, SimplicialComplexSlot
 from uipc.unit import MPa
 
-from newton import Control, JointType, Model, State
+from newton import Control, JointTargetMode, JointType, Model, State
 from newton.math import normalize_with_norm
 
 from .articulation import Articulation, FreeJointReadbackContext
@@ -72,6 +72,7 @@ class ArticulationBuilder:
         kappa: float = 100 * MPa,
         body_kappa: np.ndarray | None = None,
         joint_strength_ratio: float = 100.0,
+        drive_strength_ratio: float | dict[int, float] = 100.0,
     ) -> None:
         self._model = model
         self._scene = scene
@@ -82,6 +83,7 @@ class ArticulationBuilder:
         self._kappa = kappa
         self._body_kappa = body_kappa
         self._joint_strength_ratio = joint_strength_ratio
+        self._drive_strength_ratio = drive_strength_ratio
 
         # Per-articulation runtime objects (populated by build_joints)
         self.articulations: dict[int, Articulation] = {}
@@ -564,7 +566,7 @@ class ArticulationBuilder:
             child_slots.append(c_slot)
             child_ids.append(c_id)
             strengths.append(self._joint_strength_ratio)
-            drive_strengths.append(self._extract_drive_strength(j, jdata, model))
+            drive_strengths.append(self._extract_drive_strength(j, model))
 
             # Limits
             lower, upper = self._extract_limits(
@@ -730,7 +732,7 @@ class ArticulationBuilder:
             child_slots.append(c_slot)
             child_ids.append(c_id)
             strengths.append(self._joint_strength_ratio)
-            drive_strengths.append(self._extract_drive_strength(j, jdata, model))
+            drive_strengths.append(self._extract_drive_strength(j, model))
 
             # Limits
             lower, upper = self._extract_limits(
@@ -1137,39 +1139,23 @@ class ArticulationBuilder:
         qd_start = int(joint_qd_start.numpy()[j])
         return float(joint_limit_ke.numpy()[qd_start])
 
-    def _extract_drive_strength(self, j: int, jdata: dict, model: Any) -> float:
-        """UIPC drive ``strength_ratio`` equivalent to Newton's ``joint_target_ke``.
+    def _extract_drive_strength(self, j: int, model: Any) -> float:
+        """UIPC aim-drive ``strength_ratio`` for joint ``j``.
 
-        libuipc's aim-drive energy ``0.5 * ratio * (m_parent + m_child) * err**2``
-        enters the incremental potential without a ``dt**2`` factor, so its
-        effective physical stiffness is ``ratio * (m_parent + m_child) / dt**2``.
-        Inverting preserves ``joint_target_ke``'s cross-solver meaning
-        (drive torque/force = ke * error): ``ratio = ke * dt**2 / mass_sum``.
-        Zero or unset ``ke`` yields no drive, matching the PD behaviour of the
-        other backends.
+        Deliberately decoupled from ``joint_target_ke`` / ``joint_target_kd``:
+        the drive strength is a pure solver constraint-stiffness knob taken
+        from ``drive_strength_ratio`` (global default, or a per-joint override
+        keyed by Newton joint index). ``joint_target_mode`` only gates whether
+        the joint is position-driven at all — non-position modes get no drive.
         """
-        if model.joint_target_ke is None or model.joint_qd_start is None:
-            return 0.0
-        qd_start = int(model.joint_qd_start.numpy()[j])
-        target_ke = float(model.joint_target_ke.numpy()[qd_start])
-        if target_ke <= 0.0:
-            return 0.0
-        mass_sum = self._joint_body_mass(jdata["parent_body"], model) + self._joint_body_mass(
-            jdata["child_body"], model
-        )
-        return target_ke * self._dt * self._dt / mass_sum
-
-    @staticmethod
-    def _joint_body_mass(body_idx: int, model: Any) -> float:
-        """Mass [kg] of a joint-side body as UIPC's joint kappa will see it.
-
-        Mirrors the fallbacks in :meth:`_create_proxy`: world anchors and
-        shapeless/massless bodies get the proxy unit mass.
-        """
-        if body_idx < 0 or model.body_mass is None:
-            return 1.0
-        mass = float(model.body_mass.numpy()[body_idx])
-        return mass if mass > 0.0 else 1.0
+        if model.joint_target_mode is not None and model.joint_qd_start is not None:
+            qd_start = int(model.joint_qd_start.numpy()[j])
+            mode = int(model.joint_target_mode.numpy()[qd_start])
+            if mode not in (int(JointTargetMode.POSITION), int(JointTargetMode.POSITION_VELOCITY)):
+                return 0.0
+        if isinstance(self._drive_strength_ratio, dict):
+            return float(self._drive_strength_ratio.get(j, 100.0))
+        return float(self._drive_strength_ratio)
 
     # ------------------------------------------------------------------
     # Per-step interface (called by SolverUIPC.step)
