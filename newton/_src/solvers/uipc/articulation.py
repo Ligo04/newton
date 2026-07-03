@@ -96,9 +96,12 @@ def _cache_control_kernel(
     else:
         out_is_constrained[local] = 0  # ty:ignore[invalid-assignment]
 
-    # Velocity target
-    if has_target_vel != 0:
+    # Aim velocity target — only POSITION_VELOCITY forwards it; the
+    # implicit-PD blend then damps toward rest in plain POSITION mode.
+    if mode == JointTargetMode.POSITION_VELOCITY and has_target_vel != 0:
         out_target_vel[local] = wp.float64(target_vel[qd_idx])  # ty:ignore[invalid-assignment]
+    else:
+        out_target_vel[local] = wp.float64(0.0)  # ty:ignore[invalid-assignment]
 
     # Force/torque control (EFFORT mode)
     if mode == JointTargetMode.EFFORT and has_joint_f != 0:
@@ -325,6 +328,13 @@ class Articulation:
         self._is_constrained_dev: wp.array | None = None
         self._is_force_constrained_dev: wp.array | None = None
 
+        # -- Implicit-PD aim blending (populated by ArticulationBuilder) --
+        # local index → damping blend weight w_d = ratio_d/(ratio_p+ratio_d).
+        # The anim callbacks blend the aim toward theta_prev + dt*dq_ref by
+        # this weight, which is exactly a damping spring merged with the
+        # position spring (equal-variable quadratics add). Empty = off.
+        self.implicit_pd_weight: dict[int, float] = {}
+
         # -- FREE joint readback (populated by register_free_joint) -----
         # Tracked separately from active joints; recovered from body state.
         self._free_joint_indices: list[int] = []
@@ -444,10 +454,15 @@ class Articulation:
         if self.target_position is None:
             return
         target_np = self.target_position.numpy()
+        # joint_position doubles as q_prev for the implicit-PD aim blend;
+        # seed it too so the world.init-time callback does not damp toward 0.
+        assert self.joint_position is not None
+        position_np = self.joint_position.numpy()
         for newton_idx in self.active_joint_indices:
             local = self._joint_to_local[newton_idx]
             q_start = self._joint_q_start[newton_idx]
             target_np[local] = float(joint_q_np[q_start])
+            position_np[local] = float(joint_q_np[q_start])
 
     def increment_step(self) -> None:
         """Increment internal step counter (call once per simulation step)."""
@@ -518,6 +533,7 @@ class Articulation:
         # space thanks to the ``init_angle`` edge offset, so write the
         # Newton target directly.
         if driving:
+            aim_angle = self._blend_implicit_pd_aim(local, aim_angle)
             _view_attr(geo.edges().find("aim_angle"))[edge_idx] = aim_angle
 
     def prismatic_joint_anim(
@@ -562,7 +578,31 @@ class Articulation:
             _view_attr(geo.edges().find("external_force"))[edge_idx] = external_force
 
         if driving:
+            aim_distance = self._blend_implicit_pd_aim(local, aim_distance)
             _view_attr(geo.edges().find("aim_distance"))[edge_idx] = aim_distance
+
+    def _blend_implicit_pd_aim(self, local: int, aim: float) -> float:
+        """Blend the aim target with the implicit-PD damping spring.
+
+        The damping term of an implicit PD, ``0.5*kd_ratio*(q - q_prev -
+        dt*dq_ref)^2``, is an aim spring toward ``q_prev + dt*dq_ref``.
+        Merged with the position spring (stiffnesses add, targets average
+        by weight) it stays a single libuipc drive channel:
+
+            aim = (1-w)*q_ref + w*(q_prev + dt*dq_ref)
+
+        ``q_prev`` is the pre-advance snapshot from :meth:`read_pre_advance`,
+        so the blended aim is constant across the animator's line-search /
+        Newton re-invocations within one ``world.advance()``.
+        """
+        w = self.implicit_pd_weight.get(local)
+        if w is None:
+            return aim
+        assert self.joint_position is not None
+        assert self.target_velocity is not None
+        q_prev = float(self.joint_position.numpy()[local])
+        dq_ref = float(self.target_velocity.numpy()[local])
+        return (1.0 - w) * aim + w * (q_prev + self._dt * dq_ref)
 
     # ------------------------------------------------------------------
     # Per-step control caching & state readback

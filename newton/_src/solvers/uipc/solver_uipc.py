@@ -265,6 +265,7 @@ class SolverUIPC(SolverBase):
         joint_strength_ratio: float = 100.0,
         drive_strength_ratio: float | dict[int, float] = 100.0,
         limit_strength_ratio: float | dict[int, float] = 10.0,
+        implicit_pd: bool = False,
     ):
         """Create a UIPC solver instance from a Newton model.
 
@@ -332,6 +333,17 @@ class SolverUIPC(SolverBase):
                 keyed by Newton joint index (missing joints fall back to
                 ``10.0``). Like the drive strength, decoupled from
                 ``joint_limit_ke``.
+            implicit_pd: Opt-in implicit PD drives with physical gain
+                semantics. Position-driven joints consume
+                :attr:`~newton.Model.joint_target_ke` /
+                :attr:`~newton.Model.joint_target_kd` [N·m/rad, N·m·s/rad]
+                instead of ``drive_strength_ratio``: the PD is expressed as
+                aim-drive energies in the incremental potential (stiffness
+                on the new-state position error, damping on the new-state
+                velocity error), co-solved with contact and unconditionally
+                stable — equivalent to :class:`SolverKamino`'s implicit
+                joint PD. Gains are baked at initialization and cannot be
+                changed at runtime.
         """
         super().__init__(model=model)
         self.import_uipc()
@@ -358,6 +370,7 @@ class SolverUIPC(SolverBase):
         self._joint_strength_ratio = joint_strength_ratio
         self._drive_strength_ratio = drive_strength_ratio
         self._limit_strength_ratio = limit_strength_ratio
+        self._implicit_pd = implicit_pd
 
         # Scene config: start from UIPC defaults, apply Newton model overrides.
         if scene_config is None:
@@ -1003,6 +1016,7 @@ class SolverUIPC(SolverBase):
             joint_strength_ratio=self._joint_strength_ratio,
             drive_strength_ratio=self._drive_strength_ratio,
             limit_strength_ratio=self._limit_strength_ratio,
+            implicit_pd=self._implicit_pd,
         )
         self._cloth_builder = ClothBuilder(
             model,

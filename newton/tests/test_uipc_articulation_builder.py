@@ -215,12 +215,47 @@ class TestUIPCArticulationBuilder(unittest.TestCase):
 
         self.assertEqual(builder._extract_drive_strength(0, model), 250.0)
 
+    def test_implicit_pd_params_maps_physical_gains(self):
+        builder = self._make_builder(dt=0.1, implicit_pd=True)
+        model = self._make_single_dof_model(limit_ke=1.0, target_ke=720.0, target_kd=80.0, body_mass=[3.0, 5.0])
+
+        strength, blend = builder._implicit_pd_params(0, {"parent_body": 0, "child_body": 1}, model)
+
+        # ratio_p = ke*dt^2/mass = 720*0.01/8 = 0.9; ratio_d = kd*dt/mass = 80*0.1/8 = 1.0
+        self.assertAlmostEqual(strength, 1.9)
+        self.assertAlmostEqual(blend, 1.0 / 1.9)
+
+    def test_implicit_pd_params_world_parent_uses_unit_proxy_mass(self):
+        builder = self._make_builder(dt=0.1, implicit_pd=True)
+        model = self._make_single_dof_model(limit_ke=1.0, target_ke=720.0, body_mass=[5.0])
+
+        strength, blend = builder._implicit_pd_params(0, {"parent_body": -1, "child_body": 0}, model)
+
+        # world anchor proxy has unit mass: ratio_p = 720*0.01/(1+5) = 1.2, no damping
+        self.assertAlmostEqual(strength, 1.2)
+        self.assertEqual(blend, 0.0)
+
+    def test_implicit_pd_params_zero_gains_disable_drive(self):
+        builder = self._make_builder(implicit_pd=True)
+        model = self._make_single_dof_model(limit_ke=1.0, target_ke=0.0, target_kd=0.0, body_mass=[3.0, 5.0])
+
+        self.assertEqual(builder._implicit_pd_params(0, {"parent_body": 0, "child_body": 1}, model), (0.0, 0.0))
+
+    def test_implicit_pd_params_non_position_mode_disables_drive(self):
+        builder = self._make_builder(implicit_pd=True)
+        model = self._make_single_dof_model(
+            limit_ke=1.0, target_ke=720.0, target_kd=80.0, body_mass=[3.0, 5.0], target_mode=int(JointTargetMode.EFFORT)
+        )
+
+        self.assertEqual(builder._implicit_pd_params(0, {"parent_body": 0, "child_body": 1}, model), (0.0, 0.0))
+
     @staticmethod
     def _make_builder(
         dt: float = 1.0 / 60.0,
         joint_strength_ratio: float = 100.0,
         drive_strength_ratio: float | dict[int, float] = 100.0,
         limit_strength_ratio: float | dict[int, float] = 10.0,
+        implicit_pd: bool = False,
     ):
         builder = ArticulationBuilder.__new__(ArticulationBuilder)
         builder._scene = _FakeScene()
@@ -229,12 +264,14 @@ class TestUIPCArticulationBuilder(unittest.TestCase):
         builder._joint_strength_ratio = joint_strength_ratio
         builder._drive_strength_ratio = drive_strength_ratio
         builder._limit_strength_ratio = limit_strength_ratio
+        builder._implicit_pd = implicit_pd
         return builder
 
     @staticmethod
     def _make_single_dof_model(
         limit_ke: float,
         target_ke: float = 0.0,
+        target_kd: float = 0.0,
         body_mass: list[float] | None = None,
         target_mode: int = int(JointTargetMode.POSITION),
     ):
@@ -244,6 +281,7 @@ class TestUIPCArticulationBuilder(unittest.TestCase):
             joint_q_start = _Array([0])
             joint_q = None
             joint_target_ke = _Array([target_ke])
+            joint_target_kd = _Array([target_kd])
             joint_target_mode = _Array([target_mode])
             joint_limit_lower = _Array([-0.5])
             joint_limit_upper = _Array([0.5])
@@ -371,6 +409,73 @@ class TestUIPCRevoluteArmatureInertia(unittest.TestCase):
         model_inertia = model.body_inertia.numpy()[child].astype(np.float64)
         inertia = solver.read_uipc_body_inertia(child)["inertia"]
         np.testing.assert_allclose(inertia, model_inertia, rtol=1e-4, atol=1e-6)
+
+
+@unittest.skipUnless(_HAS_UIPC, "uipc is not installed")
+class TestUIPCImplicitPD(unittest.TestCase):
+    """Physical gain semantics of ``SolverUIPC(implicit_pd=True)``.
+
+    A 1 m rod pendulum hinged at the origin is held horizontal
+    (``target_q = 0``) against gravity: the steady state must sag by
+    ``tau_g / kp`` (P-gain semantics), and ``kd`` must damp the transient
+    (D-gain semantics) — the aim-drive blend has no explicit damping
+    channel, so this is the property that distinguishes implicit PD from
+    the plain position drive.
+    """
+
+    @staticmethod
+    def _run_pendulum(kp: float, kd: float, frames: int = 180):
+        builder = newton.ModelBuilder(up_axis=newton.Axis.Z, gravity=-9.81)
+        link = builder.add_link()
+        builder.add_shape_box(link, hx=0.5, hy=0.02, hz=0.02, xform=wp.transform(wp.vec3(0.5, 0.0, 0.0)))
+        j = builder.add_joint_revolute(parent=-1, child=link, axis=newton.Axis.Y)
+        dof = builder.joint_qd_start[j]
+        builder.joint_target_ke[dof] = kp
+        builder.joint_target_kd[dof] = kd
+        builder.joint_target_mode[dof] = int(newton.JointTargetMode.POSITION)
+        model = builder.finalize()
+
+        dt = 1.0 / 60.0
+        solver = newton.solvers.SolverUIPC(
+            model,
+            workspace="/tmp/newton_uipc_implicit_pd_test",
+            dt=dt,
+            logger_level=uipc.Logger.Error,
+            implicit_pd=True,
+        )
+        solver.sync_uipc_inertia_with_model()
+        solver.initialize()
+
+        state_0, state_1 = model.state(), model.state()
+        control = model.control()
+        control.joint_target_q.fill_(0.0)
+
+        traj = []
+        for _ in range(frames):
+            state_0.clear_forces()
+            solver.step(state_0, state_1, control, None, dt)
+            state_0, state_1 = state_1, state_0
+            traj.append(float(state_0.joint_q.numpy()[0]))
+        tau_g = float(model.body_mass.numpy()[link]) * 9.81 * 0.5
+        return np.asarray(traj), tau_g
+
+    def test_stiffness_sets_physical_steady_state_sag(self):
+        traj, tau_g = self._run_pendulum(kp=200.0, kd=20.0)
+        sag = tau_g / 200.0
+        self.assertAlmostEqual(float(traj[-1]), sag, delta=0.05 * sag)
+
+    def test_damping_removes_oscillation(self):
+        undamped, tau_g = self._run_pendulum(kp=50.0, kd=0.0)
+        damped, _ = self._run_pendulum(kp=50.0, kd=20.0)
+        sag = tau_g / 50.0
+
+        tail = slice(len(damped) * 2 // 3, None)
+        tv_undamped = float(np.abs(np.diff(undamped[tail])).sum())
+        tv_damped = float(np.abs(np.diff(damped[tail])).sum())
+        self.assertLess(tv_damped, 0.05 * tv_undamped)
+        # kd=0 rings past the steady state; kd=20 settles without overshoot.
+        self.assertGreater(float(undamped.max()), 1.5 * sag)
+        self.assertLess(float(damped.max()), 1.1 * sag)
 
 
 if __name__ == "__main__":

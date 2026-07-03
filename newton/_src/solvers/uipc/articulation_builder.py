@@ -74,6 +74,7 @@ class ArticulationBuilder:
         joint_strength_ratio: float = 100.0,
         drive_strength_ratio: float | dict[int, float] = 100.0,
         limit_strength_ratio: float | dict[int, float] = 10.0,
+        implicit_pd: bool = False,
     ) -> None:
         self._model = model
         self._scene = scene
@@ -86,6 +87,7 @@ class ArticulationBuilder:
         self._joint_strength_ratio = joint_strength_ratio
         self._drive_strength_ratio = drive_strength_ratio
         self._limit_strength_ratio = limit_strength_ratio
+        self._implicit_pd = implicit_pd
 
         # Per-articulation runtime objects (populated by build_joints)
         self.articulations: dict[int, Articulation] = {}
@@ -568,7 +570,11 @@ class ArticulationBuilder:
             child_slots.append(c_slot)
             child_ids.append(c_id)
             strengths.append(self._joint_strength_ratio)
-            drive_strengths.append(self._extract_drive_strength(j, model))
+            if self._implicit_pd:
+                drive_strength, pd_blend = self._implicit_pd_params(j, jdata, model)
+            else:
+                drive_strength, pd_blend = self._extract_drive_strength(j, model), 0.0
+            drive_strengths.append(drive_strength)
 
             # Limits
             lower, upper = self._extract_limits(
@@ -588,7 +594,9 @@ class ArticulationBuilder:
                 limit_strengths.append(self._extract_limit_strength(j))
 
             init_angles.append(float(joint_q_np[q_start]) if joint_q_np is not None else 0.0)
-            art.register_joint(j, q_start, qd_start)
+            local = art.register_joint(j, q_start, qd_start)
+            if pd_blend > 0.0:
+                art.implicit_pd_weight[local] = pd_blend
             anim_dispatch.append((art, j, edge_idx))
 
         # Build batched linemesh via create_geometry (4-position overload)
@@ -734,7 +742,11 @@ class ArticulationBuilder:
             child_slots.append(c_slot)
             child_ids.append(c_id)
             strengths.append(self._joint_strength_ratio)
-            drive_strengths.append(self._extract_drive_strength(j, model))
+            if self._implicit_pd:
+                drive_strength, pd_blend = self._implicit_pd_params(j, jdata, model)
+            else:
+                drive_strength, pd_blend = self._extract_drive_strength(j, model), 0.0
+            drive_strengths.append(drive_strength)
 
             # Limits
             lower, upper = self._extract_limits(
@@ -753,7 +765,9 @@ class ArticulationBuilder:
                 uppers.append(1e18)
                 limit_strengths.append(self._extract_limit_strength(j))
 
-            art.register_joint(j, q_start, qd_start)
+            local = art.register_joint(j, q_start, qd_start)
+            if pd_blend > 0.0:
+                art.implicit_pd_weight[local] = pd_blend
             anim_dispatch.append((art, j, edge_idx))
 
         # Build batched linemesh via create_geometry (4-position overload)
@@ -1157,6 +1171,54 @@ class ArticulationBuilder:
         if isinstance(self._drive_strength_ratio, dict):
             return float(self._drive_strength_ratio.get(j, 100.0))
         return float(self._drive_strength_ratio)
+
+    def _implicit_pd_params(self, j: int, jdata: dict, model: Any) -> tuple[float, float]:
+        """Implicit-PD aim-drive parameters ``(strength_ratio, damping_blend)``.
+
+        Maps physical gains onto the single libuipc drive channel. The
+        implicit PD is two quadratics in the new-state joint coordinate —
+        the position spring ``0.5*kp*(q - q_ref)^2`` and the damping spring
+        ``0.5*kd/dt*(q - q_prev - dt*dq_ref)^2`` — which merge into one
+        spring with summed stiffness and a weight-blended target (see
+        :meth:`Articulation._blend_implicit_pd_aim`).
+
+        libuipc's drive energy ``0.5*ratio*(m_parent+m_child)*err^2`` enters
+        the incremental potential without a ``dt^2`` factor, so physical
+        gains convert as ``ratio_p = kp*dt^2/mass_sum`` and
+        ``ratio_d = kd*dt/mass_sum``. Returns ``(0, 0)`` for non-position
+        target modes and for ``kp <= 0 and kd <= 0``.
+        """
+        if model.joint_qd_start is None:
+            return 0.0, 0.0
+        qd_start = int(model.joint_qd_start.numpy()[j])
+        if model.joint_target_mode is not None:
+            mode = int(model.joint_target_mode.numpy()[qd_start])
+            if mode not in (int(JointTargetMode.POSITION), int(JointTargetMode.POSITION_VELOCITY)):
+                return 0.0, 0.0
+        ke = float(model.joint_target_ke.numpy()[qd_start]) if model.joint_target_ke is not None else 0.0
+        kd = float(model.joint_target_kd.numpy()[qd_start]) if model.joint_target_kd is not None else 0.0
+        ke = max(ke, 0.0)
+        kd = max(kd, 0.0)
+        if ke <= 0.0 and kd <= 0.0:
+            return 0.0, 0.0
+        mass_sum = self._joint_body_mass(jdata["parent_body"], model) + self._joint_body_mass(
+            jdata["child_body"], model
+        )
+        ratio_p = ke * self._dt * self._dt / mass_sum
+        ratio_d = kd * self._dt / mass_sum
+        return ratio_p + ratio_d, ratio_d / (ratio_p + ratio_d)
+
+    @staticmethod
+    def _joint_body_mass(body_idx: int, model: Any) -> float:
+        """Mass [kg] of a joint-side body as UIPC's joint kappa will see it.
+
+        Mirrors the fallbacks in :meth:`_create_proxy`: world anchors and
+        shapeless/massless bodies get the proxy unit mass.
+        """
+        if body_idx < 0 or model.body_mass is None:
+            return 1.0
+        mass = float(model.body_mass.numpy()[body_idx])
+        return mass if mass > 0.0 else 1.0
 
     # ------------------------------------------------------------------
     # Per-step interface (called by SolverUIPC.step)

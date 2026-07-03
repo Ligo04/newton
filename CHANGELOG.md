@@ -12,6 +12,7 @@
 - Add per-range `uipc:cloth_model` and `uipc:deformable_model` custom attributes so UIPC cloth and soft bodies can select constitutions while retaining their existing defaults.
 - Add mimic joint support to `SolverUIPC`: follower joints track `coef0 + coef1 * leader` via position driving (soft coupling); follower and leader must both be active revolute/prismatic joints.
 - Add `Model.joint_armature` support to `SolverUIPC`: reflected rotor inertia on revolute joints is folded into the child link's AffineBody inertia about the joint axis; armature on other joint types is ignored with a warning.
+- Add `SolverUIPC(implicit_pd=True)` opt-in implicit PD joint drives with physical gain semantics: position-driven joints consume `joint_target_ke` / `joint_target_kd` as stiffness and damping springs inside the incremental potential (co-solved with contact, unconditionally stable), instead of the gain-agnostic `drive_strength_ratio` drive. Gains are baked at initialization.
 - Add `SolverUIPC.reset()` to re-push masked-world body/particle state into the live IPC scene without rebuilding the solver.
 - Add `--enable-contact` / `--no-enable-contact` to `uipc_brick_stacking` so UIPC contact can be disabled while remaining enabled by default.
 - Add `SolverUIPC.get_max_contact_count()` and a `rigid_contact_max` constructor argument so a `Contacts` buffer can be sized for `SensorContact` reporting; when `rigid_contact_max` is `None` the capacity defaults to `SolverUIPC.CONTACTS_PER_ENV` times `Model.num_envs`.

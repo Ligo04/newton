@@ -272,6 +272,19 @@ joint index, e.g. `SolverUIPC(model, drive_strength_ratio={3: 10.0})`; joints
 missing from the mapping fall back to `100.0`. Non-position target modes get
 no drive. The joint anchoring constraints themselves use the independent
 solver-level `joint_strength_ratio` parameter (default `100.0`).
+
+Alternatively, `SolverUIPC(implicit_pd=True)` opts position-driven joints into
+implicit PD with physical gain semantics: `joint_target_ke` /
+`joint_target_kd` [N·m/rad, N·m·s/rad] replace `drive_strength_ratio`. The PD
+is expressed inside the incremental potential — the stiffness spring acts on
+the new-state position error and the damping spring on the new-state velocity
+error (an aim toward `q_prev + dt * dq_ref`, merged with the position spring
+into the single drive channel) — so it is co-solved with contact,
+unconditionally stable, and equivalent to `SolverKamino`'s implicit joint PD:
+steady-state sag under load is `tau / ke`, and `kd` damps transients.
+`POSITION_VELOCITY` mode feeds `joint_target_qd` as the damping reference;
+plain `POSITION` damps toward rest. Gains are baked at initialization and
+cannot be changed at runtime.
 `joint_limit_lower` / `joint_limit_upper` create UIPC joint-limit
 constitutions whose strength comes from the solver-level
 `limit_strength_ratio` parameter (default `10.0`, same global-or-per-joint
