@@ -1516,6 +1516,21 @@ if _HAS_UIPC:
     )
     add_example_test(
         TestUIPCSoftbodyExamples,
+        name="uipc.robot.example_uipc_ur10",
+        devices=cuda_test_devices,
+        test_options={"num-frames": 120},
+        use_viewer=True,
+    )
+    add_example_test(
+        TestUIPCSoftbodyExamples,
+        name="uipc.robot.example_uipc_ur10",
+        devices=cuda_test_devices,
+        test_options={"num-frames": 120, "implicit-pd": True},
+        use_viewer=True,
+        test_suffix="implicit_pd",
+    )
+    add_example_test(
+        TestUIPCSoftbodyExamples,
         name="uipc.softbody.example_uipc_soft_hanging",
         devices=cuda_test_devices,
         test_options={"num-frames": 60},

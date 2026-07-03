@@ -89,6 +89,12 @@ class Example:
         [0.0, -np.pi / 3, np.pi / 2, -np.pi / 6, np.pi / 2, 0.0],
         dtype=np.float32,
     )
+    # Shared task spec — keep in sync with example_uipc_ur10.py, so the
+    # EFFORT drive flavours here (ControllerPD / --stable-pd) compare
+    # directly against that example's aim drive / --implicit-pd.
+    TRAJ_AMP = 0.4  # [rad]
+    TRAJ_OMEGA = 1.2  # [rad/s]
+    TRAJ_PHASE = 0.8  # [rad] per DOF index
 
     def __init__(self, viewer, args):
         # Render at 60 Hz.  Physics at 240 Hz (4 substeps) gives the external
@@ -104,6 +110,7 @@ class Example:
         self.world_count = args.world_count
         self.solver_name = args.solver
         self.stable_pd = bool(args.stable_pd)
+        self.hold = bool(args.hold)
         self.viewer = viewer
 
         # --- Joint-space PD gains ---------------------------------------------
@@ -245,8 +252,9 @@ class Example:
         self.bodies_per_world = self.model.body_count // self.world_count
         assert self.dofs_per_world == 6, f"expected 6 UR10 DOFs per world, got {self.dofs_per_world}"
 
-        # Joint targets (hold the home pose), tiled to the ArticulationView
-        # layout ``(world_count, 1, dofs_per_arti)``. Velocity target = 0.
+        # Joint targets (home-centered shared trajectory, refreshed per frame
+        # in ``_update_targets``), tiled to the ArticulationView layout
+        # ``(world_count, 1, dofs_per_arti)``. Velocity target = 0.
         self.q_target = (
             np.broadcast_to(self.HOME_POSE, (self.world_count, 1, self.dofs_per_world)).astype(np.float32).copy()
         )
@@ -448,7 +456,22 @@ class Example:
                 # next replay reads the buffer it was captured against.
                 self._state_parity ^= 1
 
+    def _update_targets(self):
+        """Apply the shared home-centered sinusoidal trajectory to all worlds.
+
+        Writes into the existing ``control.joint_target_q`` buffer, so the
+        captured plain-PD CUDA graphs keep reading fresh targets.
+        """
+        if self.hold:
+            target = self.HOME_POSE
+        else:
+            phases = self.TRAJ_PHASE * np.arange(self.dofs_per_world, dtype=np.float32)
+            target = self.HOME_POSE + self.TRAJ_AMP * np.sin(self.TRAJ_OMEGA * self.sim_time + phases)
+        self.q_target[:] = target.astype(np.float32)
+        self.ur10s.set_attribute("joint_target_q", self.control, self.q_target)
+
     def step(self):
+        self._update_targets()
         self.simulate()
         self._log_tracking()
         self.sim_time += self.frame_dt
@@ -463,7 +486,7 @@ class Example:
         q = self.ur10s.get_attribute("joint_q", self.state_0).numpy()[0, 0]
         qd = self.ur10s.get_attribute("joint_qd", self.state_0).numpy()[0, 0]
         f = self.ur10s.get_attribute("joint_f", self.control).numpy()[0, 0]
-        err = self.HOME_POSE - q
+        err = self.q_target[0, 0] - q
         q_str = " ".join(f"{p:+.4f}" for p in q)
         qd_str = " ".join(f"{v:+.4f}" for v in qd)
         err_str = " ".join(f"{e:+.3f}" for e in err)
@@ -513,6 +536,11 @@ class Example:
                 "Mutually exclusive with --gravity-comp (bias_forces "
                 "already contains gravity). Requires --world-count 1."
             ),
+        )
+        parser.add_argument(
+            "--hold",
+            action="store_true",
+            help="Hold the home pose instead of tracking the shared sinusoid (settling / steady-state comparison).",
         )
         parser.set_defaults(world_count=4)
         return parser
