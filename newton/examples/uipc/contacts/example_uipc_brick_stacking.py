@@ -514,7 +514,10 @@ class Example:
     def _configure_franka(self, builder: newton.ModelBuilder, arm_q: np.ndarray | list[float]) -> None:
         builder.joint_q[:9] = [*np.asarray(arm_q, dtype=np.float32)[:7].tolist(), GRIPPER_OPEN, GRIPPER_OPEN]
         builder.joint_target_q[:9] = builder.joint_q[:9]
-        builder.joint_target_ke[:9] = [650.0] * 9
+        # Stiff drive [N·m/rad or N/m]: brick pick-and-stack needs near-rigid
+        # tracking and firm finger clamping; the UIPC aim drive has no damping
+        # channel, so implicit integration provides the damping.
+        builder.joint_target_ke[:9] = [1.0e6] * 9
         builder.joint_target_kd[:9] = [100.0] * 9
         builder.joint_effort_limit[:7] = [80.0] * 7
         builder.joint_effort_limit[7:9] = [20.0] * 2

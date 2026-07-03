@@ -44,10 +44,11 @@ class Example:
         self.cart_amplitude = 0.8  # [m]
         self.cart_frequency = 0.5  # [Hz]
 
-        # PD gains for UIPC's built-in position aim drive. Matched with the
-        # gains used in the ControllerPD force variant so the two examples
-        # produce comparable tracking.
-        self.kp = 2000.0
+        # Physical stiffness [N/m] for UIPC's built-in position aim drive.
+        # Unlike the ControllerPD force variant (kp=2000, kd=200), the aim
+        # drive has no damping channel, so the cart needs a near-rigid gain
+        # (overdamped via implicit integration) to keep the poles balanced.
+        self.kp = 1.0e6
         self.kd = 200.0
 
         cartpole = newton.ModelBuilder(up_axis=newton.Axis.Z)

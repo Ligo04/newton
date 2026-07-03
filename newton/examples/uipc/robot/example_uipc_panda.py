@@ -150,7 +150,10 @@ class Example:
         builder.joint_q[:9] = [*init_q, 0.00, 0.00]
         builder.joint_target_q[:9] = [*init_q, 1.0, 1.0]
 
-        builder.joint_target_ke[:9] = [650.0] * 9
+        # Stiff drive [N·m/rad or N/m]: the pick-and-place choreography needs
+        # near-rigid tracking and firm finger clamping; the UIPC aim drive has
+        # no damping channel, so implicit integration provides the damping.
+        builder.joint_target_ke[:9] = [1.0e6] * 9
         builder.joint_target_kd[:9] = [100.0] * 9
         builder.joint_effort_limit[:7] = [80.0] * 7
         builder.joint_effort_limit[7:9] = [20.0] * 2
