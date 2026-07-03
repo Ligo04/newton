@@ -73,6 +73,7 @@ class ArticulationBuilder:
         body_kappa: np.ndarray | None = None,
         joint_strength_ratio: float = 100.0,
         drive_strength_ratio: float | dict[int, float] = 100.0,
+        limit_strength_ratio: float | dict[int, float] = 10.0,
     ) -> None:
         self._model = model
         self._scene = scene
@@ -84,6 +85,7 @@ class ArticulationBuilder:
         self._body_kappa = body_kappa
         self._joint_strength_ratio = joint_strength_ratio
         self._drive_strength_ratio = drive_strength_ratio
+        self._limit_strength_ratio = limit_strength_ratio
 
         # Per-articulation runtime objects (populated by build_joints)
         self.articulations: dict[int, Articulation] = {}
@@ -578,12 +580,12 @@ class ArticulationBuilder:
             if lower is not None and upper is not None:
                 lowers.append(lower)
                 uppers.append(upper)
-                limit_strengths.append(self._extract_limit_strength(j, model.joint_qd_start, model.joint_limit_ke))
+                limit_strengths.append(self._extract_limit_strength(j))
                 has_any_limit = True
             else:
                 lowers.append(-1e18)
                 uppers.append(1e18)
-                limit_strengths.append(self._extract_limit_strength(j, model.joint_qd_start, model.joint_limit_ke))
+                limit_strengths.append(self._extract_limit_strength(j))
 
             init_angles.append(float(joint_q_np[q_start]) if joint_q_np is not None else 0.0)
             art.register_joint(j, q_start, qd_start)
@@ -744,12 +746,12 @@ class ArticulationBuilder:
             if lower is not None and upper is not None:
                 lowers.append(lower)
                 uppers.append(upper)
-                limit_strengths.append(self._extract_limit_strength(j, model.joint_qd_start, model.joint_limit_ke))
+                limit_strengths.append(self._extract_limit_strength(j))
                 has_any_limit = True
             else:
                 lowers.append(-1e18)
                 uppers.append(1e18)
-                limit_strengths.append(self._extract_limit_strength(j, model.joint_qd_start, model.joint_limit_ke))
+                limit_strengths.append(self._extract_limit_strength(j))
 
             art.register_joint(j, q_start, qd_start)
             anim_dispatch.append((art, j, edge_idx))
@@ -1127,17 +1129,16 @@ class ArticulationBuilder:
         upper = float(joint_limit_upper.numpy()[qd_start]) if joint_limit_upper is not None else None
         return lower, upper
 
-    @staticmethod
-    def _extract_limit_strength(
-        j: int,
-        joint_qd_start: wp.array,
-        joint_limit_ke: wp.array | None,
-    ) -> float:
-        """Extract UIPC joint-limit strength from Newton's per-DOF limit stiffness."""
-        if joint_limit_ke is None:
-            return 100.0
-        qd_start = int(joint_qd_start.numpy()[j])
-        return float(joint_limit_ke.numpy()[qd_start])
+    def _extract_limit_strength(self, j: int) -> float:
+        """UIPC joint-limit ``strength_ratio`` for joint ``j``.
+
+        Like the drive strength, a pure solver constraint-stiffness knob
+        (``limit_strength_ratio``: global default, or a per-joint override
+        keyed by Newton joint index), decoupled from ``joint_limit_ke``.
+        """
+        if isinstance(self._limit_strength_ratio, dict):
+            return float(self._limit_strength_ratio.get(j, 10.0))
+        return float(self._limit_strength_ratio)
 
     def _extract_drive_strength(self, j: int, model: Any) -> float:
         """UIPC aim-drive ``strength_ratio`` for joint ``j``.

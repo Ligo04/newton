@@ -273,7 +273,9 @@ missing from the mapping fall back to `100.0`. Non-position target modes get
 no drive. The joint anchoring constraints themselves use the independent
 solver-level `joint_strength_ratio` parameter (default `100.0`).
 `joint_limit_lower` / `joint_limit_upper` create UIPC joint-limit
-constitutions, with `joint_limit_ke` as the limit strength (default `100.0`).
+constitutions whose strength comes from the solver-level
+`limit_strength_ratio` parameter (default `10.0`, same global-or-per-joint
+form as `drive_strength_ratio`), decoupled from `joint_limit_ke`.
 
 ## Contact pipeline
 

@@ -264,6 +264,7 @@ class SolverUIPC(SolverBase):
         rigid_contact_max: int | None = None,
         joint_strength_ratio: float = 100.0,
         drive_strength_ratio: float | dict[int, float] = 100.0,
+        limit_strength_ratio: float | dict[int, float] = 10.0,
     ):
         """Create a UIPC solver instance from a Newton model.
 
@@ -326,6 +327,11 @@ class SolverUIPC(SolverBase):
                 to ``100.0``). This is a pure solver constraint-stiffness
                 knob, deliberately independent of ``joint_target_ke`` /
                 ``joint_target_kd``; non-position joints get no drive.
+            limit_strength_ratio: UIPC ``strength_ratio`` of the joint-limit
+                constraints. Either a global float or a per-joint mapping
+                keyed by Newton joint index (missing joints fall back to
+                ``10.0``). Like the drive strength, decoupled from
+                ``joint_limit_ke``.
         """
         super().__init__(model=model)
         self.import_uipc()
@@ -351,6 +357,7 @@ class SolverUIPC(SolverBase):
         self._rigid_contact_max = rigid_contact_max
         self._joint_strength_ratio = joint_strength_ratio
         self._drive_strength_ratio = drive_strength_ratio
+        self._limit_strength_ratio = limit_strength_ratio
 
         # Scene config: start from UIPC defaults, apply Newton model overrides.
         if scene_config is None:
@@ -995,6 +1002,7 @@ class SolverUIPC(SolverBase):
             body_kappa=body_kappa,
             joint_strength_ratio=self._joint_strength_ratio,
             drive_strength_ratio=self._drive_strength_ratio,
+            limit_strength_ratio=self._limit_strength_ratio,
         )
         self._cloth_builder = ClothBuilder(
             model,

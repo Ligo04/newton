@@ -93,23 +93,23 @@ class _NoOpConstitution:
 
 @unittest.skipUnless(_HAS_UIPC, "uipc is not installed")
 class TestUIPCArticulationBuilder(unittest.TestCase):
-    def test_extract_limit_strength_uses_joint_limit_ke_dof(self):
-        joint_qd_start = wp.array([0, 2], dtype=int, device="cpu")
-        joint_limit_ke = wp.array([10.0, 20.0, 345.0], dtype=float, device="cpu")
+    def test_extract_limit_strength_per_joint_override(self):
+        builder = self._make_builder(limit_strength_ratio={0: 345.0})
 
-        strength = ArticulationBuilder._extract_limit_strength(1, joint_qd_start, joint_limit_ke)
+        self.assertEqual(builder._extract_limit_strength(0), 345.0)
+        # joint 1 is not in the override mapping -> class default 10.0
+        self.assertEqual(builder._extract_limit_strength(1), 10.0)
 
-        self.assertEqual(strength, 345.0)
-
-    def test_revolute_limit_strength_uses_joint_limit_ke(self):
+    def test_revolute_limit_strength_uses_limit_strength_ratio(self):
         captured = {}
 
         class _LimitConstitution:
             def apply_to(self, _geometry, _lowers, _uppers, strengths):
                 captured["strengths"] = strengths.copy()
 
-        builder = self._make_builder()
+        builder = self._make_builder(limit_strength_ratio=3.5)
 
+        # limit_ke=234 must not leak into the UIPC limit strength
         model = self._make_single_dof_model(limit_ke=234.0)
         joints = [self._make_joint_data()]
 
@@ -124,17 +124,18 @@ class TestUIPCArticulationBuilder(unittest.TestCase):
         ):
             builder._build_revolute_joints_batch(joints, model)
 
-        np.testing.assert_array_equal(captured["strengths"], np.array([234.0], dtype=np.float64))
+        np.testing.assert_array_equal(captured["strengths"], np.array([3.5], dtype=np.float64))
 
-    def test_prismatic_limit_strength_uses_joint_limit_ke(self):
+    def test_prismatic_limit_strength_uses_limit_strength_ratio(self):
         captured = {}
 
         class _LimitConstitution:
             def apply_to(self, _geometry, _lowers, _uppers, strengths):
                 captured["strengths"] = strengths.copy()
 
-        builder = self._make_builder()
+        builder = self._make_builder(limit_strength_ratio=6.5)
 
+        # limit_ke=567 must not leak into the UIPC limit strength
         model = self._make_single_dof_model(limit_ke=567.0)
         joints = [self._make_joint_data()]
 
@@ -151,7 +152,7 @@ class TestUIPCArticulationBuilder(unittest.TestCase):
         ):
             builder._build_prismatic_joints_batch(joints, model)
 
-        np.testing.assert_array_equal(captured["strengths"], np.array([567.0], dtype=np.float64))
+        np.testing.assert_array_equal(captured["strengths"], np.array([6.5], dtype=np.float64))
 
     def test_revolute_strengths_decoupled_from_target_ke(self):
         """Constraint strength must come from joint_strength_ratio; drive
@@ -219,6 +220,7 @@ class TestUIPCArticulationBuilder(unittest.TestCase):
         dt: float = 1.0 / 60.0,
         joint_strength_ratio: float = 100.0,
         drive_strength_ratio: float | dict[int, float] = 100.0,
+        limit_strength_ratio: float | dict[int, float] = 10.0,
     ):
         builder = ArticulationBuilder.__new__(ArticulationBuilder)
         builder._scene = _FakeScene()
@@ -226,6 +228,7 @@ class TestUIPCArticulationBuilder(unittest.TestCase):
         builder._dt = dt
         builder._joint_strength_ratio = joint_strength_ratio
         builder._drive_strength_ratio = drive_strength_ratio
+        builder._limit_strength_ratio = limit_strength_ratio
         return builder
 
     @staticmethod
