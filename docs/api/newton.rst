@@ -57,6 +57,7 @@ newton
    :signatures: long
 
    AxisType
+   add_armature_to_mass_matrix
    eval_fk
    eval_ik
    eval_inverse_dynamics

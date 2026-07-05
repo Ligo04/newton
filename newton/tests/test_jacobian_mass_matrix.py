@@ -469,9 +469,9 @@ def test_floating_base_simple_pendulum_mass_matrix_matches_analytical(test, devi
     np.testing.assert_allclose(H, expected, rtol=1.0e-6, atol=1.0e-6)
 
 
-def test_mass_matrix_include_armature_adds_diagonal(test, device):
-    """``include_armature=True`` must add ``diag(joint_armature)`` to H and leave every
-    off-diagonal entry identical to the ``include_armature=False`` result."""
+def test_add_armature_to_mass_matrix_adds_diagonal(test, device):
+    """``add_armature_to_mass_matrix`` must add ``diag(joint_armature)`` to H and leave
+    every off-diagonal entry identical to the pure ``eval_mass_matrix`` result."""
     armature_values = [0.3, 0.5, 0.7]
 
     builder = newton.ModelBuilder(gravity=0.0, up_axis=newton.Axis.Z)
@@ -515,8 +515,10 @@ def test_mass_matrix_include_armature_adds_diagonal(test, device):
     newton.eval_fk(model, state.joint_q, state.joint_qd, state)
 
     num_dofs = model.joint_dof_count
-    H_with = newton.eval_mass_matrix(model, state, include_armature=True).numpy()[0, :num_dofs, :num_dofs]
-    H_without = newton.eval_mass_matrix(model, state, include_armature=False).numpy()[0, :num_dofs, :num_dofs]
+    H_without = newton.eval_mass_matrix(model, state).numpy()[0, :num_dofs, :num_dofs]
+    H_buf = newton.eval_mass_matrix(model, state)
+    newton.add_armature_to_mass_matrix(model, H_buf)
+    H_with = H_buf.numpy()[0, :num_dofs, :num_dofs]
 
     diff = H_with - H_without
     expected_diag = np.array(armature_values, dtype=np.float64)
@@ -1039,8 +1041,8 @@ add_function_test(
 )
 add_function_test(
     TestJacobianMassMatrix,
-    "test_mass_matrix_include_armature_adds_diagonal",
-    test_mass_matrix_include_armature_adds_diagonal,
+    "test_add_armature_to_mass_matrix_adds_diagonal",
+    test_add_armature_to_mass_matrix_adds_diagonal,
     devices=devices,
 )
 add_function_test(

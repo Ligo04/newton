@@ -326,7 +326,10 @@ class Example:
 
         if self.stable_pd:
             # (pole2, pole2) entry of the per-world inertia, shape (W, 1, 1).
+            # eval_mass_matrix returns the pure J^T M J; add reflected rotor
+            # inertia for the Stable-PD plant model.
             self._H_buf = newton.eval_mass_matrix(self.model, self.state_0, H=self._H_buf)
+            newton.add_armature_to_mass_matrix(self.model, self._H_buf)
             p2 = self.pole2_dof
             pole2_m = np.ascontiguousarray(self._H_buf.numpy()[:, p2 : p2 + 1, p2 : p2 + 1], dtype=np.float32)
             ctrl_state = self._act_state.controller_state

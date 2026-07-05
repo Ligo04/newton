@@ -169,8 +169,9 @@ armature. Armature children are automatically built through the
 Newton-authored mass-matrix path described above (their mass and COM then come
 from the Newton model rather than `mass_density * mesh_volume`).
 `sync_model_inertia_from_uipc` subtracts the folded armature on the way back,
-so `Model.body_inertia` always stays armature-free and
-`eval_mass_matrix(include_armature=True)` does not double-count.
+so `Model.body_inertia` always stays armature-free and joint-space consumers
+that add armature themselves (via `add_armature_to_mass_matrix` on the
+`eval_mass_matrix` result) do not double-count.
 
 A prismatic joint's armature (a reflected translational mass) has no ABD
 inertia equivalent either — the AffineBody mass matrix's translational block

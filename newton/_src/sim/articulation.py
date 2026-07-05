@@ -1409,7 +1409,6 @@ def eval_mass_matrix(
     body_I_s: wp.array | None = None,
     joint_S_s: wp.array | None = None,
     mask: wp.array | None = None,
-    include_armature: bool = True,
 ) -> wp.array | None:
     """Evaluate generalized mass matrix for articulations.
 
@@ -1418,9 +1417,9 @@ def eval_mass_matrix(
     relates joint accelerations to joint forces/torques and is consistent with
     kinetic energy computed from COM-referenced body twists.
 
-    Reflected rotor inertia is part of the generalized mass matrix, so
-    :attr:`~newton.Model.joint_armature` is added to the diagonal by default;
-    pass ``include_armature=False`` for the pure link-inertia J^T * M * J.
+    Reflected rotor inertia (:attr:`~newton.Model.joint_armature`) is *not*
+    included; call :func:`add_armature_to_mass_matrix` on the result when a
+    control/dynamics plant model needs it.
 
     Args:
         model: The model containing articulation definitions.
@@ -1435,7 +1434,6 @@ def eval_mass_matrix(
                    shape (joint_dof_count,), dtype wp.spatial_vector. If None, allocates internally.
         mask: Optional boolean mask to select which articulations to compute.
               Shape [articulation_count]. If None, computes for all articulations.
-        include_armature: Add :attr:`~newton.Model.joint_armature` to the diagonal.
 
     Returns:
         The mass matrix array H, or None if the model has no articulations.
@@ -1504,7 +1502,33 @@ def eval_mass_matrix(
         device=model.device,
     )
 
-    if include_armature and model.joint_armature is not None:
+    return H
+
+
+def add_armature_to_mass_matrix(
+    model: Model,
+    H: wp.array,
+    mask: wp.array | None = None,
+) -> wp.array:
+    """Add reflected rotor inertia to a generalized mass matrix in place.
+
+    Adds :attr:`~newton.Model.joint_armature` to the diagonal of ``H``
+    (``H += diag(joint_armature)`` per articulation), turning the pure
+    link-inertia output of :func:`eval_mass_matrix` into the plant model used
+    by joint-space controllers (e.g. :class:`~newton.actuators.ControllerStablePD`).
+    Runs entirely on device, so it is safe to call inside a CUDA-graph capture.
+
+    Args:
+        model: The model providing :attr:`~newton.Model.joint_armature`.
+        H: Generalized mass matrix from :func:`eval_mass_matrix`, shape
+           (articulation_count, max_dofs, max_dofs). Modified in place.
+        mask: Optional boolean mask to select which articulations to update.
+              Shape [articulation_count]. If None, updates all articulations.
+
+    Returns:
+        The same array ``H``, with armature added to its diagonal.
+    """
+    if model.joint_armature is not None:
         wp.launch(
             kernel=_add_armature_to_mass_matrix,
             dim=(model.articulation_count, H.shape[1]),
@@ -1518,7 +1542,6 @@ def eval_mass_matrix(
             outputs=[H],
             device=model.device,
         )
-
     return H
 
 
@@ -1768,9 +1791,11 @@ def eval_inverse_dynamics(
         device=device,
     )
 
-    # Add the inertial term M(q) q̈ when accelerations are supplied.
+    # Add the inertial term M(q) q̈ when accelerations are supplied. Reflected
+    # rotor inertia is part of the physical torque, so armature is folded into
+    # the plant mass matrix here (eval_mass_matrix itself stays armature-free).
     if joint_acc is not None:
-        H = eval_mass_matrix(model, state, mask=mask)
+        H = add_armature_to_mass_matrix(model, eval_mass_matrix(model, state, mask=mask), mask=mask)
         wp.launch(
             _add_mass_matrix_acc,
             dim=(model.articulation_count, max_dofs),

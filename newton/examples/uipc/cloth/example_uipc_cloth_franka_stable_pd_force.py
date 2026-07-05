@@ -397,6 +397,9 @@ class Example:
         self._H_buf = newton.eval_mass_matrix(self.model, self.state_0, H=self._H_buf)
         if self._H_buf is None:
             raise ValueError("eval_mass_matrix unexpectedly returned None for the Franka articulation")
+        # eval_mass_matrix is the pure J^T M J; fold in reflected rotor inertia
+        # so the Stable-PD plant matches the simulated dynamics.
+        newton.add_armature_to_mass_matrix(self.model, self._H_buf)
         ctrl_state = self._act_state.controller_state
         ctrl_state.mass_matrix.assign(self._H_buf)
         # Tan 2011 stable-PD requires gravity on BOTH sides of the implicit solve:

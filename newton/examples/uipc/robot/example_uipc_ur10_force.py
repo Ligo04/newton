@@ -54,7 +54,8 @@
 # needs the articulation mass matrix ``M(q)`` and bias forces
 # ``C(q, q̇)`` fed into the controller state each substep.  Here we wire:
 #
-#     ctrl_state.mass_matrix = newton.eval_mass_matrix(model, state)
+#     ctrl_state.mass_matrix = newton.eval_mass_matrix(model, state)      # J^T M J
+#     newton.add_armature_to_mass_matrix(model, ctrl_state.mass_matrix)   # + reflected rotor inertia
 #     ctrl_state.bias_forces = newton.eval_inverse_dynamics(model, state)  # C(q,q̇)q̇ + g(q)
 #
 # ``eval_inverse_dynamics`` returns the exact RNEA bias force (gravity plus
@@ -180,8 +181,9 @@ class Example:
         # Featherstone/MuJoCo add it to their joint-space mass matrix, and
         # SolverUIPC folds it into the child link's ABD inertia about the
         # joint axis (see the armature notes in ``docs/integrations/uipc.md``).
-        # ``newton.eval_mass_matrix`` includes it by default, keeping the
-        # Stable-PD plant model consistent on every backend.
+        # ``newton.eval_mass_matrix`` stays armature-free; the Stable-PD wiring
+        # calls ``newton.add_armature_to_mass_matrix`` on the result to keep the
+        # plant model consistent on every backend.
         rev_dof = 0
         for j in range(len(ur10.joint_type)):
             if ur10.joint_type[j] != newton.JointType.REVOLUTE:
@@ -379,9 +381,12 @@ class Example:
             ctrl_state = self._act_state.controller_state
 
             # Mass matrix at the current pose. eval_mass_matrix consumes the
-            # supplied J (and reuses body_I_s) instead of allocating per call.
+            # supplied J (and reuses body_I_s) instead of allocating per call;
+            # it returns the pure J^T M J, so reflected rotor inertia is folded
+            # in explicitly for the Stable-PD plant (on-device, graph-safe).
             newton.eval_jacobian(self.model, state, self._mm_J, joint_S_s=self._mm_joint_S_s)
             newton.eval_mass_matrix(self.model, state, H=self._H_buf, J=self._mm_J, body_I_s=self._mm_body_I_s)
+            newton.add_armature_to_mass_matrix(self.model, self._H_buf)
             # H is (W, max_dofs, max_dofs); matches State.mass_matrix's
             # (W, n_per_world, n_per_world) for max_dofs == n_per_world == 6.
             ctrl_state.mass_matrix.assign(self._H_buf)  # ty:ignore[unresolved-attribute]  # pyright: ignore[reportAttributeAccessIssue, reportOptionalMemberAccess]
