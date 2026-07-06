@@ -323,15 +323,12 @@ class RigidBodyBuilder:
                 bodies.
             no_instance_bodies: Body indices that must not share instanced AffineBody
                 geometries.  ``None`` is treated as an empty set.
-            custom_inertia_bodies: Set of body indices whose ABD mass matrix
-                must be taken from Newton's authored
-                ``body_mass`` / ``body_com`` / ``body_inertia`` rather than
-                re-derived by UIPC from ``mass_density * mesh_volume``.
-                These bodies are always forced into single-instance geometries
-                (a ``SimplicialComplex`` carries one shared set of ABD meta
-                attributes), and the geometry is built through the explicit
-                :meth:`AffineBodyConstitution.apply_to` overload that takes a
-                12x12 mass matrix plus a volume override.
+            custom_inertia_bodies: Body indices whose ABD mass matrix is taken
+                from Newton's authored ``body_mass`` / ``body_com`` /
+                ``body_inertia`` instead of UIPC's ``mass_density * mesh_volume``.
+                Each is forced into a single-instance geometry (ABD meta is
+                per-geometry) built via the explicit 12x12-mass-matrix
+                :meth:`AffineBodyConstitution.apply_to` overload.
             body_kappa: Optional per-body ABD stiffness values [Pa]. Values
                 less than or equal to zero use this builder's global default.
                 Bodies with different effective kappa values cannot share the
@@ -352,9 +349,8 @@ class RigidBodyBuilder:
         body_inertia_np = model.body_inertia.numpy() if model.body_inertia is not None else None
         no_inst = set(no_instance_bodies) if no_instance_bodies is not None else set()
         custom_inertia = set(custom_inertia_bodies) if custom_inertia_bodies else set()
-        # Custom-inertia bodies must each live in their own SimplicialComplex
-        # so ABD meta (per-geometry, not per-instance) reflects the unique
-        # (mass, COM, inertia) triplet of that body.
+        # Custom-inertia bodies each need their own SimplicialComplex: ABD meta
+        # is per-geometry, so instancing would share one (mass, COM, inertia).
         no_inst |= custom_inertia
 
         # --- Phase A: Collect per-body data ---------------------------------
@@ -421,8 +417,7 @@ class RigidBodyBuilder:
             if subscene_elem is not None:
                 subscene_elem.apply_to(sc)
 
-            # Branch: does this (single-body) group need a Newton-authored
-            # mass matrix, or the default density-driven ABD recomputation?
+            # Newton-authored mass matrix, or the default density-driven ABD?
             use_custom_inertia = (
                 n == 1
                 and ref.body_idx in custom_inertia
@@ -439,13 +434,11 @@ class RigidBodyBuilder:
                 mass = float(body_mass_np[ref.body_idx])
                 com = np.asarray(body_com_np[ref.body_idx], dtype=np.float64).reshape(3)
                 inertia_cm = np.asarray(body_inertia_np[ref.body_idx], dtype=np.float64).reshape(3, 3)
-                # UIPC expects a symmetric inertia tensor; symmetrise to guard
-                # against float-roundoff drift in Newton's stored matrix.
+                # UIPC needs a symmetric inertia tensor; guard against roundoff drift.
                 inertia_cm = 0.5 * (inertia_cm + inertia_cm.T)
                 mass_matrix = uipc_affine_body.from_rigid_body(mass, com, inertia_cm)
-                # ``volume`` feeds UIPC's energy scaling; the mesh-derived
-                # volume is the natural choice (matches the default density
-                # path when mass/com/inertia coincide).
+                # ``volume`` feeds UIPC's energy scaling; mesh volume matches the
+                # default density path when mass/com/inertia coincide.
                 AffineBodyConstitution().apply_to(
                     sc,
                     ref.kappa,

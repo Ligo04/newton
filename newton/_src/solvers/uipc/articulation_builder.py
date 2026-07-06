@@ -1247,15 +1247,12 @@ class ArticulationBuilder:
         """Create the reflected-inertia (armature) constraint for one articulation.
 
         Each revolute/prismatic joint with ``joint_armature > 0`` gets an
-        implicit kinetic potential ``0.5*(m_a/dt^2)*(q - q_hat)^2`` on its joint
-        coordinate via libuipc's :class:`ExternalArticulationConstraint`
-        (``mass`` = armature; ``delta_theta_tilde`` = previous-step
-        ``delta_theta`` = ``dt·q̇_prev``, the gravity-free inertial prediction).
-        The potential is exact and independent of the drive channel, so it
-        applies to all target modes (POSITION/EFFORT/NONE) and to revolute and
-        prismatic uniformly. ``mass`` is the absolute armature (kg for prismatic,
-        kg·m² for revolute); the backend applies the ``1/dt²`` itself. No
-        cross-joint coupling, so ``M^t`` is diagonal.
+        implicit kinetic potential ``0.5*(m_a/dt^2)*(q - q_hat)^2`` via libuipc's
+        :class:`ExternalArticulationConstraint`. ``mass`` is the absolute armature
+        (kg for prismatic, kg·m² for revolute; the backend applies ``1/dt²``);
+        ``delta_theta_tilde`` is the previous step's ``delta_theta`` (gravity-free
+        inertial prediction). Drive-channel independent, so it covers all target
+        modes; diagonal ``M^t`` (no cross-joint coupling).
 
         See ``docs/development/backend_cuda/joint_armature.md``.
         """
@@ -1301,9 +1298,8 @@ class ArticulationBuilder:
         obj: Object = self._scene.objects().create(f"external_articulation_{art_idx}")
         obj.geometries().create(articulation_geo)
 
-        # Inertial extrapolation: this step's predicted joint increment equals
-        # the previous step's actual increment (Δθ̃ = dt·q̇_prev = previous
-        # ``delta_theta``). Self-contained — reads/writes only the EAC geometry.
+        # Inertial extrapolation: predicted increment = previous step's actual
+        # increment (Δθ̃ = previous ``delta_theta``).
         def _armature_anim(info: Animation.UpdateInfo) -> None:
             try:
                 geo = info.geo_slots()[0].geometry()

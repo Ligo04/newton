@@ -759,23 +759,12 @@ class SolverUIPC(SolverBase):
         """Mark bodies whose UIPC ABD mass properties must follow Newton.
 
         By default :class:`~uipc.constitution.AffineBodyConstitution` recomputes
-        each body's mass, COM, and inertia from ``mass_density * mesh_volume``
-        and the mesh's spatial moments — ignoring any hand-authored values in
-        ``ModelBuilder`` (e.g. :attr:`Model.body_com`, :attr:`Model.body_inertia`
-        set from URDF ``<inertial>`` or direct assignment).
-
-        Calling this before :meth:`initialize` flags a set of body indices
-        whose geometry should instead be built through the explicit
-        ``apply_to(sc, kappa, mass_matrix, volume)`` overload, with the 12x12
-        ABD mass matrix produced by
-        :func:`uipc.geometry.affine_body.from_rigid_body` from Newton's
-        :attr:`Model.body_mass` / :attr:`Model.body_com` /
-        :attr:`Model.body_inertia`.
-
-        Because a single UIPC ``SimplicialComplex`` carries one shared set of
-        ABD meta attributes, each flagged body is removed from the per-shape
-        instance grouping in :meth:`RigidBodyBuilder.build_affine_bodies` and
-        placed into its own geometry.
+        mass, COM, and inertia from ``mass_density * mesh_volume``, ignoring the
+        hand-authored :attr:`Model.body_com` / :attr:`Model.body_inertia` (e.g.
+        from URDF ``<inertial>``). Flagging a body before :meth:`initialize`
+        instead builds its geometry from the Newton-authored 12x12 mass matrix
+        (:func:`uipc.geometry.affine_body.from_rigid_body`). Because ABD meta is
+        per-``SimplicialComplex``, each flagged body gets its own geometry.
 
         Must be called **before** :meth:`initialize`.
 
@@ -784,8 +773,7 @@ class SolverUIPC(SolverBase):
                 pushed into UIPC.  ``None`` = every body in the model.
 
         Returns:
-            The full list of body indices currently flagged (cumulative
-            across calls).
+            The full list of flagged body indices (cumulative across calls).
 
         Raises:
             RuntimeError: If the solver has already been initialized.
