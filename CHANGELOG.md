@@ -46,6 +46,7 @@
 
 ### Changed
 
+- Drive `SolverUIPC` mimic followers with the gain-agnostic `drive_strength_ratio` position drive even under `implicit_pd=True`, instead of mapping their `joint_target_ke` / `joint_target_kd`. A mimic follower is a kinematic slave geared off its leader (`q_follower = coef0 + coef1 * q_leader`) with no meaningful physical gains, so its tracking stiffness is now decoupled from the leader/arm actuator gains: the follower tracks tightly and stably regardless of the follower's authored `ke`/`kd`.
 - Move the MuJoCo guide from `/integrations/mujoco` to `/solvers/mujoco` and the Isaac Lab page from `/integrations/isaac-lab` to `/lab/isaac-lab`; use the new Solvers and Isaac Lab navigation entries.
 - Allow standalone world-root joints to remain outside articulation metadata during `ModelBuilder.finalize()`; use `SolverXPBD`, `SolverSemiImplicit`, or `SolverMuJoCo`'s standalone-root fallback, or add the joints to an articulation for solvers that require reduced-coordinate articulation metadata.
 - Change the default CoACD convex decomposition threshold from `0.5` to `0.05` to match CoACD's default; pass `remeshing_kwargs={"threshold": 0.5}` to preserve the previous coarse decomposition.

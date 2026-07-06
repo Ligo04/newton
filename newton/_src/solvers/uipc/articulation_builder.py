@@ -90,6 +90,11 @@ class ArticulationBuilder:
         self._limit_strength_ratio = limit_strength_ratio
         self._implicit_pd = implicit_pd
 
+        # Cache of mimic-follower global joint indices (lazily built from
+        # ``model.constraint_mimic_joint0``). Followers are kinematic slaves and
+        # always use the constant solver-knob drive strength, never implicit-PD.
+        self._mimic_follower_joints: set[int] | None = None
+
         # Per-articulation runtime objects (populated by build_joints)
         self.articulations: dict[int, Articulation] = {}
 
@@ -1192,14 +1197,32 @@ class ArticulationBuilder:
             mass_sum *= 2.0
         return mass_sum
 
+    def _mimic_follower_joint_set(self, model: Any) -> set[int]:
+        """Global joint indices of mimic followers (``constraint_mimic_joint0``).
+
+        A mimic follower is a kinematic slave geared off its leader
+        (``q_follower = coef0 + coef1*q_leader``) and carries no meaningful
+        physical ``joint_target_ke`` / ``joint_target_kd``. It must therefore
+        use the constant solver-knob drive strength
+        (:meth:`_extract_drive_strength`) regardless of the global
+        ``implicit_pd`` flag, so its tracking stiffness is decoupled from the
+        leader/arm actuator gains. Cached on first use.
+        """
+        if self._mimic_follower_joints is None:
+            followers = getattr(model, "constraint_mimic_joint0", None)
+            self._mimic_follower_joints = {int(x) for x in followers.numpy()} if followers is not None else set()
+        return self._mimic_follower_joints
+
     def _drive_params(self, j: int, jdata: dict, model: Any) -> tuple[float, float]:
         """Aim-drive parameters ``(strength_ratio, damping_blend)``.
 
         Dispatches to :meth:`_implicit_pd_params` under ``implicit_pd``;
-        otherwise the plain solver-knob drive strength. Armature is carried
-        separately by :meth:`_build_external_articulation`.
+        otherwise the plain solver-knob drive strength. Mimic followers always
+        take the plain solver-knob strength (never implicit-PD), so their
+        tracking stiffness stays decoupled from actuator ``ke``/``kd``. Armature
+        is carried separately by :meth:`_build_external_articulation`.
         """
-        if self._implicit_pd:
+        if self._implicit_pd and j not in self._mimic_follower_joint_set(model):
             return self._implicit_pd_params(j, jdata, model)
         return self._extract_drive_strength(j, model), 0.0
 
@@ -1336,7 +1359,10 @@ class ArticulationBuilder:
                     "parent_body": int(joint_parent[newton_idx]),
                     "child_body": int(joint_child[newton_idx]),
                 }
-                strength, damp_blend = self._implicit_pd_params(newton_idx, jdata, model)
+                # Route through _drive_params so mimic followers keep their
+                # constant solver-knob strength on a live gain refresh instead
+                # of being recomputed from ke/kd.
+                strength, damp_blend = self._drive_params(newton_idx, jdata, model)
                 geo = art.joint_geo_slots[newton_idx].geometry()
                 attr = geo.edges().find("driving/strength_ratio")
                 if attr is None:
