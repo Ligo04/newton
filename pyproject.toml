@@ -217,7 +217,7 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "asv/benchmarks/**/*" = ["RUF012", "E402"]
 "newton/examples/**/*" = ["E402", "TID253"]
-"newton/_src/solvers/uipc/solver_uipc.py" = ["PLC0415"]
+"newton/_src/solvers/uipc/solver_uipc.py" = ["PLC0415", "PLW0603"]
 # TID253 (banned module-level imports) only applies to newton/_src and newton/tests
 "docs/**/*" = ["TID253"]
 "asv/**/*" = ["TID253"]

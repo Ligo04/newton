@@ -9,61 +9,67 @@ import os
 import warnings
 import weakref
 from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
-import uipc
-import uipc.adapter.warp
 import warp as wp
-from uipc import Logger as ULogger
-from uipc.core import (
-    AffineBodyStateAccessorFeature,
-    ContactElement,
-    ContactSystemFeature,
-    ContactTabular,
-    FiniteElementStateAccessorFeature,
-    SanityCheckResult,
-    SceneIO,
-    SubsceneElement,
-)
-from uipc.core import Scene as UScene
-from uipc.stats import SimulationStats as USimulationStats
-from uipc.unit import GPa
 
 import newton
 from newton import BodyFlags, Contacts, Control, JointType, Model, ModelBuilder, State, StateFlags
 
 from ..flags import SolverNotifyFlags
 from ..solver import SolverBase
-from .utils import _view_attr
 
 try:
     from typing import override
 except ImportError:  # Python < 3.12
     from typing_extensions import override
-from .articulation_builder import ArticulationBuilder
-from .cloth import ClothBuilder
-from .contact_forces import (
-    ContactForceReadback,
-    _populate_contact_pairs_kernel,
-    _scatter_contact_forces_kernel,
-    build_gpu_vertex_maps,
-    prepare_contact_gpu_data,
-    retrieve_contact_forces,
-)
-from .converter import (
-    UIpcMappingInfo,
-    _read_fem_particle_positions_from_backend_kernel,
-    _read_fem_particles_from_backend_kernel,
-    _read_from_backend_kernel,
-    _spatial_to_vel_mat44_kernel,
-    _transform_to_mat44_kernel,
-    _write_fem_particle_positions_to_backend_kernel,
-    _write_fem_particles_to_backend_kernel,
-    populate_backend_offsets,
-)
-from .deformable_body import DeformableBodyBuilder
-from .rigid_body import RigidBodyBuilder
+
+if TYPE_CHECKING:
+    # The ``uipc`` (libuipc) backend and the sibling UIPC modules hard-import
+    # ``uipc`` at module load. They are resolved lazily at solver construction
+    # by :meth:`SolverUIPC.import_uipc` so ``import newton`` works without
+    # libuipc installed; these bindings exist only for static type analysis.
+    import uipc
+    from uipc import Logger as ULogger
+    from uipc.core import (
+        AffineBodyStateAccessorFeature,
+        ContactElement,
+        ContactSystemFeature,
+        ContactTabular,
+        FiniteElementStateAccessorFeature,
+        SanityCheckResult,
+        SceneIO,
+        SubsceneElement,
+    )
+    from uipc.core import Scene as UScene
+    from uipc.stats import SimulationStats as USimulationStats
+    from uipc.unit import GPa
+
+    from .articulation_builder import ArticulationBuilder
+    from .cloth import ClothBuilder
+    from .contact_forces import (
+        ContactForceReadback,
+        _populate_contact_pairs_kernel,
+        _scatter_contact_forces_kernel,
+        build_gpu_vertex_maps,
+        prepare_contact_gpu_data,
+        retrieve_contact_forces,
+    )
+    from .converter import (
+        UIpcMappingInfo,
+        _read_fem_particle_positions_from_backend_kernel,
+        _read_fem_particles_from_backend_kernel,
+        _read_from_backend_kernel,
+        _spatial_to_vel_mat44_kernel,
+        _transform_to_mat44_kernel,
+        _write_fem_particle_positions_to_backend_kernel,
+        _write_fem_particles_to_backend_kernel,
+        populate_backend_offsets,
+    )
+    from .deformable_body import DeformableBodyBuilder
+    from .rigid_body import RigidBodyBuilder
+    from .utils import _view_attr
 
 # ---------------------------------------------------------------------------
 # UIPC ABD meta-attribute names (see libuipc AffineBodyConstitution).
@@ -149,7 +155,8 @@ class SolverUIPC(SolverBase):
           link). Armature on other joint types is ignored with a warning.
     """
 
-    _uipc = None
+    _backend_imported: bool = False
+    """Whether :meth:`import_uipc` has already loaded the libuipc backend."""
 
     CONTACTS_PER_ENV: int = 1024
     """Per-environment contact budget for :meth:`get_max_contact_count`.
@@ -171,6 +178,7 @@ class SolverUIPC(SolverBase):
         ``uipc:deformable_model`` select constitutions per authored cloth or
         deformable range.
         """
+        cls.import_uipc()
         builder.add_custom_attribute(
             ModelBuilder.CustomAttribute(
                 name="abd_kappa",
@@ -206,19 +214,76 @@ class SolverUIPC(SolverBase):
         builder._sync_uipc_range_custom_frequencies()
 
     @classmethod
-    def import_uipc(cls):
-        """Import the UIPC dependencies and cache them as a class variable."""
-        if cls._uipc is None:
-            try:
-                import uipc
+    def import_uipc(cls) -> None:
+        """Import the ``uipc`` (libuipc) backend and Newton's UIPC wrapper modules.
 
-                cls._uipc = uipc
-            except ImportError as e:
-                raise ImportError(
-                    "UIPC backend not installed. Please install libuipc: "
-                    "see https://github.com/spiriMirror/libuipc for instructions."
-                ) from e
-        return cls._uipc
+        The heavy backend is loaded on first solver use rather than at module
+        import, so ``import newton`` succeeds when libuipc is absent (or its
+        version marker is unsatisfied, e.g. on Python 3.14). Resolved symbols
+        are published as globals of this module so the rest of it can reference
+        them directly. Called from every entry point reachable without a
+        constructed solver (:meth:`__init__` and
+        :meth:`register_custom_attributes`). Mirrors the lazy-import contract of
+        :meth:`~newton.solvers.SolverMuJoCo.import_mujoco`.
+        """
+        if cls._backend_imported:
+            return
+        global uipc, ULogger, UScene, USimulationStats, GPa
+        global AffineBodyStateAccessorFeature, ContactSystemFeature
+        global FiniteElementStateAccessorFeature, SanityCheckResult, SceneIO
+        global ArticulationBuilder, ClothBuilder, DeformableBodyBuilder, RigidBodyBuilder
+        global ContactForceReadback, UIpcMappingInfo, _view_attr
+        global _populate_contact_pairs_kernel, _scatter_contact_forces_kernel
+        global build_gpu_vertex_maps, prepare_contact_gpu_data, retrieve_contact_forces
+        global _read_fem_particle_positions_from_backend_kernel, _read_fem_particles_from_backend_kernel
+        global _read_from_backend_kernel, _spatial_to_vel_mat44_kernel, _transform_to_mat44_kernel
+        global _write_fem_particle_positions_to_backend_kernel, _write_fem_particles_to_backend_kernel
+        global populate_backend_offsets
+        try:
+            import uipc
+            import uipc.adapter.warp  # imported for its warp-adapter registration side effect
+            from uipc import Logger as ULogger
+            from uipc.core import (
+                AffineBodyStateAccessorFeature,
+                ContactSystemFeature,
+                FiniteElementStateAccessorFeature,
+                SanityCheckResult,
+                SceneIO,
+            )
+            from uipc.core import Scene as UScene
+            from uipc.stats import SimulationStats as USimulationStats
+            from uipc.unit import GPa
+
+            from .articulation_builder import ArticulationBuilder
+            from .cloth import ClothBuilder
+            from .contact_forces import (
+                ContactForceReadback,
+                _populate_contact_pairs_kernel,
+                _scatter_contact_forces_kernel,
+                build_gpu_vertex_maps,
+                prepare_contact_gpu_data,
+                retrieve_contact_forces,
+            )
+            from .converter import (
+                UIpcMappingInfo,
+                _read_fem_particle_positions_from_backend_kernel,
+                _read_fem_particles_from_backend_kernel,
+                _read_from_backend_kernel,
+                _spatial_to_vel_mat44_kernel,
+                _transform_to_mat44_kernel,
+                _write_fem_particle_positions_to_backend_kernel,
+                _write_fem_particles_to_backend_kernel,
+                populate_backend_offsets,
+            )
+            from .deformable_body import DeformableBodyBuilder
+            from .rigid_body import RigidBodyBuilder
+            from .utils import _view_attr
+        except ImportError as e:
+            raise ImportError(
+                "UIPC backend not installed. Please install libuipc (the ``uipc`` "
+                "package): see https://github.com/spiriMirror/libuipc for instructions."
+            ) from e
+        cls._backend_imported = True
 
     @staticmethod
     def _body_kappa_from_model(model: Model) -> np.ndarray | None:
@@ -253,9 +318,9 @@ class SolverUIPC(SolverBase):
         workspace: str = "/tmp/newton_uipc",
         dt: float = 1.0 / 60.0,
         scene_config: dict[str, Any] | None = None,  # pyright: ignore[reportRedeclaration]
-        kappa: float = 1 * GPa,
+        kappa: float | None = None,
         default_mass_density: float = 1000.0,
-        logger_level=ULogger.Warn,
+        logger_level=None,
         dump_enable: bool = False,
         require_profile: bool = False,
         auto_sync_inertia: bool = True,
@@ -280,12 +345,12 @@ class SolverUIPC(SolverBase):
             scene_config: Optional UIPC scene configuration dict passed directly
                 to ``uipc.Scene()``. If ``None``, uses ``Scene.default_config()``
                 with ``dt`` and ``gravity`` overridden from the Newton model.
-            kappa: AffineBody stiffness parameter [Pa].
+            kappa: AffineBody stiffness parameter [Pa]. Defaults to ``1 GPa``.
             default_mass_density: Default mass density [kg/m^3] for bodies.
             logger_level: UIPC logger verbosity. Use ``uipc.Logger.Critical``,
                 ``uipc.Logger.Error``, ``uipc.Logger.Warn``, ``uipc.Logger.Info``,
                 ``uipc.Logger.Debug``, or ``uipc.Logger.Trace``.
-                Defaults to ``uipc.Logger.Critical`` to suppress UIPC console spam.
+                Defaults to ``uipc.Logger.Warn``.
             require_profile: Enable UIPC timer collection for performance
                 reports. When ``True``, each :meth:`step` records timer data
                 that can later be exported via :meth:`save_performance_report`.
@@ -352,6 +417,13 @@ class SolverUIPC(SolverBase):
         super().__init__(model=model)
         self.import_uipc()
 
+        # Resolve backend-dependent defaults now that libuipc is imported
+        # (they cannot be evaluated as argument defaults without hard-importing
+        # ``uipc`` at module load).
+        if kappa is None:
+            kappa = 1.0 * GPa
+        if logger_level is None:
+            logger_level = ULogger.Warn
         ULogger.set_level(logger_level)
 
         self._dt = dt
