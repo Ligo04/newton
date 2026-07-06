@@ -1601,7 +1601,25 @@ class ArticulationBuilder:
                 )
             )
 
-    # __APPLY_MIMIC_PLACEHOLDER__
+        # Topologically order chained mimics: a follower whose leader is itself
+        # another mimic's follower must be applied after that parent, so
+        # :meth:`apply_mimic_targets` reads the leader's freshly re-derived
+        # target instead of its stale value. Followers are unique, so keying by
+        # follower is unambiguous.
+        follower_to_idx = {(c[0], c[1]): i for i, c in enumerate(self._mimic_constraints)}
+
+        def _chain_depth(idx: int, seen: set[int] | None = None) -> int:
+            seen = seen if seen is not None else set()
+            if idx in seen:  # defensive: cyclic mimic, treat as root
+                return 0
+            seen.add(idx)
+            parent = follower_to_idx.get((self._mimic_constraints[idx][2], self._mimic_constraints[idx][3]))
+            return 0 if parent is None else 1 + _chain_depth(parent, seen)
+
+        depths = [_chain_depth(i) for i in range(len(self._mimic_constraints))]
+        self._mimic_constraints = [
+            c for _, c in sorted(enumerate(self._mimic_constraints), key=lambda ic: depths[ic[0]])
+        ]
 
     def apply_mimic_targets(self) -> None:
         """Drive follower joints from their leaders for this step.
@@ -1621,8 +1639,10 @@ class ArticulationBuilder:
         The coupling is soft: the follower tracks its target through the
         UIPC driving-joint stiffness and may lag under load, like any
         position-driven UIPC joint. Chained mimics (a follower that is
-        also a leader) are resolved in list order; deep chains are not
-        guaranteed to fully converge within one step.
+        also a leader) are resolved in dependency order (see
+        :meth:`setup_mimic_constraints`), so each follower reads its
+        leader's freshly updated target this step; the coupling remains
+        soft, so deep chains still track with per-level position lag.
         """
         for follower_art, follower_local, leader_art, leader_local, coef0, coef1 in self._mimic_constraints:
             if follower_art.target_position is None or follower_art.is_constrained is None:
