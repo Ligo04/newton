@@ -341,12 +341,11 @@ class Articulation:
         self._is_force_constrained_dev: wp.array | None = None
 
         # -- Aim blending (populated by ArticulationBuilder) --
-        # local index → (w_damp, w_arm) blend weights over the summed drive
+        # local index → damping blend weight over the summed drive
         # stiffness. The anim callbacks blend the aim toward
-        # theta_prev + dt*dq_ref (implicit-PD damping spring) and
-        # theta_prev + dt*qd_prev (prismatic armature kinetic spring) by
-        # these weights — equal-variable quadratics add. Empty = off.
-        self.aim_blend_weights: dict[int, tuple[float, float]] = {}
+        # theta_prev + dt*dq_ref (implicit-PD damping spring) by this
+        # weight. Empty = off.
+        self.aim_blend_weights: dict[int, float] = {}
 
         # -- FREE joint readback (populated by register_free_joint) -----
         # Tracked separately from active joints; recovered from body state.
@@ -595,41 +594,28 @@ class Articulation:
             _view_attr(geo.edges().find("aim_distance"))[edge_idx] = aim_distance
 
     def _blend_aim(self, local: int, aim: float) -> float:
-        """Blend the aim target with the damping and armature springs.
+        """Blend the aim target with the damping spring.
 
         The damping term of an implicit PD, ``0.5*kd_ratio*(q - q_prev -
-        dt*dq_ref)^2``, is an aim spring toward ``q_prev + dt*dq_ref``;
-        a prismatic joint's armature kinetic term ``0.5*(m_a/dt^2)*(q -
-        q_prev - dt*qd_prev)^2`` is one toward ``q_prev + dt*qd_prev``
-        (the inertial free-flight prediction — no gravity: rotor weight
-        does not couple through the transmission). Merged with the
-        position spring (stiffnesses add, targets average by weight) they
-        stay a single libuipc drive channel:
+        dt*dq_ref)^2``, is an aim spring toward ``q_prev + dt*dq_ref``.
+        Merged with the position spring (stiffnesses add, targets average
+        by weight) it stays a single libuipc drive channel:
 
-            aim = (1-w_d-w_a)*q_ref + w_d*(q_prev + dt*dq_ref)
-                                    + w_a*(q_prev + dt*qd_prev)
+            aim = (1-w_d)*q_ref + w_d*(q_prev + dt*dq_ref)
 
-        ``q_prev``/``qd_prev`` are the pre-advance snapshot from
-        :meth:`read_pre_advance` / :meth:`read_post_retrieve`, so the
-        blended aim is constant across the animator's line-search /
-        Newton re-invocations within one ``world.advance()``.
+        ``q_prev`` is the pre-advance snapshot from :meth:`read_pre_advance`
+        / :meth:`read_post_retrieve`, so the blended aim is constant across
+        the animator's line-search / Newton re-invocations within one
+        ``world.advance()``.
         """
-        weights = self.aim_blend_weights.get(local)
-        if weights is None:
+        w_d = self.aim_blend_weights.get(local)
+        if w_d is None:
             return aim
-        w_d, w_a = weights
         assert self.joint_position is not None
-        assert self.joint_velocity is not None
         assert self.target_velocity is not None
         q_prev = float(self.joint_position.numpy()[local])
-        blended = (1.0 - w_d - w_a) * aim
-        if w_d > 0.0:
-            dq_ref = float(self.target_velocity.numpy()[local])
-            blended += w_d * (q_prev + self._dt * dq_ref)
-        if w_a > 0.0:
-            qd_prev = float(self.joint_velocity.numpy()[local])
-            blended += w_a * (q_prev + self._dt * qd_prev)
-        return blended
+        dq_ref = float(self.target_velocity.numpy()[local])
+        return (1.0 - w_d) * aim + w_d * (q_prev + self._dt * dq_ref)
 
     # ------------------------------------------------------------------
     # Per-step control caching & state readback

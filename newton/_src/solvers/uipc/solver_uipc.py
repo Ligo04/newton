@@ -149,10 +149,9 @@ class SolverUIPC(SolverBase):
           (StableNeoHookean by default).
         - Joint types: REVOLUTE, PRISMATIC, FIXED, FREE.
         - BALL, DISTANCE, D6, and CABLE joints are not supported.
-        - :attr:`~newton.Model.joint_armature` on REVOLUTE joints is folded
-          into the child link's AffineBody inertia about the joint axis (the
-          extra inertia therefore also resists non-joint rotations of that
-          link). Armature on other joint types is ignored with a warning.
+        - :attr:`~newton.Model.joint_armature` (revolute or prismatic) is
+          applied as an independent implicit reflected-inertia potential via
+          ``ExternalArticulationConstraint``, active for all target modes.
     """
 
     _backend_imported: bool = False
@@ -921,13 +920,6 @@ class SolverUIPC(SolverBase):
         inv_mass_np = model.body_inv_mass.numpy().copy() if model.body_inv_mass is not None else None
         inv_inertia_np = model.body_inv_inertia.numpy().copy() if model.body_inv_inertia is not None else None
 
-        # Subtract back the armature inertia folded in at build time, so host
-        # utilities that add armature themselves (eval_mass_matrix) don't
-        # double-count. Replay the build-time record, not a recompute: a body
-        # the build side skipped (degenerate mesh) is absent here, so it is not
-        # over-subtracted into negative inertia → NaN.
-        armature_folded = self.mapping.body_armature_folded
-
         written: list[int] = []
         for b in body_indices:
             props = self.read_uipc_body_inertia(b)
@@ -938,9 +930,6 @@ class SolverUIPC(SolverBase):
                 continue  # proxy or otherwise missing ABD metadata
             if m <= 0.0:
                 continue
-            extra = armature_folded.get(b)
-            if extra is not None:
-                i_cm = i_cm - extra
 
             body_mass_np[b] = np.float32(m)
             body_com_np[b] = np.asarray(c, dtype=np.float32)

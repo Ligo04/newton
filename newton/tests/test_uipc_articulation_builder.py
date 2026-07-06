@@ -219,29 +219,27 @@ class TestUIPCArticulationBuilder(unittest.TestCase):
         builder = self._make_builder(dt=0.1, implicit_pd=True)
         model = self._make_single_dof_model(limit_ke=1.0, target_ke=720.0, target_kd=80.0, body_mass=[3.0, 5.0])
 
-        strength, damp_blend, arm_blend = builder._implicit_pd_params(0, {"parent_body": 0, "child_body": 1}, model)
+        strength, damp_blend = builder._implicit_pd_params(0, {"parent_body": 0, "child_body": 1}, model)
 
         # ratio_p = ke*dt^2/mass = 720*0.01/8 = 0.9; ratio_d = kd*dt/mass = 80*0.1/8 = 1.0
         self.assertAlmostEqual(strength, 1.9)
         self.assertAlmostEqual(damp_blend, 1.0 / 1.9)
-        self.assertEqual(arm_blend, 0.0)
 
     def test_implicit_pd_params_world_parent_uses_unit_proxy_mass(self):
         builder = self._make_builder(dt=0.1, implicit_pd=True)
         model = self._make_single_dof_model(limit_ke=1.0, target_ke=720.0, body_mass=[5.0])
 
-        strength, damp_blend, arm_blend = builder._implicit_pd_params(0, {"parent_body": -1, "child_body": 0}, model)
+        strength, damp_blend = builder._implicit_pd_params(0, {"parent_body": -1, "child_body": 0}, model)
 
         # world anchor proxy has unit mass: ratio_p = 720*0.01/(1+5) = 1.2, no damping
         self.assertAlmostEqual(strength, 1.2)
         self.assertEqual(damp_blend, 0.0)
-        self.assertEqual(arm_blend, 0.0)
 
     def test_implicit_pd_params_zero_gains_disable_drive(self):
         builder = self._make_builder(implicit_pd=True)
         model = self._make_single_dof_model(limit_ke=1.0, target_ke=0.0, target_kd=0.0, body_mass=[3.0, 5.0])
 
-        self.assertEqual(builder._implicit_pd_params(0, {"parent_body": 0, "child_body": 1}, model), (0.0, 0.0, 0.0))
+        self.assertEqual(builder._implicit_pd_params(0, {"parent_body": 0, "child_body": 1}, model), (0.0, 0.0))
 
     def test_implicit_pd_params_non_position_mode_disables_drive(self):
         builder = self._make_builder(implicit_pd=True)
@@ -249,7 +247,7 @@ class TestUIPCArticulationBuilder(unittest.TestCase):
             limit_ke=1.0, target_ke=720.0, target_kd=80.0, body_mass=[3.0, 5.0], target_mode=int(JointTargetMode.EFFORT)
         )
 
-        self.assertEqual(builder._implicit_pd_params(0, {"parent_body": 0, "child_body": 1}, model), (0.0, 0.0, 0.0))
+        self.assertEqual(builder._implicit_pd_params(0, {"parent_body": 0, "child_body": 1}, model), (0.0, 0.0))
 
     def test_implicit_pd_params_velocity_mode_is_pure_damping_servo(self):
         builder = self._make_builder(dt=0.1, implicit_pd=True)
@@ -261,12 +259,11 @@ class TestUIPCArticulationBuilder(unittest.TestCase):
             target_mode=int(JointTargetMode.VELOCITY),
         )
 
-        strength, damp_blend, arm_blend = builder._implicit_pd_params(0, {"parent_body": 0, "child_body": 1}, model)
+        strength, damp_blend = builder._implicit_pd_params(0, {"parent_body": 0, "child_body": 1}, model)
 
         # ratio_d = kd*dt/mass = 80*0.1/8 = 1.0; ke does not contribute
         self.assertAlmostEqual(strength, 1.0)
         self.assertEqual(damp_blend, 1.0)
-        self.assertEqual(arm_blend, 0.0)
 
     def test_implicit_pd_params_velocity_mode_without_kd_disables_drive(self):
         builder = self._make_builder(implicit_pd=True)
@@ -274,90 +271,7 @@ class TestUIPCArticulationBuilder(unittest.TestCase):
             limit_ke=1.0, target_ke=720.0, body_mass=[3.0, 5.0], target_mode=int(JointTargetMode.VELOCITY)
         )
 
-        self.assertEqual(builder._implicit_pd_params(0, {"parent_body": 0, "child_body": 1}, model), (0.0, 0.0, 0.0))
-
-    def test_implicit_pd_params_prismatic_armature_adds_kinetic_spring(self):
-        builder = self._make_builder(dt=0.1, implicit_pd=True)
-        model = self._make_single_dof_model(
-            limit_ke=1.0,
-            target_ke=720.0,
-            target_kd=80.0,
-            body_mass=[3.0, 5.0],
-            joint_type=int(JointType.PRISMATIC),
-            armature=2.0,
-        )
-
-        strength, damp_blend, arm_blend = builder._implicit_pd_params(0, {"parent_body": 0, "child_body": 1}, model)
-
-        # PRISMATIC doubles mass_sum to 16 (libuipc's two-anchor-term drive
-        # energy): ratio_p = 720*0.01/16 = 0.45, ratio_d = 80*0.1/16 = 0.5,
-        # ratio_a = armature/16 = 0.125 (dt cancels)
-        self.assertAlmostEqual(strength, 1.075)
-        self.assertAlmostEqual(damp_blend, 0.5 / 1.075)
-        self.assertAlmostEqual(arm_blend, 0.125 / 1.075)
-
-    def test_implicit_pd_params_prismatic_armature_alone_still_drives(self):
-        builder = self._make_builder(dt=0.1, implicit_pd=True)
-        model = self._make_single_dof_model(
-            limit_ke=1.0, body_mass=[3.0, 5.0], joint_type=int(JointType.PRISMATIC), armature=2.0
-        )
-
-        strength, damp_blend, arm_blend = builder._implicit_pd_params(0, {"parent_body": 0, "child_body": 1}, model)
-
-        # zero gains: the drive channel carries the pure kinetic spring.
-        # PRISMATIC doubles mass_sum to 16: ratio_a = armature/16 = 0.125.
-        self.assertAlmostEqual(strength, 0.125)
-        self.assertEqual(damp_blend, 0.0)
-        self.assertEqual(arm_blend, 1.0)
-
-    def test_implicit_pd_params_revolute_armature_not_absorbed(self):
-        # revolute armature folds into the child body inertia, not the drive
-        builder = self._make_builder(dt=0.1, implicit_pd=True)
-        model = self._make_single_dof_model(limit_ke=1.0, target_ke=720.0, body_mass=[3.0, 5.0], armature=2.0)
-
-        strength, _damp_blend, arm_blend = builder._implicit_pd_params(0, {"parent_body": 0, "child_body": 1}, model)
-
-        self.assertAlmostEqual(strength, 0.9)
-        self.assertEqual(arm_blend, 0.0)
-
-    def test_implicit_pd_params_effort_prismatic_armature_not_absorbed(self):
-        builder = self._make_builder(implicit_pd=True)
-        model = self._make_single_dof_model(
-            limit_ke=1.0,
-            body_mass=[3.0, 5.0],
-            joint_type=int(JointType.PRISMATIC),
-            armature=2.0,
-            target_mode=int(JointTargetMode.EFFORT),
-        )
-
-        self.assertEqual(builder._implicit_pd_params(0, {"parent_body": 0, "child_body": 1}, model), (0.0, 0.0, 0.0))
-
-    def test_drive_params_plain_mode_folds_prismatic_armature(self):
-        builder = self._make_builder(drive_strength_ratio=250.0)
-        model = self._make_single_dof_model(
-            limit_ke=1.0, body_mass=[3.0, 5.0], joint_type=int(JointType.PRISMATIC), armature=2.0
-        )
-
-        strength, damp_blend, arm_blend = builder._drive_params(0, {"parent_body": 0, "child_body": 1}, model)
-
-        # plain drive knob + physical armature ratio; PRISMATIC doubles
-        # mass_sum to 16: ratio_a = armature/16 = 0.125.
-        self.assertAlmostEqual(strength, 250.125)
-        self.assertEqual(damp_blend, 0.0)
-        self.assertAlmostEqual(arm_blend, 0.125 / 250.125)
-
-    def test_drive_params_plain_mode_velocity_prismatic_armature_dropped(self):
-        # VELOCITY joints only drive under implicit_pd — plain mode cannot absorb
-        builder = self._make_builder(drive_strength_ratio=250.0)
-        model = self._make_single_dof_model(
-            limit_ke=1.0,
-            body_mass=[3.0, 5.0],
-            joint_type=int(JointType.PRISMATIC),
-            armature=2.0,
-            target_mode=int(JointTargetMode.VELOCITY),
-        )
-
-        self.assertEqual(builder._drive_params(0, {"parent_body": 0, "child_body": 1}, model), (0.0, 0.0, 0.0))
+        self.assertEqual(builder._implicit_pd_params(0, {"parent_body": 0, "child_body": 1}, model), (0.0, 0.0))
 
     @staticmethod
     def _make_builder(
@@ -375,7 +289,6 @@ class TestUIPCArticulationBuilder(unittest.TestCase):
         builder._drive_strength_ratio = drive_strength_ratio
         builder._limit_strength_ratio = limit_strength_ratio
         builder._implicit_pd = implicit_pd
-        builder._drive_armature_cache = None
         return builder
 
     @staticmethod
@@ -503,19 +416,6 @@ class TestUIPCRevoluteArmatureInertia(unittest.TestCase):
         )
         solver.initialize(model.state())
         return model, solver, child
-
-    def test_revolute_armature_adds_axis_outer_product_to_child_inertia(self):
-        """With armature set, UIPC's ABD inertia must equal the Newton-authored
-        child inertia plus ``armature * axis ⊗ axis``."""
-        armature = 0.4
-        model, solver, child = self._build_and_initialize(armature)
-
-        axis = np.array(newton.Axis.Z.to_vector(), dtype=np.float64)
-        model_inertia = model.body_inertia.numpy()[child].astype(np.float64)
-        expected = model_inertia + armature * np.outer(axis, axis)
-
-        inertia = solver.read_uipc_body_inertia(child)["inertia"]
-        np.testing.assert_allclose(inertia, expected, rtol=1e-4, atol=1e-6)
 
     def test_revolute_without_armature_leaves_child_inertia_unchanged(self):
         """With no armature, the child body must take the default
@@ -795,11 +695,13 @@ class TestUIPCImplicitPD(unittest.TestCase):
 
 @unittest.skipUnless(_HAS_UIPC, "uipc is not installed")
 class TestUIPCPrismaticArmature(unittest.TestCase):
-    """A PRISMATIC joint's ``joint_armature`` has no ABD inertia equivalent
-    (the translational mass block is isotropic), so it must be absorbed by
-    the implicit-PD aim drive instead (see ``_prismatic_drive_armature`` in
-    ``rigid_body.py``): a third kinetic spring toward the free-flight
-    prediction ``q_prev + dt*qd_prev``, which does not couple to gravity.
+    """A PRISMATIC joint's ``joint_armature`` (reflected slider inertia) is
+    applied as an implicit kinetic potential on the joint coordinate via
+    libuipc's ``ExternalArticulationConstraint`` (see
+    ``ArticulationBuilder._build_external_articulation``): mass = armature,
+    aim = ``q_prev + dt*qd_prev`` (the gravity-free inertial prediction). It
+    is exact and independent of the drive channel, so it applies to driven
+    and passive (NONE/EFFORT) joints alike.
     """
 
     @staticmethod
@@ -859,6 +761,194 @@ class TestUIPCPrismaticArmature(unittest.TestCase):
         with_armature, _ = self._run_slider(kp=200.0, kd=0.0, armature=20.0, frames=6)
 
         self.assertLess(abs(float(with_armature[3])), 0.8 * abs(float(no_armature[3])))
+
+    @staticmethod
+    def _run_passive_slider(armature: float | None, frames: int = 40):
+        """Free slider under gravity with no drive (``target_mode`` NONE).
+
+        This is the case the old aim-drive fold could not carry armature for
+        (it only folded into the drive channel of POSITION/PD joints); the
+        ExternalArticulationConstraint applies regardless of drive mode.
+        """
+        builder = newton.ModelBuilder(up_axis=newton.Axis.Z, gravity=-9.81)
+        link = builder.add_link()
+        builder.add_shape_box(link, hx=0.05, hy=0.05, hz=0.05)
+        j = builder.add_joint_prismatic(parent=-1, child=link, axis=newton.Axis.Z, armature=armature)
+        dof = builder.joint_qd_start[j]
+        builder.joint_target_mode[dof] = int(newton.JointTargetMode.NONE)
+        model = builder.finalize()
+
+        dt = 1.0 / 60.0
+        solver = newton.solvers.SolverUIPC(
+            model,
+            workspace="/tmp/newton_uipc_passive_armature_test",
+            dt=dt,
+            logger_level=uipc.Logger.Error,
+        )
+        solver.sync_uipc_inertia_with_model()
+        solver.initialize()
+
+        state_0, state_1 = model.state(), model.state()
+        control = model.control()
+
+        traj = []
+        for _ in range(frames):
+            state_0.clear_forces()
+            solver.step(state_0, state_1, control, None, dt)
+            state_0, state_1 = state_1, state_0
+            traj.append(float(state_0.joint_q.numpy()[0]))
+        return np.asarray(traj), float(model.body_mass.numpy()[link])
+
+    def test_passive_armature_reduces_gravity_acceleration(self):
+        """A passive (NONE-mode) prismatic joint receives armature through the
+        ExternalArticulationConstraint — impossible with the old aim-drive
+        fold. The added effective mass must slow free fall to
+        ``a = g·m/(m + m_a)``."""
+        g = 9.81
+        dt = 1.0 / 60.0
+
+        def accel(traj):
+            # constant acceleration: q(t) = q0 + v0*t - ½ a*t²; the t² coeff is
+            # -½ a. Full quadratic fit absorbs the first steps' solver transient.
+            t = np.arange(len(traj)) * dt
+            return -2.0 * float(np.polyfit(t, traj, 2)[0])
+
+        no_arm, m_body = self._run_passive_slider(armature=None)
+        m_a = 2.0 * m_body  # armature = 2x body mass -> a ~= g/3
+        with_arm, _ = self._run_passive_slider(armature=m_a)
+
+        self.assertAlmostEqual(accel(no_arm), g, delta=0.02 * g)
+        expected = g * m_body / (m_body + m_a)
+        self.assertAlmostEqual(accel(with_arm), expected, delta=0.05 * expected)
+
+
+@unittest.skipUnless(_HAS_UIPC, "uipc is not installed")
+class TestUIPCRevoluteArmature(unittest.TestCase):
+    """A REVOLUTE joint's ``joint_armature`` (reflected rotational inertia
+    about the joint axis) is applied as an implicit kinetic potential on the
+    joint coordinate via libuipc's ``ExternalArticulationConstraint`` (see
+    ``ArticulationBuilder._build_external_articulation``) -- exactly like the
+    PRISMATIC case in :class:`TestUIPCPrismaticArmature`, just with a
+    rotational rather than a translational coordinate. This mirrors that
+    class's passive (NONE-mode) test with a horizontal single pendulum:
+    released from rest under gravity, its initial angular acceleration must
+    drop from ``alpha0 = m*g*L/I_axis`` to ``alpha = m*g*L/(I_axis + a)``.
+    """
+
+    @staticmethod
+    def _run_passive_pendulum(armature: float | None, frames: int = 8, arm_length: float = 0.5):
+        """A world-anchored revolute joint about the world X axis with a
+        cubic child link whose COM is offset by ``arm_length`` along Y
+        (perpendicular to the axis): released from rest (horizontal), it
+        swings like a single pendulum under gravity (-Z) with no drive
+        (``target_mode`` NONE), so any armature must reach it purely through
+        the ExternalArticulationConstraint -- the case the old aim-drive fold
+        could not carry (see ``TestUIPCPrismaticArmature._run_passive_slider``).
+
+        ``frames`` is kept small so the swing stays within a few degrees of
+        horizontal: the pendulum's true torque is ``-m*g*L*cos(theta)``, only
+        constant to good approximation near ``theta=0``, which is what lets
+        the same full-trajectory quadratic fit used by the prismatic
+        free-fall test recover the initial angular acceleration here.
+        """
+        hx = 0.05
+        builder = newton.ModelBuilder(up_axis=newton.Axis.Z, gravity=-9.81)
+        link = builder.add_link()
+        builder.add_shape_box(link, hx=hx, hy=hx, hz=hx, xform=wp.transform(wp.vec3(0.0, arm_length, 0.0)))
+        j = builder.add_joint_revolute(parent=-1, child=link, axis=newton.Axis.X, armature=armature)
+        dof = builder.joint_qd_start[j]
+        builder.joint_target_mode[dof] = int(newton.JointTargetMode.NONE)
+        model = builder.finalize()
+
+        dt = 1.0 / 60.0
+        solver = newton.solvers.SolverUIPC(
+            model,
+            workspace="/tmp/newton_uipc_revolute_passive_armature_test",
+            dt=dt,
+            logger_level=uipc.Logger.Error,
+        )
+        solver.sync_uipc_inertia_with_model()
+        solver.initialize()
+
+        state_0, state_1 = model.state(), model.state()
+        control = model.control()
+
+        traj = []
+        for _ in range(frames):
+            state_0.clear_forces()
+            solver.step(state_0, state_1, control, None, dt)
+            state_0, state_1 = state_1, state_0
+            traj.append(float(state_0.joint_q.numpy()[0]))
+
+        body_mass = float(model.body_mass.numpy()[link])
+        body_inertia = model.body_inertia.numpy()[link].astype(np.float64)
+        return np.asarray(traj), body_mass, body_inertia
+
+    def test_passive_armature_reduces_angular_acceleration(self):
+        """A passive (NONE-mode) revolute joint receives armature through the
+        ExternalArticulationConstraint -- impossible with the old aim-drive
+        fold. The added effective rotational inertia must slow the pendulum's
+        initial angular acceleration to ``alpha = m*g*L/(I_axis + a)``."""
+        dt = 1.0 / 60.0
+        arm_length = 0.5
+        armature = 0.5  # kg*m^2, same order of magnitude as I_axis (~0.25 kg*m^2)
+
+        def angular_accel(traj):
+            # constant angular acceleration near theta=0: joint_q(t) = q0 +
+            # qd0*t + 0.5*qdd0*t^2; the t^2 coeff is 0.5*qdd0. Full quadratic
+            # fit absorbs the first steps' solver transient (same trick as
+            # TestUIPCPrismaticArmature's accel()).
+            t = np.arange(len(traj)) * dt
+            return -2.0 * float(np.polyfit(t, traj, 2)[0])
+
+        no_arm, m_body, inertia_body = self._run_passive_pendulum(armature=None, arm_length=arm_length)
+        with_arm, _, _ = self._run_passive_pendulum(armature=armature, arm_length=arm_length)
+
+        alpha0 = angular_accel(no_arm)
+        alpha_a = angular_accel(with_arm)
+
+        # armature adds rotational inertia -> smaller angular acceleration
+        # (theory ratio I_axis/(I_axis+a) ~= 0.33 here; 0.6 leaves headroom).
+        self.assertGreater(alpha0, 0.0)
+        self.assertLess(alpha_a, 0.6 * alpha0)
+
+        # self-consistent inversion (does not depend on knowing I_axis up
+        # front): alpha0/alpha_a = (I_axis+a)/I_axis => I_axis = a*alpha_a/(alpha0-alpha_a)
+        inferred_i_axis = armature * alpha_a / (alpha0 - alpha_a)
+        self.assertGreater(inferred_i_axis, 0.0)
+
+        # cross-check against I_axis computed directly from the model via the
+        # parallel-axis theorem: the joint axis (world X through the origin)
+        # is parallel to, and offset by arm_length from, the body's own axis
+        # through its COM.
+        axis = np.array([1.0, 0.0, 0.0])
+        i_axis_theory = float(axis @ inertia_body @ axis) + m_body * arm_length**2
+        self.assertAlmostEqual(inferred_i_axis, i_axis_theory, delta=0.08 * i_axis_theory)
+
+    def test_passive_armature_inference_is_consistent_across_magnitudes(self):
+        """The I_axis inferred from the self-consistent inversion must agree
+        whether probed with armature=a1 or armature=a2, confirming armature
+        enters as an exact additive term (I_axis + a), not just "some
+        slowdown"."""
+        dt = 1.0 / 60.0
+        arm_length = 0.5
+
+        def angular_accel(traj):
+            t = np.arange(len(traj)) * dt
+            return -2.0 * float(np.polyfit(t, traj, 2)[0])
+
+        no_arm, _, _ = self._run_passive_pendulum(armature=None, arm_length=arm_length)
+        alpha0 = angular_accel(no_arm)
+
+        a1, a2 = 0.25, 0.5
+        traj_a1, _, _ = self._run_passive_pendulum(armature=a1, arm_length=arm_length)
+        traj_a2, _, _ = self._run_passive_pendulum(armature=a2, arm_length=arm_length)
+
+        i_axis_1 = a1 * angular_accel(traj_a1) / (alpha0 - angular_accel(traj_a1))
+        i_axis_2 = a2 * angular_accel(traj_a2) / (alpha0 - angular_accel(traj_a2))
+
+        self.assertGreater(i_axis_1, 0.0)
+        self.assertAlmostEqual(i_axis_1, i_axis_2, delta=0.06 * i_axis_1)
 
 
 if __name__ == "__main__":
