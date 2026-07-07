@@ -56,11 +56,14 @@
 #
 #     ctrl_state.mass_matrix = newton.eval_mass_matrix(model, state)      # J^T M J
 #     newton.add_armature_to_mass_matrix(model, ctrl_state.mass_matrix)   # + reflected rotor inertia
-#     ctrl_state.bias_forces = newton.eval_inverse_dynamics(model, state)  # C(q,q̇)q̇ + g(q)
+#     newton.eval_inverse_dynamics(model, state, GRAVITY|CORIOLIS, inv_dyn) # g(q), C(q,q̇)q̇
+#     ctrl_state.bias_forces = inv_dyn.gravity_force + inv_dyn.coriolis_force
 #
-# ``eval_inverse_dynamics`` returns the exact RNEA bias force (gravity plus
-# Coriolis/centrifugal) at q̈ = 0.  Since gravity is already baked into
-# ``bias_forces``, --stable-pd is mutually exclusive with --gravity-comp.
+# ``eval_inverse_dynamics`` fills ``inv_dyn.gravity_force`` and
+# ``inv_dyn.coriolis_force`` (separate flat buffers); their sum is the exact RNEA
+# bias force (gravity plus Coriolis/centrifugal) at q̈ = 0.  Since gravity is
+# already baked into ``bias_forces``, --stable-pd is mutually exclusive with
+# --gravity-comp.
 #
 # Command:
 #   python -m newton.examples uipc_ur10_force --world-count 1
@@ -80,6 +83,22 @@ from newton import JointTargetMode
 from newton.actuators import Actuator as _NewtonActuator
 from newton.actuators import ClampingMaxEffort, ControllerPD, ControllerStablePD
 from newton.selection import ArticulationView
+
+
+@wp.kernel
+def _sum_bias_forces_to_worlds(
+    gravity_force: wp.array[float],
+    coriolis_force: wp.array[float],
+    dofs_per_world: int,
+    # outputs
+    bias_forces: wp.array2d[float],
+):
+    """Fold the flat inverse-dynamics bias ``g(q) + C(q,q̇)q̇`` into the controller's
+    per-world ``(world, dof)`` layout. Valid when every world owns a contiguous,
+    equal-width DOF block (one articulation per world, no padding)."""
+    w, j = wp.tid()
+    idx = w * dofs_per_world + j
+    bias_forces[w, j] = gravity_force[idx] + coriolis_force[idx]
 
 
 class Example:
@@ -305,6 +324,9 @@ class Example:
             self._mm_body_I_s = wp.zeros(self.model.body_count, dtype=wp.spatial_matrix, device=dev)
             self._mm_joint_S_s = wp.zeros(self.model.joint_dof_count, dtype=wp.spatial_vector, device=dev)
             self._H_buf = wp.empty((W, max_dofs, max_dofs), dtype=float, device=dev)
+            # Inverse-dynamics container (mass matrix + bias buffers + internal
+            # RNEA scratch) sized for the model; reused every substep.
+            self._inv_dyn = self.model.inverse_dynamics()
 
         # CUDA-graph state for the plain-PD actuator step (see
         # _capture_actuator_graphs). None until captured / when capture is
@@ -391,11 +413,20 @@ class Example:
             # (W, n_per_world, n_per_world) for max_dofs == n_per_world == 6.
             ctrl_state.mass_matrix.assign(self._H_buf)  # ty:ignore[unresolved-attribute]  # pyright: ignore[reportAttributeAccessIssue, reportOptionalMemberAccess]
 
-            # Bias forces C(q, q̇) q̇ + g(q) via the exact RNEA inverse-dynamics
-            # API (q̈ = 0). Writes straight into the controller's (W, n) buffer;
-            # the physical-dynamics sign is exactly what the Stable-PD rhs
-            # subtracts.
-            newton.eval_inverse_dynamics(self.model, state, tau=ctrl_state.bias_forces)  # ty:ignore[unresolved-attribute]  # pyright: ignore[reportAttributeAccessIssue, reportOptionalMemberAccess]
+            # Bias g(q) + C(q,q̇)q̇: gravity and Coriolis come back as separate
+            # flat buffers, summed on-device into the controller's (W, n) layout
+            # (the sign the Stable-PD rhs subtracts). eval_inverse_dynamics reads
+            # state.body_q, kept consistent by the UIPC readback.
+            eval_type = newton.InverseDynamics.EvalType.GRAVITY_FORCE | newton.InverseDynamics.EvalType.CORIOLIS_FORCE
+            newton.eval_inverse_dynamics(self.model, state, eval_type=eval_type, inverse_dynamics=self._inv_dyn)
+            n = ctrl_state.bias_forces.shape[1]  # ty:ignore[unresolved-attribute]  # pyright: ignore[reportAttributeAccessIssue, reportOptionalMemberAccess]
+            wp.launch(
+                _sum_bias_forces_to_worlds,
+                dim=(self.world_count, n),
+                inputs=[self._inv_dyn.gravity_force, self._inv_dyn.coriolis_force, n],
+                outputs=[ctrl_state.bias_forces],  # ty:ignore[unresolved-attribute]  # pyright: ignore[reportAttributeAccessIssue, reportOptionalMemberAccess]
+                device=self.model.device,
+            )
 
         # ControllerStablePD's update_state is a no-op (per-step scratch, no
         # cross-step information), so passing the same State object as both
@@ -417,9 +448,11 @@ class Example:
         ``ClampingMaxEffort`` -> scatter-add) is pure ``wp.launch`` with no
         host<->device transfers, so it is CUDA-graph capturable. The
         ``--stable-pd`` path is left eager and this method is skipped: its bias
-        assembly calls :func:`newton.eval_inverse_dynamics`, which allocates
-        scratch per call, and CUDA-graph capture forbids allocation. Preallocating
-        that scratch to enable capture is a follow-up (report P3).
+        assembly runs :func:`newton.eval_inverse_dynamics` (mass matrix,
+        Jacobian, and RNEA passes) whose kernel launches are not yet vetted for
+        graph capture. The reused :class:`newton.InverseDynamics` container now
+        preallocates all scratch, so wiring this path into a graph is a follow-up
+        (report P3).
 
         ``simulate`` ping-pongs ``state_0``/``state_1`` every substep, and a
         captured graph bakes in the array pointers it was recorded against.

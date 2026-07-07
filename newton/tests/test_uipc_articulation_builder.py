@@ -521,15 +521,21 @@ class TestUIPCImplicitPD(unittest.TestCase):
         state_0, state_1 = model.state(), model.state()
         control = model.control()
         control.joint_target_q.fill_(0.0)
-        tau_ff = wp.zeros((model.articulation_count, model.max_dofs_per_articulation), dtype=float, device=model.device)
+        inv_dyn = model.inverse_dynamics()
 
         traj = []
         for _ in range(frames):
             if gravity_comp:
                 # Pure position-domain compensation: offset the aim by
-                # tau_g/ke (q_ref = 0), no force channel.
-                newton.eval_inverse_dynamics(model, state_0, tau=tau_ff)
-                control.joint_target_q.fill_(float(tau_ff.numpy().flatten()[0]) / kp)
+                # tau_g/ke (q_ref = 0), no force channel. eval_inverse_dynamics
+                # reads state.body_q, so refresh it from joint_q first.
+                newton.eval_fk(model, state_0.joint_q, state_0.joint_qd, state_0)
+                eval_type = (
+                    newton.InverseDynamics.EvalType.GRAVITY_FORCE | newton.InverseDynamics.EvalType.CORIOLIS_FORCE
+                )
+                newton.eval_inverse_dynamics(model, state_0, eval_type=eval_type, inverse_dynamics=inv_dyn)
+                tau_ff = float(inv_dyn.gravity_force.numpy()[0] + inv_dyn.coriolis_force.numpy()[0])
+                control.joint_target_q.fill_(tau_ff / kp)
             state_0.clear_forces()
             solver.step(state_0, state_1, control, None, dt)
             state_0, state_1 = state_1, state_0

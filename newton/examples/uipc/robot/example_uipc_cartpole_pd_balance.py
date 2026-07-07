@@ -228,6 +228,9 @@ class Example:
             )
             self._pole2_actuator = pole2_actuator
             self._act_state = pole2_actuator.state()
+            # Inverse-dynamics container (bias buffers + internal RNEA scratch);
+            # reused every substep to read out the pole2 bias term.
+            self._inv_dyn = self.model.inverse_dynamics()
 
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
         self.viewer.set_model(self.model)
@@ -334,10 +337,15 @@ class Example:
             pole2_m = np.ascontiguousarray(self._H_buf.numpy()[:, p2 : p2 + 1, p2 : p2 + 1], dtype=np.float32)
             ctrl_state = self._act_state.controller_state
             ctrl_state.mass_matrix.assign(pole2_m)
-            # bias_forces = pole2 component of the exact RNEA bias C(q,q̇)q̇ + g(q)
-            # (previously Jacobian-transpose gravity only, Coriolis neglected).
-            bias_full = newton.eval_inverse_dynamics(self.model, self.state_0)
-            ctrl_state.bias_forces.assign(np.ascontiguousarray(bias_full.numpy()[:, p2 : p2 + 1], dtype=np.float32))
+            # bias_forces = pole2 component of the RNEA bias g(q) + C(q,q̇)q̇.
+            # The flat gravity/Coriolis buffers reshape to (world_count, dofs);
+            # pick the pole2 column. eval_inverse_dynamics reads state_0.body_q,
+            # kept consistent by the UIPC readback.
+            eval_type = newton.InverseDynamics.EvalType.GRAVITY_FORCE | newton.InverseDynamics.EvalType.CORIOLIS_FORCE
+            newton.eval_inverse_dynamics(self.model, self.state_0, eval_type=eval_type, inverse_dynamics=self._inv_dyn)
+            bias_flat = self._inv_dyn.gravity_force.numpy() + self._inv_dyn.coriolis_force.numpy()
+            bias_pole2 = bias_flat.reshape(self.world_count, self.dofs_per_world)[:, p2 : p2 + 1]
+            ctrl_state.bias_forces.assign(np.ascontiguousarray(bias_pole2, dtype=np.float32))
 
             # ControllerStablePD.update_state is a no-op (per-step scratch,
             # no cross-step information), so passing the same State as both

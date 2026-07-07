@@ -217,7 +217,8 @@ def quat_to_vec4(q: wp.quat) -> wp.vec4:
 
 @wp.kernel(enable_backward=False)
 def apply_gravity_comp_offset_kernel(
-    bias: wp.array[float],
+    gravity_force: wp.array[float],
+    coriolis_force: wp.array[float],
     inv_ke: wp.array[float],
     # in/out
     target_q: wp.array[float],
@@ -227,10 +228,11 @@ def apply_gravity_comp_offset_kernel(
     Pure position-domain gravity compensation: the implicit-PD steady state
     ``ke * (q_ref - q) = tau_g`` sags by ``tau_g / ke``, so pre-adding that
     offset to the commanded target lands the joint on the true target
-    without any coexisting force control.
+    without any coexisting force control. ``tau_g`` is the RNEA bias
+    ``g(q) + C(q,q̇)q̇``, summed here from the two flat inverse-dynamics buffers.
     """
     i = wp.tid()
-    target_q[i] = target_q[i] + bias[i] * inv_ke[i]
+    target_q[i] = target_q[i] + (gravity_force[i] + coriolis_force[i]) * inv_ke[i]
 
 
 @wp.kernel(enable_backward=False)
@@ -458,11 +460,10 @@ class Example:
         # MuJoCo example relies on jnt_actgravcomp, which UIPC has no
         # equivalent for). Each step the RNEA bias is turned into an aim
         # offset tau_g/ke — no coexisting force control.
-        self._gravity_comp_tau = wp.zeros(
-            (self.model.articulation_count, self.model.max_dofs_per_articulation),
-            dtype=float,
-            device=self.model.device,
-        )
+        # Inverse-dynamics container (bias buffers + internal RNEA scratch);
+        # the single Franka articulation's DOFs are the flat buffers' whole
+        # length, so gravity_force/coriolis_force index the arm DOFs directly.
+        self._inv_dyn = self.model.inverse_dynamics()
         ke = self.model.joint_target_ke.numpy()[:9]
         self._gravity_comp_inv_ke = wp.array(
             np.where(ke > 0.0, 1.0 / np.where(ke > 0.0, ke, 1.0), 0.0).astype(np.float32),
@@ -891,11 +892,13 @@ class Example:
         # Pure position-domain gravity compensation: offset the aim by
         # tau_g/ke so implicit PD holds the commanded pose instead of sagging.
         if self.implicit_pd:
-            newton.eval_inverse_dynamics(self.model, self.state_0, tau=self._gravity_comp_tau)
+            # eval_inverse_dynamics reads state_0.body_q, kept consistent by the UIPC readback.
+            eval_type = newton.InverseDynamics.EvalType.GRAVITY_FORCE | newton.InverseDynamics.EvalType.CORIOLIS_FORCE
+            newton.eval_inverse_dynamics(self.model, self.state_0, eval_type=eval_type, inverse_dynamics=self._inv_dyn)
             wp.launch(
                 apply_gravity_comp_offset_kernel,
                 dim=9,
-                inputs=[self._gravity_comp_tau.flatten(), self._gravity_comp_inv_ke],
+                inputs=[self._inv_dyn.gravity_force, self._inv_dyn.coriolis_force, self._gravity_comp_inv_ke],
                 outputs=[self.control.joint_target_q],
             )
 

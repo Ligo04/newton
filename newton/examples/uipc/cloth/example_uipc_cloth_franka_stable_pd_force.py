@@ -42,6 +42,22 @@ def set_gripper_q(joint_q: wp.array2d[float], finger_pos: wp.array[float], idx0:
     joint_q[0, idx1] = finger_pos[0]
 
 
+@wp.kernel
+def _sum_bias_forces_to_worlds(
+    gravity_force: wp.array[float],
+    coriolis_force: wp.array[float],
+    dofs_per_world: int,
+    # outputs
+    bias_forces: wp.array2d[float],
+):
+    """Fold the flat inverse-dynamics bias ``g(q) + C(q,q̇)q̇`` into the controller's
+    per-world ``(world, dof)`` layout. Valid when every world owns a contiguous,
+    equal-width DOF block (one articulation per world, no padding)."""
+    w, j = wp.tid()
+    idx = w * dofs_per_world + j
+    bias_forces[w, j] = gravity_force[idx] + coriolis_force[idx]
+
+
 class Example:
     def __init__(self, viewer, args):
         self.fps = 60
@@ -126,6 +142,9 @@ class Example:
         if self._act_state is None or self._act_state.controller_state is None:
             raise ValueError("ControllerStablePD actuator state was not initialized")
         self._H_buf: wp.array | None = None
+        # Inverse-dynamics container (bias buffers + internal RNEA scratch),
+        # sized for the model and reused every control step.
+        self._inv_dyn = self.model.inverse_dynamics()
         self.home_q = self.robot.get_attribute("joint_q", self.state_0).numpy()[0, 0].copy()
 
         self.viewer.set_model(self.model)
@@ -402,15 +421,22 @@ class Example:
         newton.add_armature_to_mass_matrix(self.model, self._H_buf)
         ctrl_state = self._act_state.controller_state
         ctrl_state.mass_matrix.assign(self._H_buf)
-        # Tan 2011 stable-PD requires gravity on BOTH sides of the implicit solve:
-        #   1. bias_forces = C = C(q, q̇)·q̇ + g(q) from the exact RNEA
-        #      inverse-dynamics API (q̈ = 0), so the predicted q̈ accounts for
-        #      gravity- and velocity-driven acceleration. Without it the
-        #      -kd·q̈·dt damping term is wrong and the wrist DOFs explode.
-        #   2. feedforward joint_act = tau_g (Jacobian-transpose gravity
-        #      compensation torque) so the static effort = ff - kd·q̈·dt can
-        #      hold pose when q̈ → 0.
-        newton.eval_inverse_dynamics(self.model, self.state_0, tau=ctrl_state.bias_forces)
+        # Tan 2011 stable-PD needs gravity on BOTH sides of the implicit solve:
+        #   1. bias_forces = C(q,q̇)·q̇ + g(q) at q̈ = 0; without it the -kd·q̈·dt
+        #      damping term is wrong and the wrist DOFs explode. eval_inverse_dynamics
+        #      returns gravity and Coriolis as separate flat buffers, summed below.
+        #   2. feedforward joint_act = tau_g so the static effort holds pose at q̈→0.
+        # (eval_inverse_dynamics reads state_0.body_q, kept consistent by UIPC readback.)
+        eval_type = newton.InverseDynamics.EvalType.GRAVITY_FORCE | newton.InverseDynamics.EvalType.CORIOLIS_FORCE
+        newton.eval_inverse_dynamics(self.model, self.state_0, eval_type=eval_type, inverse_dynamics=self._inv_dyn)
+        n = ctrl_state.bias_forces.shape[1]
+        wp.launch(
+            _sum_bias_forces_to_worlds,
+            dim=(1, n),
+            inputs=[self._inv_dyn.gravity_force, self._inv_dyn.coriolis_force, n],
+            outputs=[ctrl_state.bias_forces],
+            device=self.model.device,
+        )
         self.control.joint_act.assign(tau_g)
         self.pd_actuator.step(
             sim_state=self.state_0,

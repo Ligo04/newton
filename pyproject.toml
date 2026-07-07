@@ -308,6 +308,7 @@ files.extend-exclude = [
 
 [tool.typos.default.extend-words]
 arange = "arange"
+precess = "precess"
 ba = "ba"
 ix = "ix"
 iy = "iy"
