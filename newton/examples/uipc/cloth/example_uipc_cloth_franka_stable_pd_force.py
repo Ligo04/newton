@@ -187,7 +187,6 @@ class Example:
             builder.joint_target_ke[d] = 100.0 if d < 7 else self.stable_pd_kp[d]
             builder.joint_target_kd[d] = 10.0 if d < 7 else self.stable_pd_kd[d]
             builder.joint_target_mode[d] = int(JointTargetMode.EFFORT)
-            builder.joint_armature[d] = max(builder.joint_armature[d], 0.1)
             builder.add_actuator(
                 ControllerStablePD,
                 index=d,
@@ -416,9 +415,6 @@ class Example:
         self._H_buf = newton.eval_mass_matrix(self.model, self.state_0, H=self._H_buf)
         if self._H_buf is None:
             raise ValueError("eval_mass_matrix unexpectedly returned None for the Franka articulation")
-        # eval_mass_matrix is the pure J^T M J; fold in reflected rotor inertia
-        # so the Stable-PD plant matches the simulated dynamics.
-        newton.add_armature_to_mass_matrix(self.model, self._H_buf)
         ctrl_state = self._act_state.controller_state
         ctrl_state.mass_matrix.assign(self._H_buf)
         # Tan 2011 stable-PD needs gravity on BOTH sides of the implicit solve:

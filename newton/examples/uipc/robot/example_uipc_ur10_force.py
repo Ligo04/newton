@@ -39,9 +39,8 @@
 #   - ``uipc`` is the default to keep this example in the uipc/ folder;
 #     its ABD implicit integration couples the external torque through
 #     an affine-body constraint solve.  The light wrist DOFs limit-cycle
-#     under plain PD unless reflected rotor inertia is added, so this
-#     example sets ``Model.joint_armature`` (``self.armature`` below) —
-#     SolverUIPC folds it into each child link's ABD inertia internally.
+#     under plain PD at these gains (no reflected rotor inertia is
+#     modelled); ``--stable-pd`` damps them implicitly and holds clean.
 #   - ``semi_implicit`` runs but tends to absorb ``joint_f`` into its
 #     joint attachment constraints and barely moves the arm here.
 #
@@ -55,7 +54,6 @@
 # ``C(q, q̇)`` fed into the controller state each substep.  Here we wire:
 #
 #     ctrl_state.mass_matrix = newton.eval_mass_matrix(model, state)      # J^T M J
-#     newton.add_armature_to_mass_matrix(model, ctrl_state.mass_matrix)   # + reflected rotor inertia
 #     newton.eval_inverse_dynamics(model, state, GRAVITY|CORIOLIS, inv_dyn) # g(q), C(q,q̇)q̇
 #     ctrl_state.bias_forces = inv_dyn.gravity_force + inv_dyn.coriolis_force
 #
@@ -146,11 +144,6 @@ class Example:
         self.kd = np.array([50.0] * 6, dtype=np.float32)
         # Torque clamps sized roughly to UR10's real effort limits.
         self.max_torque = np.array([330.0, 330.0, 150.0, 54.0, 54.0, 54.0], dtype=np.float32)
-        # Reflected rotor inertia per revolute DOF (I_rotor * gear_ratio^2,
-        # ballpark for UR10-class harmonic drives). The heavier wrist values
-        # are what keeps plain PD free of the high-gain limit cycle on the
-        # light wrist links under the uipc backend.
-        self.armature = np.array([0.01, 0.01, 0.01, 0.2, 0.2, 0.2], dtype=np.float32)
 
         ur10 = newton.ModelBuilder()
 
@@ -195,21 +188,6 @@ class Example:
             ur10.joint_target_ke[i] = 0.0
             ur10.joint_target_kd[i] = 0.0
             ur10.joint_target_mode[i] = int(JointTargetMode.EFFORT)
-
-        # ``joint_armature`` is the portable cross-solver interface:
-        # Featherstone/MuJoCo add it to their joint-space mass matrix, and
-        # SolverUIPC folds it into the child link's ABD inertia about the
-        # joint axis (see the armature notes in ``docs/integrations/uipc.md``).
-        # ``newton.eval_mass_matrix`` stays armature-free; the Stable-PD wiring
-        # calls ``newton.add_armature_to_mass_matrix`` on the result to keep the
-        # plant model consistent on every backend.
-        rev_dof = 0
-        for j in range(len(ur10.joint_type)):
-            if ur10.joint_type[j] != newton.JointType.REVOLUTE:
-                continue
-            ur10.joint_armature[ur10.joint_qd_start[j]] = float(self.armature[rev_dof])
-            rev_dof += 1
-        assert rev_dof == len(self.armature), f"expected {len(self.armature)} revolute joints, found {rev_dof}"
 
         # Register one PD actuator per UR10 DOF. ``--stable-pd`` swaps plain
         # ``ControllerPD`` for ``ControllerStablePD`` (Tan et al. 2011): the
@@ -403,12 +381,10 @@ class Example:
             ctrl_state = self._act_state.controller_state
 
             # Mass matrix at the current pose. eval_mass_matrix consumes the
-            # supplied J (and reuses body_I_s) instead of allocating per call;
-            # it returns the pure J^T M J, so reflected rotor inertia is folded
-            # in explicitly for the Stable-PD plant (on-device, graph-safe).
+            # supplied J (and reuses body_I_s) instead of allocating per call
+            # (on-device, graph-safe).
             newton.eval_jacobian(self.model, state, self._mm_J, joint_S_s=self._mm_joint_S_s)
             newton.eval_mass_matrix(self.model, state, H=self._H_buf, J=self._mm_J, body_I_s=self._mm_body_I_s)
-            newton.add_armature_to_mass_matrix(self.model, self._H_buf)
             # H is (W, max_dofs, max_dofs); matches State.mass_matrix's
             # (W, n_per_world, n_per_world) for max_dofs == n_per_world == 6.
             ctrl_state.mass_matrix.assign(self._H_buf)  # ty:ignore[unresolved-attribute]  # pyright: ignore[reportAttributeAccessIssue, reportOptionalMemberAccess]
