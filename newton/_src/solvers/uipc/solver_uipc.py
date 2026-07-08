@@ -26,10 +26,8 @@ except ImportError:  # Python < 3.12
     from typing_extensions import override
 
 if TYPE_CHECKING:
-    # The ``uipc`` (libuipc) backend and the sibling UIPC modules hard-import
-    # ``uipc`` at module load. They are resolved lazily at solver construction
-    # by :meth:`SolverUIPC.import_uipc` so ``import newton`` works without
-    # libuipc installed; these bindings exist only for static type analysis.
+    # Resolved lazily by :meth:`SolverUIPC.import_uipc` so ``import newton``
+    # works without libuipc; these bindings exist only for static type analysis.
     import uipc
     from uipc import Logger as ULogger
     from uipc.core import (
@@ -71,23 +69,15 @@ if TYPE_CHECKING:
     from .rigid_body import RigidBodyBuilder
     from .utils import _view_attr
 
-# ---------------------------------------------------------------------------
-# UIPC ABD meta-attribute names (see libuipc AffineBodyConstitution).
-# Every AffineBody geometry carries six per-group meta attributes that
-# together describe its rigid-body mass properties:
-#
-#   "mass"                 Float   - scalar mass m                [kg]
-#   "mass_center"          Vec3    - COM c in body frame           [m]
-#   "inertia"              Mat3x3  - standard inertia at COM       [kg*m^2]
-#                                    (= integral rho*(|r|^2*E - r*r^T) dV)
+# UIPC ABD per-group meta attributes (see libuipc AffineBodyConstitution):
+#   "mass"                 Float   - scalar mass m [kg]
+#   "mass_center"          Vec3    - COM c in body frame [m]
+#   "inertia"              Mat3x3  - inertia at COM, body axes [kg*m^2]
 #   "abd_mass"             Float   - same m (cached)
-#   "abd_mass_x_bar"       Vec3    - integral rho*x dV      = m*c
-#   "abd_mass_x_bar_x_bar" Mat3x3  - integral rho*x*x^T dV  (about body-frame origin)
-#
-# The "friendly" triplet matches Newton's ``body_mass`` / ``body_com`` /
-# ``body_inertia`` conventions directly (inertia is about the COM, in
-# body-local axes, units kg*m^2), so reading back is a plain copy.
-# ---------------------------------------------------------------------------
+#   "abd_mass_x_bar"       Vec3    - integral rho*x dV = m*c
+#   "abd_mass_x_bar_x_bar" Mat3x3  - integral rho*x*x^T dV (body-frame origin)
+# The first triplet matches Newton's body_mass/body_com/body_inertia
+# conventions directly, so reading back is a plain copy.
 _UIPC_MASS_ATTR: str = "mass"
 _UIPC_COM_ATTR: str = "mass_center"
 _UIPC_INERTIA_ATTR: str = "inertia"
@@ -419,9 +409,8 @@ class SolverUIPC(SolverBase):
         super().__init__(model=model)
         self.import_uipc()
 
-        # Resolve backend-dependent defaults now that libuipc is imported
-        # (they cannot be evaluated as argument defaults without hard-importing
-        # ``uipc`` at module load).
+        # Backend-dependent defaults; not evaluable as argument defaults
+        # without hard-importing ``uipc`` at module load.
         if kappa is None:
             kappa = 1.0 * GPa
         if logger_level is None:
@@ -471,10 +460,8 @@ class SolverUIPC(SolverBase):
         self._stats: USimulationStats | None = USimulationStats() if require_profile else None
         self._auto_report_saved: bool = False
 
-        # weakref.finalize fires when the solver is GC'd (e.g. viewer closed
-        # → example freed → solver freed) OR at interpreter shutdown —
-        # whichever comes first.  The atexit approach failed because the
-        # solver is often a temporary whose ref dies before atexit fires.
+        # weakref.finalize fires on solver GC or interpreter shutdown; atexit
+        # fired too late (the solver ref often dies before it).
         if require_profile:
 
             def _auto_save(stats: USimulationStats, workspace: str) -> None:
@@ -497,22 +484,15 @@ class SolverUIPC(SolverBase):
         self._contact_tabular_fn: Callable | None = None
         self._subscene_tabular_fn: Callable | None = None
 
-        # Bodies whose Newton-authored (mass, com, inertia) must be pushed
-        # into the UIPC ABD geometry instead of letting UIPC re-derive them
-        # from ``mass_density * mesh_volume``.  Populated via
-        # :meth:`sync_uipc_inertia_with_model` before :meth:`initialize`.
+        # Bodies whose Newton-authored inertia overrides UIPC's
+        # density*volume derivation; set via sync_uipc_inertia_with_model.
         self._custom_inertia_bodies: set[int] = set()
 
-        # Bodies that must not share UIPC AffineBody instancing.  Add indices
-        # before :meth:`initialize`; passed through to
-        # :meth:`~RigidBodyBuilder.build_affine_bodies` (merged with custom
-        # inertia there).
+        # Bodies excluded from AffineBody instancing; add before initialize().
         self._no_instance_bodies: set[int] = set()
 
-        # Whether :meth:`initialize` should auto-call
-        # :meth:`sync_model_inertia_from_uipc` at the end so the Newton
-        # model mirrors UIPC's ABD-finalised mass properties.  Disable to
-        # keep the authored ``ModelBuilder`` values untouched.
+        # Auto-run sync_model_inertia_from_uipc at the end of initialize();
+        # disable to keep the authored ModelBuilder inertias untouched.
         self._auto_sync_inertia: bool = auto_sync_inertia
 
         # Builders (populated during initialize)
@@ -837,10 +817,7 @@ class SolverUIPC(SolverBase):
             raise KeyError(f"body {body_idx} has no mapped UIPC geometry")
 
         meta = geo_slot.geometry().meta()
-        # Mirror the C++ pattern from the reference test:
-        #   auto mass_attr = mesh1.meta().find<Float>("mass");
-        #   Float mass_val = mass_attr->view()[0];
-        # Python binding: meta.find(name) -> Attribute | None, then view(attr)[0].
+        # meta.find(name) -> Attribute | None; scalar read is view(attr)[0].
         out: dict[str, Any] = {}
         for name, shape in (
             (_UIPC_MASS_ATTR, None),
@@ -1093,11 +1070,9 @@ class SolverUIPC(SolverBase):
 
         self._rigid_body_builder.build_ground_planes(ground_elem)
 
-        # Build set of body indices that belong to articulations (robot links),
-        # a separate set for bodies attached via free joints, and auto-flag
-        # ball-joint children so they don't share AffineBody instances with
-        # shape-key siblings.  User-supplied entries in
-        # ``self._no_instance_bodies`` are merged with the BALL set below.
+        # Classify articulation vs free-joint bodies; ball-joint children are
+        # auto-flagged (merged with _no_instance_bodies) so they don't share
+        # AffineBody instances with shape-key siblings.
         articulation_bodies: set[int] = set()
         free_joint_bodies: set[int] = set()
         ball_joint_bodies: set[int] = set()
@@ -1207,9 +1182,8 @@ class SolverUIPC(SolverBase):
             if self._deformable_builder.has_deformable:
                 self._deformable_builder.build(actor_elems[world_index], particle_range, se)
 
-        # Resolve mimic joint couplings now that every world's joints are
-        # registered. Mimic followers are driven from their leaders each
-        # step in :meth:`step` via ``apply_mimic_targets``.
+        # Resolve mimic couplings once all worlds' joints are registered;
+        # followers are driven per step via apply_mimic_targets.
         self._articulation_builder.setup_mimic_constraints()
 
         # Initialize UIPC world and set up state accessors
@@ -1221,14 +1195,11 @@ class SolverUIPC(SolverBase):
 
         populate_backend_offsets(self.mapping, model.device)
 
-        # Pre-allocate GPU buffers for reading state back from UIPC (from-UIPC direction).
-        # Uses uipc.adapter.warp.buffer() so copy_transform_to/copy_velocity_to can write
-        # directly into device memory owned by us.
+        # Device buffers for reading ABD state back from UIPC.
         self._abd_accessor: AffineBodyStateAccessorFeature = self.world.features().find(AffineBodyStateAccessorFeature)  # ty:ignore[invalid-assignment]
         n = self.mapping.num_mapped_bodies
-        # Allocate buffers large enough to cover the highest backend index,
-        # which may exceed num_mapped_bodies when UIPC assigns non-contiguous
-        # backend offsets across worlds.
+        # Size by the highest backend index: backend offsets can be
+        # non-contiguous across worlds, exceeding num_mapped_bodies.
         buf_count = self.mapping.max_backend_count
         if n > 0:
             self._abd_transform_buf = uipc.adapter.warp.buffer(buf_count, dtype=wp.mat44d, device=model.device)
@@ -1295,10 +1266,8 @@ class SolverUIPC(SolverBase):
 
         self._initialized = True
 
-        # Sync model mass/inertia from UIPC ABD (after world init) so host-side
-        # dynamics (e.g. eval_mass_matrix) match the UIPC body properties.
-        # Skip shapeless articulation proxies; set auto_sync_inertia=False to
-        # leave model inertias as authored.
+        # Sync model inertia from UIPC ABD so host-side dynamics (e.g.
+        # eval_mass_matrix) match; skips shapeless articulation proxies.
         if self._auto_sync_inertia:
             shape_backed_bodies = [b for b in self.mapping.body_geo_slots if self.mapping.body_shapes.get(b)]
             if shape_backed_bodies:
@@ -1354,10 +1323,8 @@ class SolverUIPC(SolverBase):
         # finite difference yields a true (q_{t+dt} - q_t) / dt velocity.
         self._articulation_builder.read_joint_state_pre_advance()
 
-        # Drive mimic followers from their leaders. Runs after control
-        # caching (target arrays populated, device synced) and after the
-        # pre-advance snapshot (leader fallback value available), but
-        # before the animator fires in world.advance().
+        # Drive mimic followers: must run after control caching and the
+        # pre-advance snapshot, before the animator fires in world.advance().
         self._articulation_builder.apply_mimic_targets()
 
         # Dump surface geometry before physics advance
@@ -1562,10 +1529,8 @@ class SolverUIPC(SolverBase):
             # model's current state when it runs.
             return
 
-        # Unsupported flags: emit one aggregated warning. UIPC bakes these
-        # properties into scene objects at build time (or has no
-        # equivalent concept), so a runtime update is not possible -- the
-        # user must recreate the solver.
+        # Baked into scene objects at build time — one aggregated warning;
+        # the user must recreate the solver.
         unsupported_mask = (
             SolverNotifyFlags.BODY_INERTIAL_PROPERTIES
             | SolverNotifyFlags.SHAPE_PROPERTIES
@@ -1582,20 +1547,16 @@ class SolverUIPC(SolverBase):
                 stacklevel=2,
             )
 
-        # Joint-DOF resync: armature rewrites the live constraint mass
-        # diagonal; joint_target_ke/kd re-derive the drive strengths under
-        # implicit_pd. libuipc re-reads both every step. Friction and limit
-        # changes remain baked (and gain edits without implicit_pd, where the
-        # drive strength is a solver parameter, not derived from the model).
+        # Armature + (implicit_pd) ke/kd re-derive; libuipc re-reads both
+        # every step. Friction/limits stay baked, as do gains without
+        # implicit_pd (drive strength is a solver knob there).
         if flags & SolverNotifyFlags.JOINT_DOF_PROPERTIES:
             self._articulation_builder.refresh_armature(self.model)
             if self._implicit_pd:
                 self._articulation_builder.refresh_drive_strengths(self.model)
 
-        # Supported flags: dispatch each to its dedicated handler.
-        # JOINT_PROPERTIES and BODY_PROPERTIES cooperate via
-        # ``_state_dirty`` so only a single state push to UIPC runs even
-        # when both flags are set together.
+        # _state_dirty coalesces JOINT_PROPERTIES + BODY_PROPERTIES into a
+        # single state push to UIPC.
         self._state_dirty = False
 
         if flags & SolverNotifyFlags.JOINT_PROPERTIES:
@@ -1691,9 +1652,8 @@ class SolverUIPC(SolverBase):
         if not self._initialized:
             return
         model = self.model
-        # StateFlags is an IntEnum (not IntFlag), so combinations like
-        # PARTICLE_Q | PARTICLE_QD (48) are not canonical members; keep flags as
-        # a plain int and rely on bitwise tests below.
+        # StateFlags is an IntEnum (not IntFlag): combined values are not
+        # members, so keep flags as a plain int for bitwise tests.
         flags = int(StateFlags.ALL) if flags is None else int(flags)
 
         # Host bool view of the world mask, computed once and reused.
@@ -1715,10 +1675,8 @@ class SolverUIPC(SolverBase):
                 self._mapped_body_world = model.body_world.numpy()[mapping.body_indices_wp.numpy()]
             rows = _rows_for_world(self._mapped_body_world)
             if rows is None or rows.size > 0:
-                # Only run FK from joint coords when joints are the source (a
-                # JOINT flag set and BODY_Q not) and both joint arrays exist;
-                # otherwise eval_fk would clobber the caller's body_q (or crash
-                # on a None joint_qd).
+                # FK only when joints are the source and both arrays exist —
+                # else eval_fk clobbers caller's body_q or crashes on None qd.
                 do_fk = (
                     bool(flags & (StateFlags.JOINT_Q | StateFlags.JOINT_QD))
                     and not bool(flags & StateFlags.BODY_Q)
@@ -1829,11 +1787,8 @@ class SolverUIPC(SolverBase):
         transforms_host = self._abd_transform_buf.warp().numpy()[:n]
         velocities_host = self._abd_velocity_buf.warp().numpy()[:n]
 
-        # Lazily build the master state geometry. It spans every ABD body
-        # in UIPC, so row ``q_idx`` of its ``transform`` / ``velocity``
-        # instance attributes maps directly onto UIPC's flat q array slot
-        # ``q_idx``. The geo topology is immutable after scene init, so
-        # one allocation suffices for the solver lifetime.
+        # Master state geo spans every ABD body (row = UIPC flat q slot);
+        # topology is immutable after scene init, so allocate once.
         state_geo = getattr(self, "_master_state_geo", None)
         if state_geo is None:
             state_geo = self._abd_accessor.create_geometry()
@@ -1841,9 +1796,8 @@ class SolverUIPC(SolverBase):
             state_geo.instances().create("velocity", np.zeros((4, 4), dtype=np.float64))
             self._master_state_geo = state_geo
 
-        # Cache host-side backend offsets (= UIPC q indices per mapped
-        # body). ``mapping.backend_offsets_wp`` is populated once by
-        # ``populate_backend_offsets`` and immutable thereafter.
+        # Backend offsets (UIPC q index per mapped body) are populated once
+        # and immutable; cache a host copy.
         if getattr(self, "_backend_offsets_host", None) is None:
             self._backend_offsets_host = mapping.backend_offsets_wp.numpy().astype(np.int64, copy=False)
         offsets_np = self._backend_offsets_host
@@ -1916,12 +1870,9 @@ class SolverUIPC(SolverBase):
         assert position_attr is not None
         position_view = _view_attr(position_attr)
 
-        # The FEM kernels scatter `dst[backend_idx] = src[particle_idx]`, so the
-        # buffers and the view are backend-vertex ordered with the vertex axis
-        # first: `position_view` is `[backend_vertex_count, 3, 1]` and
-        # `positions_host` is `[backend_vertex_count, 3]`. `selected_rows` are
-        # compact mapped-vertex indices; translate to backend slots via the
-        # cached backend offsets (mirroring the body path's `offsets_np[rows]`).
+        # Buffers/views are backend-vertex ordered (`position_view`
+        # [backend_vertex_count, 3, 1]); `selected_rows` are compact mapped
+        # indices — translate to backend slots via the cached offsets.
         if getattr(self, "_fem_backend_offsets_host", None) is None:
             self._fem_backend_offsets_host = self._fem_backend_offsets_wp.numpy().astype(np.int64, copy=False)
         rows = slice(None) if selected_rows is None else self._fem_backend_offsets_host[selected_rows]
@@ -2124,9 +2075,8 @@ class SolverUIPC(SolverBase):
             assert self._abd_transform_buf is not None
             assert self._abd_velocity_buf is not None
 
-            # Copy UIPC backend state into our pre-allocated device buffers.
-            # Read the full backend range so that non-contiguous offsets
-            # (common with multi-world replicate) are all covered.
+            # Read the full backend range — offsets can be non-contiguous
+            # with multi-world replicate.
             buf_count = self.mapping.max_backend_count
             self._abd_accessor.copy_transform_to(self._abd_transform_buf.buffer_view(), 0, buf_count)
             self._abd_accessor.copy_velocity_to(self._abd_velocity_buf.buffer_view(), 0, buf_count)
