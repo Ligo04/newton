@@ -371,7 +371,14 @@ Newton form:
 - `state.particle_f` receives per-particle cloth/deformable contact forces when
   allocated.
 - `contacts.force` and rigid-contact pair arrays are populated when those
-  buffers are present.
+  buffers are present. Each UIPC contact stencil (PT/EE/PE/PP/PH) becomes one
+  rigid-contact entry: the pair of touching shapes, the force on the first
+  shape, and per-contact points (`rigid_contact_point0/1`), so
+  `newton.sensors.SensorContact` reports per-counterpart forces and
+  `position_matrix` contact positions. Contacts against a FEM counterpart or
+  the ground are attributed to the ground-plane shape; contact positions are
+  vertex-level representatives, so a face-face interface localizes to within
+  the contact face rather than its exact centroid.
 
 For CPU diagnostics, `_get_contact_forces` returns the lower-level per-body,
 per-primitive UIPC contact-force buckets. It is intentionally an internal
