@@ -28,6 +28,11 @@ FORCE_CHANNELS: tuple[str, ...] = ("N", "F")
 
 _PRIM_SPLIT: dict[str, int] = {"PH": 1, "PP": 1, "PE": 1, "PT": 1, "EE": 2}
 
+# Gradient doublets are laid out contiguously per contact stencil with fixed
+# arity (see libuipc SimplexNormalContact::do_assemble: PT_count*4, EE_count*4,
+# PE_count*3, PP_count*2; the half-plane exporter emits one row per vertex).
+_PRIM_ARITY: dict[str, int] = {"PH": 1, "PP": 2, "PE": 3, "PT": 4, "EE": 4}
+
 _VERTEX_UNMAPPED = -1
 
 
@@ -249,7 +254,7 @@ def build_gpu_vertex_maps(mapping: UIpcMappingInfo, body_count: int, device: wp.
         device: Warp device for output arrays.
     """
     max_gv = 0
-    body_vertex_ranges: list[tuple[int, int, int]] = []
+    body_vertex_ranges: list[tuple[int, int, int, np.ndarray]] = []
 
     for body_idx, geo_slot in mapping.body_geo_slots.items():
         geo = geo_slot.geometry()
@@ -261,7 +266,11 @@ def build_gpu_vertex_maps(mapping: UIpcMappingInfo, body_count: int, device: wp.
         instance_id = mapping.body_instance_ids.get(body_idx, 0)
         start = base_offset + instance_id * n_verts
         end = start + n_verts
-        body_vertex_ranges.append((body_idx, start, end))
+        # ABD geometry positions are authored in body-local frame (instance
+        # transforms carry the world pose), so they double as rigid_contact_point data.
+        # pyuipc returns Eigen Vector3 attributes as (N, 3, 1)
+        pos_np = np.ascontiguousarray(_view_attr(geo.positions()), dtype=np.float32).reshape(-1, 3)
+        body_vertex_ranges.append((body_idx, start, end, pos_np))
         max_gv = max(max_gv, end)
 
     particle_vertex_ranges: list[tuple[np.ndarray, int, int]] = []
@@ -285,15 +294,19 @@ def build_gpu_vertex_maps(mapping: UIpcMappingInfo, body_count: int, device: wp.
 
     vtb_np = np.full(max_gv, _VERTEX_UNMAPPED, dtype=np.int32)
     vtp_np = np.full(max_gv, _VERTEX_UNMAPPED, dtype=np.int32)
+    vlp_np = np.zeros((max_gv, 3), dtype=np.float32)
 
-    for body_idx, start, end in body_vertex_ranges:
+    for body_idx, start, end, pos_np in body_vertex_ranges:
         vtb_np[start:end] = body_idx
+        vlp_np[start:end] = pos_np
 
     for pi, start, end in particle_vertex_ranges:
         vtp_np[start:end] = pi
 
     mapping.vertex_to_body_wp = wp.from_numpy(vtb_np, dtype=wp.int32, device=device)
+    mapping.vertex_to_body_np = vtb_np
     mapping.vertex_to_particle_wp = wp.from_numpy(vtp_np, dtype=wp.int32, device=device)
+    mapping.vertex_local_pos_wp = wp.from_numpy(vlp_np, dtype=wp.vec3f, device=device)
     mapping.max_global_vertex = max_gv
 
     b2s_np = np.zeros(body_count, dtype=np.int32)
@@ -352,12 +365,18 @@ def _populate_contact_pairs_kernel(
     forces_n: wp.array[wp.vec3],
     forces_f: wp.array[wp.vec3],
     vertex_to_body: wp.array[wp.int32],
+    vertex_to_particle: wp.array[wp.int32],
+    vertex_local_pos: wp.array[wp.vec3],
+    body_q: wp.array[wp.transform],
+    particle_q: wp.array[wp.vec3],
     body_to_first_shape: wp.array[wp.int32],
     body_count: int,
     max_global_vertex: int,
     ground_shape: int,
     contact_shape0: wp.array[wp.int32],
     contact_shape1: wp.array[wp.int32],
+    contact_point0: wp.array[wp.vec3],
+    contact_point1: wp.array[wp.vec3],
     contact_normal: wp.array[wp.vec3],
     contact_force: wp.array[wp.spatial_vector],  # ty:ignore[invalid-type-form]
     counter: wp.array[wp.int32],
@@ -377,10 +396,15 @@ def _populate_contact_pairs_kernel(
     shape_a = body_to_first_shape[body_a]
 
     shape_b = ground_shape
+    body_b = int(-1)
+    particle_b = int(-1)
     if gv_b >= 0 and gv_b < max_global_vertex:
-        body_b = vertex_to_body[gv_b]
-        if body_b >= 0 and body_b < body_count:
-            shape_b = body_to_first_shape[body_b]
+        bb = vertex_to_body[gv_b]
+        if bb >= 0 and bb < body_count:
+            body_b = bb
+            shape_b = body_to_first_shape[bb]
+        else:
+            particle_b = vertex_to_particle[gv_b]
 
     slot = wp.atomic_add(counter, 0, 1)  # ty:ignore[invalid-argument-type]
     if slot >= max_contacts:
@@ -398,6 +422,18 @@ def _populate_contact_pairs_kernel(
     contact_shape1[slot] = shape_b  # ty:ignore[invalid-assignment]
     contact_normal[slot] = normal  # ty:ignore[invalid-assignment]
     contact_force[slot] = wp.spatial_vector(total_f[0], total_f[1], total_f[2], 0.0, 0.0, 0.0)  # ty:ignore[invalid-assignment]
+
+    # Contact points feed SensorContact.position_matrix via contact_surface_point():
+    # ABD sides store body-frame vertex positions; FEM/ground sides map to a shape
+    # whose body is -1 (identity transform), so a world-frame point is correct there.
+    point_a = vertex_local_pos[gv_a]
+    contact_point0[slot] = point_a  # ty:ignore[invalid-assignment]
+    if body_b >= 0:
+        contact_point1[slot] = vertex_local_pos[gv_b]  # ty:ignore[invalid-assignment]
+    elif particle_b >= 0 and particle_q:
+        contact_point1[slot] = particle_q[particle_b]  # ty:ignore[invalid-assignment]
+    else:
+        contact_point1[slot] = wp.transform_point(body_q[body_a], point_a)  # ty:ignore[invalid-assignment]
 
 
 # ---------------------------------------------------------------------------
@@ -418,12 +454,22 @@ class GpuContactData:
     forces_f: np.ndarray  # (M, 3) float32 — friction channel force sum per instance
 
 
-def prepare_contact_gpu_data(csf: ContactSystemFeature, dt: float = 1.0) -> GpuContactData | None:
+def prepare_contact_gpu_data(
+    csf: ContactSystemFeature, dt: float = 1.0, vertex_to_body: np.ndarray | None = None
+) -> GpuContactData | None:
     """Read all UIPC contact gradients and pack into flat arrays.
 
     UIPC gradients are derivatives of the incremental potential which
     includes a ``kappa · dt²`` scaling.  Dividing by ``dt²`` converts
     them to physical forces [N].
+
+    Pair export reconstructs contact stencils from the fixed per-primitive gradient
+    layout (:data:`_PRIM_ARITY`): each stencil becomes one contact instance whose
+    force is the gradient sum over its A-side vertices. When ``vertex_to_body``
+    (global vertex → Newton body, CPU) is given, the A side is the body group of the
+    first rigid vertex and ``vert_b`` is the first vertex of the other side, so
+    body-body pairs resolve exactly; otherwise a first-``_PRIM_SPLIT`` heuristic
+    is used.
 
     No per-element Python loops — uses vectorized numpy operations.
     Returns None if no contact data is available.
@@ -439,38 +485,64 @@ def prepare_contact_gpu_data(csf: ContactSystemFeature, dt: float = 1.0) -> GpuC
     inst_force_f: list[np.ndarray] = []
 
     for prim in PRIMITIVE_TYPES:
-        split_a = _PRIM_SPLIT[prim]
+        arity = _PRIM_ARITY[prim]
 
-        n_data = _read_gradient(csf, f"{prim}+N")
-        f_data = _read_gradient(csf, f"{prim}+F")
+        pair_force: dict[str, np.ndarray] = {}
+        pair_topo: tuple[np.ndarray, np.ndarray] | None = None
 
-        for chan_label, data in [("N", n_data), ("F", f_data)]:
+        for chan_label in FORCE_CHANNELS:
+            data = _read_gradient(csf, f"{prim}+{chan_label}")
             if data is None:
                 continue
             i_view, grad_flat = data
-            n_inst = i_view.shape[0]
-            arity = i_view.shape[1]
 
             verts_flat = i_view.reshape(-1).astype(np.int32)
             forces_flat = (-grad_flat.reshape(-1, 3) * inv_dt2).astype(np.float32)
             all_verts.append(verts_flat)
             all_forces.append(forces_flat)
 
-            if chan_label == "N":
-                va = i_view[:, 0].astype(np.int32)
-                inst_vert_a.append(va)
-                if arity > split_a:
-                    vb = i_view[:, split_a].astype(np.int32)
-                else:
-                    vb = np.full(n_inst, -1, dtype=np.int32)
-                inst_vert_b.append(vb)
-                force_sum = (-grad_flat.sum(axis=1) * inv_dt2).astype(np.float32)
-                inst_force_n.append(force_sum)
+            if verts_flat.shape[0] % arity != 0:
+                continue  # unexpected layout: keep scatter data, skip pair export
+            sv = verts_flat.reshape(-1, arity)
+            sf = forces_flat.reshape(-1, arity, 3)
+            n_stencils = sv.shape[0]
+            rows = np.arange(n_stencils)
 
-            if chan_label == "F":
-                if not inst_force_f or len(inst_force_f[-1]) != n_inst:
-                    force_sum = (-grad_flat.sum(axis=1) * inv_dt2).astype(np.float32)
-                    inst_force_f.append(force_sum)
+            if vertex_to_body is not None and vertex_to_body.shape[0] > 0:
+                mgv = vertex_to_body.shape[0]
+                body_of = np.where((sv >= 0) & (sv < mgv), vertex_to_body[np.clip(sv, 0, mgv - 1)], -2)
+                # Anchor the A side on the first rigid vertex so ABD-vs-FEM stencils
+                # export from the rigid side (FEM-anchored rows are unmapped downstream).
+                has_abd = body_of >= 0
+                anchor = np.where(has_abd.any(axis=1), has_abd.argmax(axis=1), 0)
+                a_side = body_of == body_of[rows, anchor][:, None]
+            else:
+                anchor = np.zeros(n_stencils, dtype=np.int64)
+                a_side = np.zeros(sv.shape, dtype=bool)
+                a_side[:, : _PRIM_SPLIT[prim]] = True
+
+            force_a = (sf * a_side[:, :, None]).sum(axis=1).astype(np.float32)
+            pair_force[chan_label] = force_a
+
+            if chan_label == "N":
+                b_side = ~a_side
+                has_b = b_side.any(axis=1)
+                vb = np.where(has_b, sv[rows, b_side.argmax(axis=1)], -1).astype(np.int32)
+                pair_topo = (sv[rows, anchor].astype(np.int32), vb)
+
+        if pair_topo is None or "N" not in pair_force:
+            continue
+        va, vb = pair_topo
+        fn = pair_force["N"]
+        ff = pair_force.get("F")
+        inst_vert_a.append(va)
+        inst_vert_b.append(vb)
+        inst_force_n.append(fn)
+        # Friction stencils mirror the normal set; align by index, drop on mismatch.
+        if ff is not None and ff.shape[0] == fn.shape[0]:
+            inst_force_f.append(ff)
+        else:
+            inst_force_f.append(np.zeros_like(fn))
 
     if not all_verts:
         return None
@@ -492,14 +564,7 @@ def prepare_contact_gpu_data(csf: ContactSystemFeature, dt: float = 1.0) -> GpuC
     vert_a_cat = np.concatenate(inst_vert_a)
     vert_b_cat = np.concatenate(inst_vert_b)
     forces_n_cat = np.concatenate(inst_force_n)
-
-    if inst_force_f:
-        forces_f_cat = np.concatenate(inst_force_f)
-        if len(forces_f_cat) < len(vert_a_cat):
-            pad = np.zeros((len(vert_a_cat) - len(forces_f_cat), 3), dtype=np.float32)
-            forces_f_cat = np.concatenate([forces_f_cat, pad])
-    else:
-        forces_f_cat = np.zeros_like(forces_n_cat)
+    forces_f_cat = np.concatenate(inst_force_f)
 
     return GpuContactData(
         vertex_indices=vertex_indices,

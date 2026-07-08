@@ -446,8 +446,11 @@ class UIpcMappingInfo:
 
     # GPU lookup tables for contact force scatter (populated by build_gpu_vertex_maps)
     vertex_to_body_wp: wp.array | None = None  # (max_global_vertex,) int32
+    vertex_to_body_np: np.ndarray | None = None  # CPU copy, for hessian-based pair resolution
     vertex_to_particle_wp: wp.array | None = None  # (max_global_vertex,) int32
     body_to_first_shape_wp: wp.array | None = None  # (body_count,) int32
+    # Body-frame vertex positions for ABD vertices (zero for FEM vertices; rigid → constant)
+    vertex_local_pos_wp: wp.array | None = None  # (max_global_vertex,) vec3f
     max_global_vertex: int = 0
 
 

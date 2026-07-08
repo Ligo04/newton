@@ -1996,7 +1996,9 @@ class SolverUIPC(SolverBase):
         Populates ``state.body_f`` with per-rigid-body total contact wrench
         and ``state.particle_f`` with per-particle contact forces for
         cloth/deformable bodies. Per-body spatial forces are also written
-        into ``contacts.force`` if allocated.
+        into ``contacts.force`` if allocated, along with per-contact points
+        (``rigid_contact_point0/1``) so :class:`~newton.sensors.SensorContact`
+        can report per-counterpart contact positions.
         """
         state_out: State | None = state if state is not None else getattr(self, "_current_state_out", None)
 
@@ -2005,7 +2007,7 @@ class SolverUIPC(SolverBase):
         if self.mapping.vertex_to_body_wp is None:
             return
 
-        gpu_data = prepare_contact_gpu_data(self._csf, dt=self._dt)
+        gpu_data = prepare_contact_gpu_data(self._csf, dt=self._dt, vertex_to_body=self.mapping.vertex_to_body_np)
         if gpu_data is None:
             if hasattr(contacts, "rigid_contact_count"):
                 contacts.rigid_contact_count.zero_()
@@ -2056,6 +2058,13 @@ class SolverUIPC(SolverBase):
             contacts.rigid_contact_count.zero_()
             ground_shape = self._ground_shape_index()
 
+            body_q = state_out.body_q if state_out is not None and state_out.body_q is not None else self.model.body_q
+            particle_q = (
+                state_out.particle_q
+                if state_out is not None and state_out.particle_q is not None
+                else self.model.particle_q
+            )
+
             wp.launch(
                 kernel=_populate_contact_pairs_kernel,
                 dim=n_inst,
@@ -2065,6 +2074,10 @@ class SolverUIPC(SolverBase):
                     fn_wp,
                     ff_wp,
                     mapping.vertex_to_body_wp,
+                    mapping.vertex_to_particle_wp,
+                    mapping.vertex_local_pos_wp,
+                    body_q,
+                    particle_q,
                     mapping.body_to_first_shape_wp,
                     self.model.body_count,
                     mapping.max_global_vertex,
@@ -2073,6 +2086,8 @@ class SolverUIPC(SolverBase):
                 outputs=[
                     contacts.rigid_contact_shape0,
                     contacts.rigid_contact_shape1,
+                    contacts.rigid_contact_point0,
+                    contacts.rigid_contact_point1,
                     contacts.rigid_contact_normal,
                     contacts.force,
                     contacts.rigid_contact_count,
