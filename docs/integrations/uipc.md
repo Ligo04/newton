@@ -300,7 +300,9 @@ ignored). Gains are read at initialization; to change them at runtime, write
 `joint_target_ke` / `joint_target_kd` and call
 `notify_model_changed(SolverNotifyFlags.JOINT_DOF_PROPERTIES)` — the drive
 strengths are re-derived and take effect on the next step (libuipc re-reads
-them every frame). Armature, friction, and joint-limit changes remain baked.
+them every frame). The same call re-applies `joint_armature` to the live
+reflected-inertia constraints (for joints that carried armature at build
+time); friction and joint-limit changes remain baked.
 
 `ke`/`kd` sag under gravity or other sustained loads because implicit PD has
 no gravity-compensation channel of its own. A joint is either position-driven
@@ -431,11 +433,12 @@ the solver is initialized, `notify_model_changed` supports only:
 | `BODY_PROPERTIES` | Pushes updated `body_q` / `body_qd` and FEM particle state into UIPC. |
 | `JOINT_PROPERTIES` | Runs Newton FK from `joint_q` / `joint_qd` / joint frames, then pushes the resulting body state into UIPC. |
 | `MODEL_PROPERTIES` | Propagates `model.gravity` into the live UIPC `scene.config()`. |
+| `JOINT_DOF_PROPERTIES` | Re-applies `joint_armature` to the live reflected-inertia constraints (joints that carried armature at build time only), and under `implicit_pd` re-derives the drive strengths from `joint_target_ke` / `joint_target_kd`. Friction and limit edits remain baked, as do gain edits without `implicit_pd`. |
 
-Unsupported flags (`JOINT_DOF_PROPERTIES`, `BODY_INERTIAL_PROPERTIES`,
-`SHAPE_PROPERTIES`, `CONSTRAINT_PROPERTIES`, `TENDON_PROPERTIES`, and
-`ACTUATOR_PROPERTIES`) produce one aggregated warning. Recreate the solver when
-those properties change.
+Unsupported flags (`BODY_INERTIAL_PROPERTIES`, `SHAPE_PROPERTIES`,
+`CONSTRAINT_PROPERTIES`, `TENDON_PROPERTIES`, and `ACTUATOR_PROPERTIES`)
+produce one aggregated warning. Recreate the solver when those properties
+change.
 
 `set_contact` is safe before or after initialization. `set_animator_substep`
 can be called after initialization to change how many times UIPC animator
@@ -483,10 +486,11 @@ Smaller limitations are documented inline above. The most common ones are:
   passive in UIPC; `POSITION_VELOCITY` forwards only the position target.
 - **Most edits require solver reconstruction.** Shape changes, actuator changes,
   inertial changes, constraints, and tendons are not pushed into live UIPC
-  objects. Joint-DOF properties are the exception under `implicit_pd`:
-  `joint_target_ke` / `joint_target_kd` edits apply at runtime via
-  `notify_model_changed(JOINT_DOF_PROPERTIES)`; armature, friction, and limit
-  edits remain baked.
+  objects. Joint-DOF properties are the exception:
+  `notify_model_changed(JOINT_DOF_PROPERTIES)` re-applies `joint_armature`
+  (for joints that carried armature at build time) and, under `implicit_pd`,
+  `joint_target_ke` / `joint_target_kd` edits; friction and limit edits remain
+  baked.
 - **Newton-native contact features are separate.** SDF and hydroelastic contact
   pipelines are not fed into UIPC.
 

@@ -152,6 +152,9 @@ class SolverUIPC(SolverBase):
         - :attr:`~newton.Model.joint_armature` (revolute or prismatic) is
           applied as an independent implicit reflected-inertia potential via
           ``ExternalArticulationConstraint``, active for all target modes.
+          Runtime armature edits apply through
+          :meth:`notify_model_changed` with ``JOINT_DOF_PROPERTIES`` for
+          joints that carried armature at build time.
     """
 
     _backend_imported: bool = False
@@ -1523,16 +1526,19 @@ class SolverUIPC(SolverBase):
             - :attr:`~newton.SolverNotifyFlags.MODEL_PROPERTIES`: propagate
               ``model.gravity`` into the live UIPC ``scene.config()``; the
               new gravity takes effect on the next ``world.advance()``.
-            - :attr:`~newton.SolverNotifyFlags.JOINT_DOF_PROPERTIES`
-              (``implicit_pd`` only): re-derive the joint drive strengths
-              and aim-blend weights from the current ``joint_target_ke`` /
-              ``joint_target_kd``; libuipc re-reads the drive strength every
-              step, so new gains apply on the next ``world.advance()``.
-              Armature, friction, and limit changes remain baked and are
-              not applied.
+            - :attr:`~newton.SolverNotifyFlags.JOINT_DOF_PROPERTIES`:
+              re-apply ``model.joint_armature`` to the live reflected-inertia
+              constraints, and (``implicit_pd`` only) re-derive the joint
+              drive strengths and aim-blend weights from the current
+              ``joint_target_ke`` / ``joint_target_kd``; libuipc re-reads
+              both every step, so new values apply on the next
+              ``world.advance()``. Enabling armature on a joint that had
+              none at build time requires recreating the solver (the
+              constraint edge is baked). Friction and limit changes remain
+              baked and are not applied, as are gain edits without
+              ``implicit_pd``.
 
         Unsupported flags (aggregated into a single warning):
-            ``JOINT_DOF_PROPERTIES`` (unless ``implicit_pd``),
             ``BODY_INERTIAL_PROPERTIES``, ``SHAPE_PROPERTIES``,
             ``CONSTRAINT_PROPERTIES``, ``TENDON_PROPERTIES``,
             ``ACTUATOR_PROPERTIES``.
@@ -1567,23 +1573,24 @@ class SolverUIPC(SolverBase):
             | SolverNotifyFlags.TENDON_PROPERTIES
             | SolverNotifyFlags.ACTUATOR_PROPERTIES
         )
-        if not self._implicit_pd:
-            # Without implicit PD the drive strength is a solver parameter,
-            # not derived from joint_target_ke/kd -- gain edits cannot apply.
-            unsupported_mask |= SolverNotifyFlags.JOINT_DOF_PROPERTIES
         if flags & unsupported_mask:
             warnings.warn(
-                "SolverUIPC.notify_model_changed: joint-DOF (without implicit_pd), "
-                "body-inertial, shape, constraint, tendon, and actuator property "
-                "updates are not supported by the UIPC backend. Recreate the "
-                "solver if these properties changed.",
+                "SolverUIPC.notify_model_changed: body-inertial, shape, "
+                "constraint, tendon, and actuator property updates are not "
+                "supported by the UIPC backend. Recreate the solver if these "
+                "properties changed.",
                 stacklevel=2,
             )
 
-        # Implicit-PD gain resync: joint_target_ke/kd re-derive the drive
-        # strengths; libuipc re-reads the edge attribute every step.
-        if self._implicit_pd and flags & SolverNotifyFlags.JOINT_DOF_PROPERTIES:
-            self._articulation_builder.refresh_drive_strengths(self.model)
+        # Joint-DOF resync: armature rewrites the live constraint mass
+        # diagonal; joint_target_ke/kd re-derive the drive strengths under
+        # implicit_pd. libuipc re-reads both every step. Friction and limit
+        # changes remain baked (and gain edits without implicit_pd, where the
+        # drive strength is a solver parameter, not derived from the model).
+        if flags & SolverNotifyFlags.JOINT_DOF_PROPERTIES:
+            self._articulation_builder.refresh_armature(self.model)
+            if self._implicit_pd:
+                self._articulation_builder.refresh_drive_strengths(self.model)
 
         # Supported flags: dispatch each to its dedicated handler.
         # JOINT_PROPERTIES and BODY_PROPERTIES cooperate via

@@ -957,5 +957,96 @@ class TestUIPCRevoluteArmature(unittest.TestCase):
         self.assertAlmostEqual(i_axis_1, i_axis_2, delta=0.06 * i_axis_1)
 
 
+@unittest.skipUnless(_HAS_UIPC, "uipc is not installed")
+class TestUIPCArmatureRuntimeRefresh(unittest.TestCase):
+    """``SolverUIPC.notify_model_changed(JOINT_DOF_PROPERTIES)`` re-applies
+    ``model.joint_armature`` to the live ExternalArticulationConstraint mass
+    diagonal (``ArticulationBuilder.refresh_armature``); libuipc re-collects
+    that attribute every step, so the new reflected inertia takes effect on
+    the next ``world.advance()``. Joints with no armature at build time have
+    no constraint edge, so a runtime enable warns and stays inert.
+    """
+
+    _DT = 1.0 / 60.0
+
+    @classmethod
+    def _make_passive_slider(cls, armature: float | None):
+        """Passive (NONE-mode) vertical slider under gravity, as in
+        ``TestUIPCPrismaticArmature._run_passive_slider``, but returning the
+        live model/solver so the test can edit armature mid-run."""
+        builder = newton.ModelBuilder(up_axis=newton.Axis.Z, gravity=-9.81)
+        link = builder.add_link()
+        builder.add_shape_box(link, hx=0.05, hy=0.05, hz=0.05)
+        j = builder.add_joint_prismatic(parent=-1, child=link, axis=newton.Axis.Z, armature=armature)
+        builder.joint_target_mode[builder.joint_qd_start[j]] = int(newton.JointTargetMode.NONE)
+        model = builder.finalize()
+
+        solver = newton.solvers.SolverUIPC(
+            model,
+            workspace="/tmp/newton_uipc_runtime_armature_test",
+            dt=cls._DT,
+            logger_level=uipc.Logger.Error,
+        )
+        solver.sync_uipc_inertia_with_model()
+        solver.initialize()
+        return model, solver, link
+
+    @classmethod
+    def _step_window(cls, model, solver, frames: int):
+        state_0, state_1 = model.state(), model.state()
+        control = model.control()
+        traj = []
+        for _ in range(frames):
+            state_0.clear_forces()
+            solver.step(state_0, state_1, control, None, cls._DT)
+            state_0, state_1 = state_1, state_0
+            traj.append(float(state_0.joint_q.numpy()[0]))
+        return np.asarray(traj)
+
+    @classmethod
+    def _accel(cls, traj):
+        # constant acceleration: the t^2 coefficient of q(t) is -a/2; the
+        # quadratic fit absorbs the window's initial velocity and the
+        # solver transient (same trick as TestUIPCPrismaticArmature).
+        t = np.arange(len(traj)) * cls._DT
+        return -2.0 * float(np.polyfit(t, traj, 2)[0])
+
+    def test_notify_updates_free_fall_acceleration(self):
+        """Free fall at ``a = g*m/(m + m_a)`` must track a mid-run armature
+        edit: 2x body mass (a ~= g/3) rewritten to 0.5x (a ~= 2g/3) via
+        ``notify_model_changed(JOINT_DOF_PROPERTIES)``."""
+        g = 9.81
+        model, solver, link = self._make_passive_slider(armature=1.0)  # placeholder, overwritten below
+        m_body = float(model.body_mass.numpy()[link])
+
+        # First window: armature = 2x body mass, set through the same
+        # runtime path so the whole test exercises refresh_armature.
+        model.joint_armature.assign(np.array([2.0 * m_body], dtype=np.float32))
+        solver.notify_model_changed(newton.solvers.SolverNotifyFlags.JOINT_DOF_PROPERTIES)
+        first = self._step_window(model, solver, frames=40)
+        self.assertAlmostEqual(self._accel(first), g / 3.0, delta=0.05 * g / 3.0)
+
+        # Second window: rewrite to 0.5x body mass mid-run.
+        model.joint_armature.assign(np.array([0.5 * m_body], dtype=np.float32))
+        solver.notify_model_changed(newton.solvers.SolverNotifyFlags.JOINT_DOF_PROPERTIES)
+        second = self._step_window(model, solver, frames=40)
+        expected = g * m_body / (m_body + 0.5 * m_body)
+        self.assertAlmostEqual(self._accel(second), expected, delta=0.05 * expected)
+
+    def test_enabling_armature_at_runtime_warns_and_stays_inert(self):
+        """With no armature at build time there is no constraint edge:
+        enabling it at runtime must warn once and leave free fall at ``g``."""
+        g = 9.81
+        model, solver, link = self._make_passive_slider(armature=None)
+        m_body = float(model.body_mass.numpy()[link])
+
+        model.joint_armature.assign(np.array([2.0 * m_body], dtype=np.float32))
+        with self.assertWarnsRegex(UserWarning, "Recreate the solver"):
+            solver.notify_model_changed(newton.solvers.SolverNotifyFlags.JOINT_DOF_PROPERTIES)
+
+        traj = self._step_window(model, solver, frames=40)
+        self.assertAlmostEqual(self._accel(traj), g, delta=0.02 * g)
+
+
 if __name__ == "__main__":
     unittest.main()

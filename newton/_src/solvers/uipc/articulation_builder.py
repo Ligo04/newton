@@ -110,6 +110,18 @@ class ArticulationBuilder:
         #              owning Articulation. See :meth:`apply_mimic_targets`.
         self._mimic_constraints: list[tuple[Articulation, int, Articulation, int, float, float]] = []
 
+        # Live armature-constraint handles (populated by
+        # _build_external_articulation): one entry per created
+        # ExternalArticulationConstraint, ``(geo_slot, dof_indices)`` where
+        # ``dof_indices`` index ``model.joint_armature`` in the constraint's
+        # local joint order. Consumed by :meth:`refresh_armature`.
+        self._armature_slots: list[tuple[SimplicialComplexSlot, list[int]]] = []
+        # Revolute/prismatic dofs skipped at build time (armature <= 0); they
+        # have no constraint edge, so a runtime armature enable needs a
+        # solver rebuild. refresh_armature warns once when it detects this.
+        self._armature_skipped_dofs: list[int] = []
+        self._warned_baked_armature = False
+
     # ------------------------------------------------------------------
     # Build
     # ------------------------------------------------------------------
@@ -1293,17 +1305,21 @@ class ArticulationBuilder:
         joint_geos: list[SimplicialComplexSlot] = []
         edge_indices: list[int] = []
         masses: list[float] = []
+        dof_indices: list[int] = []
         for j in art.active_joint_indices:
             if int(type_np[j]) not in (int(JointType.REVOLUTE), int(JointType.PRISMATIC)):
                 continue
             if j not in art.joint_geo_slots:
                 continue
-            a = float(armature_np[int(qd_start_np[j])])
+            dof = int(qd_start_np[j])
+            a = float(armature_np[dof])
             if a <= 0.0:
+                self._armature_skipped_dofs.append(dof)
                 continue
             joint_geos.append(art.joint_geo_slots[j])
             edge_indices.append(art._joint_edge_idx[j])
             masses.append(a)
+            dof_indices.append(dof)
 
         if not joint_geos:
             return
@@ -1319,7 +1335,10 @@ class ArticulationBuilder:
         _view_attr(articulation_geo["joint_joint"].find("mass"))[:] = mass_mat.flatten()
 
         obj: Object = self._scene.objects().create(f"external_articulation_{art_idx}")
-        obj.geometries().create(articulation_geo)
+        geo_slot: SimplicialComplexSlot = obj.geometries().create(articulation_geo)[0]
+        # Keep the live slot so refresh_armature can rewrite the mass
+        # diagonal at runtime (libuipc re-collects it every step).
+        self._armature_slots.append((geo_slot, dof_indices))
 
         # Inertial extrapolation: predicted increment = previous step's actual
         # increment (Δθ̃ = previous ``delta_theta``).
@@ -1373,6 +1392,43 @@ class ArticulationBuilder:
                     art.aim_blend_weights[local] = damp_blend
                 else:
                     art.aim_blend_weights.pop(local, None)
+
+    def refresh_armature(self, model: Any) -> None:
+        """Re-read ``model.joint_armature`` into the live armature constraints.
+
+        Handler for :attr:`~newton.SolverNotifyFlags.JOINT_DOF_PROPERTIES`:
+        rewrites the mass diagonal of each ExternalArticulationConstraint
+        geometry (see :meth:`_build_external_articulation`) from the current
+        ``model.joint_armature``. libuipc re-collects the ``joint_joint``
+        ``mass`` attribute every step, so new values take effect on the next
+        ``world.advance()``. Negative armature is clamped to zero.
+
+        Joints whose armature was zero at build time have no constraint edge
+        and cannot be enabled at runtime — recreate the solver instead. A
+        one-time warning is emitted when such a joint turns positive.
+        """
+        if model.joint_armature is None:
+            return
+        armature_np = model.joint_armature.numpy()
+        for geo_slot, dof_indices in self._armature_slots:
+            geo = geo_slot.geometry()
+            attr = geo["joint_joint"].find("mass")
+            if attr is None:
+                continue
+            mass_view = _view_attr(attr)
+            n = len(dof_indices)
+            for local, dof in enumerate(dof_indices):
+                mass_view[local * n + local] = max(float(armature_np[dof]), 0.0)
+        if not self._warned_baked_armature and any(
+            float(armature_np[dof]) > 0.0 for dof in self._armature_skipped_dofs
+        ):
+            self._warned_baked_armature = True
+            warnings.warn(
+                "refresh_armature: joint_armature was enabled on a joint that had none at "
+                "build time; the armature constraint edge is baked at initialization, so this "
+                "change cannot apply. Recreate the solver instead.",
+                stacklevel=2,
+            )
 
     @staticmethod
     def _joint_body_mass(body_idx: int, model: Any) -> float:
