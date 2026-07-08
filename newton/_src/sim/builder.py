@@ -3772,13 +3772,16 @@ class ModelBuilder:
 
         # Merge actuator entries from the sub-builder with offset DOF indices
         for entry_key, sub_entry in builder.actuator_entries.items():
+            existing = entry_key in self.actuator_entries
             entry = self.actuator_entries.setdefault(
                 entry_key,
                 ModelBuilder.ActuatorEntry(
                     controller_class=sub_entry.controller_class,
                     clamping_classes=sub_entry.clamping_classes,
                     clamping_shared_kwargs=sub_entry.clamping_shared_kwargs,
-                    controller_shared_kwargs=sub_entry.controller_shared_kwargs,
+                    # Copy: the merged entry accumulates shared state (num_worlds
+                    # below) and must not alias the sub-builder's dict.
+                    controller_shared_kwargs=dict(sub_entry.controller_shared_kwargs),
                     indices=[],
                     pos_indices=[],
                     controller_args=[],
@@ -3786,6 +3789,11 @@ class ModelBuilder:
                     clamping_args=[],
                 ),
             )
+            # World-partitioned controllers (e.g. ControllerStablePD) treat each
+            # merged sub-builder as additional block-diagonal worlds: replicate(N)
+            # must yield num_worlds = N * authored value, not the authored value.
+            if existing and "num_worlds" in sub_entry.controller_shared_kwargs:
+                entry.controller_shared_kwargs["num_worlds"] += sub_entry.controller_shared_kwargs["num_worlds"]
             for idx in sub_entry.indices:
                 entry.indices.append(idx + start_joint_dof_idx)
             for idx in sub_entry.pos_indices:
