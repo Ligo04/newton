@@ -1006,7 +1006,7 @@ add_example_test(
 add_example_test(
     TestMultiphysicsExamples,
     name="multiphysics.example_mujoco_vbd_admm_solver",
-    devices=cuda_test_devices,
+    devices=test_devices,
     test_options={"num-frames": 30},
     use_viewer=True,
 )
@@ -1021,7 +1021,7 @@ add_example_test(
     TestMultiphysicsExamples,
     name="multiphysics.example_kamino_mujoco_admm_solver",
     devices=["cpu"],
-    test_options={"num-frames": 30, "world-count": 4, "graph-capture": False},
+    test_options={"num-frames": 30, "world-count": 4},
     use_viewer=True,
 )
 add_example_test(
