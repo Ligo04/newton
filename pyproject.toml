@@ -68,7 +68,7 @@ importers = [
     "usd-core>=25.5,<26.5 ; platform_machine != 'aarch64' and python_version < '3.14'",
     "usd-exchange>=2.2.0 ; platform_machine == 'aarch64' and python_version < '3.13'",
 
-    # Newton USD Schemas (fork defining NewtonStablePDControlAPI, until it lands upstream)
+    # Newton USD Schemas (fork adding NewtonStablePDControlAPI on top of upstream 0.4.0)
     "newton-usd-schemas @ git+https://github.com/Ligo04/newton-usd-schemas.git@main",
 ]
 

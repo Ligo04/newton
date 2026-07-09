@@ -4076,8 +4076,8 @@ dev = [{ name = "asv", specifier = ">=0.6.4" }]
 
 [[package]]
 name = "newton-usd-schemas"
-version = "0.3.1"
-source = { git = "https://github.com/Ligo04/newton-usd-schemas.git?rev=main#c22dfa403f3afc7e45c1418f109ce879cc1a31e9" }
+version = "0.4.0"
+source = { git = "https://github.com/Ligo04/newton-usd-schemas.git?rev=main#a7967559fbd88617de7ae76a364e026d607ae96e" }
 
 [[package]]
 name = "notebook-shim"
