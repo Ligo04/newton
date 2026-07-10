@@ -1,6 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
+# Fork pins warp-lang 1.14.0; importing this back-fills the Warp 1.15 determinism
+# API that upstream solvers reference. Must precede any solver module import.
+from ._src import warp_compat as _warp_compat  # noqa: F401
+
 # ==================================================================================
 # core
 # ==================================================================================
