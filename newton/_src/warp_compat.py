@@ -19,6 +19,15 @@ import enum
 import warp as wp
 
 
+def is_shimmed() -> bool:
+    """True when the determinism API is our back-filled stand-in (Warp < 1.15).
+
+    The running Warp then has no real run-to-run determinism; tests asserting
+    bit-identical rollouts skip on this.
+    """
+    return getattr(getattr(wp, "DeterministicMode", None), "__module__", None) == __name__
+
+
 def apply() -> None:
     """Install Warp determinism stand-ins when the running Warp lacks them."""
     if hasattr(wp, "DeterministicMode"):
