@@ -200,8 +200,10 @@ class Example:
         controller_cls = ControllerStablePD if self.stable_pd else ControllerPD
         for dof_idx in range(len(self.kp)):
             # num_worlds drives the per-world block-diagonal Cholesky in
-            # ControllerStablePD; ControllerPD doesn't accept it.
-            extra_kwargs = {"num_worlds": self.world_count} if self.stable_pd else {}
+            # ControllerStablePD; ControllerPD doesn't accept it. Authored as 1
+            # because it counts the worlds *this* builder contributes —
+            # ``replicate`` sums it across the merged copies to world_count.
+            extra_kwargs = {"num_worlds": 1} if self.stable_pd else {}
             ur10.add_actuator(
                 controller_cls,
                 index=dof_idx,
@@ -550,7 +552,7 @@ class Example:
                 "M = newton.eval_mass_matrix and bias_forces = Jacobian-T "
                 "gravity plus finite-difference Coriolis every substep. "
                 "Mutually exclusive with --gravity-comp (bias_forces "
-                "already contains gravity). Requires --world-count 1."
+                "already contains gravity)."
             ),
         )
         parser.add_argument(

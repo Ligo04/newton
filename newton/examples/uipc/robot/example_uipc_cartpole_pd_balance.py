@@ -171,7 +171,9 @@ class Example:
                 kp=self.k_lock,
                 kd=self.k_lock_d,
                 clamping=[(ClampingMaxEffort, {"max_effort": self.max_torque_lock})],
-                num_worlds=self.world_count,
+                # 1 = worlds contributed by *this* builder; ``replicate``
+                # sums it across the merged copies to world_count.
+                num_worlds=1,
             )
 
         if self.world_count > 1:
