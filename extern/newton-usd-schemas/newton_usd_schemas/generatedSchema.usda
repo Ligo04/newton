@@ -1,0 +1,1322 @@
+#usda 1.0
+(
+)
+
+class NewtonSceneAPI "NewtonSceneAPI" (
+    doc = "`NewtonSceneAPI` applies on top of a `PhysicsScene` prim, providing attributes to control a Newton solver."
+)
+{
+    uniform int newton:maxSolverIterations = -1 (
+        doc = """Maximum number of iterations of the physics solver.
+
+        If set to -1, each solver is free to choose an appropriate default.
+
+        Range: [-1, inf)
+        Units: dimensionless"""
+        limits = {
+            dictionary hard = {
+                int minimum = -1
+            }
+        }
+    )
+
+    uniform int newton:timeStepsPerSecond = 1000 (
+        doc = """Simulation time step frequency in Hz.
+
+        Range: [1, inf)
+        Units: hertz"""
+        limits = {
+            dictionary hard = {
+                int minimum = 1
+            }
+        }
+    )
+
+    bool newton:gravityEnabled = true (
+        doc = """Whether gravity should be enabled or disabled in the simulation.
+
+        This is intentionally separated from the gravity direction and magnitude
+        to allow temporary disabling of gravity without modifying & caching values.
+        """
+    )
+}
+
+class "NewtonXpbdSceneAPI" (
+    apiSchemas = ["NewtonSceneAPI"]
+    doc = "Provides Newton's XPBD (eXtended Position-Based Dynamics) solver configuration."
+)
+{
+    uniform float newton:xpbd:softBodyRelaxation = 0.9 (
+        doc = """Relaxation multiplier for tetrahedral FEM constraint corrections.
+
+        Scales the computed position correction for tetrahedral soft body constraints.
+        Lower values improve stability but require more iterations for convergence.
+
+        Range: [0, 1]
+        Units: dimensionless"""
+        limits = {
+            dictionary hard = {
+                float minimum = 0
+                float maximum = 1
+            }
+        }
+    )
+
+    uniform float newton:xpbd:softContactRelaxation = 0.9 (
+        doc = """Relaxation multiplier for soft contact constraint corrections.
+
+        Scales the computed position correction for particle-particle and particle-shape
+        contacts. Lower values improve stability but require more iterations for convergence.
+
+        Range: [0, 1]
+        Units: dimensionless"""
+        limits = {
+            dictionary hard = {
+                float minimum = 0
+                float maximum = 1
+            }
+        }
+    )
+
+    uniform float newton:xpbd:jointLinearRelaxation = 0.7 (
+        doc = """Relaxation multiplier for joint linear constraint corrections.
+
+        Scales the computed position correction for joint linear (positional) constraints.
+        Lower values improve stability for complex kinematic chains but slow convergence.
+
+        Range: [0, 1]
+        Units: dimensionless"""
+        limits = {
+            dictionary hard = {
+                float minimum = 0
+                float maximum = 1
+            }
+        }
+    )
+
+    uniform float newton:xpbd:jointAngularRelaxation = 0.4 (
+        doc = """Relaxation multiplier for joint angular constraint corrections.
+
+        Scales the computed rotation correction for joint angular (rotational) constraints.
+        Lower values improve stability but slow convergence.
+
+        Range: [0, 1]
+        Units: dimensionless"""
+        limits = {
+            dictionary hard = {
+                float minimum = 0
+                float maximum = 1
+            }
+        }
+    )
+
+    uniform float newton:xpbd:jointLinearCompliance = 0.0 (
+        doc = """Compliance for joint linear constraints.
+
+        Inverse stiffness for joint linear constraints. Added to denominator in constraint
+        solver. Zero creates rigid constraints. Higher values create softer, springy joints.
+
+        Range: [0, inf)
+        Units: second * second / mass"""
+        limits = {
+            dictionary hard = {
+                float minimum = 0
+            }
+        }
+    )
+
+    uniform float newton:xpbd:jointAngularCompliance = 0.0 (
+        doc = """Compliance for joint angular constraints.
+
+        Inverse stiffness for joint angular constraints. Added to denominator in constraint
+        solver. Zero creates rigid constraints. Higher values create softer, springy joints.
+
+        Range: [0, inf)
+        Units: degrees * second * second / (mass * distance * distance)"""
+        limits = {
+            dictionary hard = {
+                float minimum = 0
+            }
+        }
+    )
+
+    uniform float newton:xpbd:rigidContactRelaxation = 0.8 (
+        doc = """Relaxation multiplier for rigid body contact constraint corrections.
+
+        Scales the computed correction for rigid body contacts including normal, friction,
+        torsional friction, and rolling friction. Lower values improve stability for
+        stacking but require more iterations.
+
+        Range: [0, 1]
+        Units: dimensionless"""
+        limits = {
+            dictionary hard = {
+                float minimum = 0
+                float maximum = 1
+            }
+        }
+    )
+
+    uniform bool newton:xpbd:rigidContactConWeighting = true (
+        doc = """Enable contact constraint weighting for rigid bodies.
+
+        When enabled, tracks the number of contacts per body and uses this information
+        to distribute contact corrections more evenly across multiple simultaneous contacts."""
+    )
+
+    uniform float newton:xpbd:angularDamping = 0.0 (
+        doc = """Angular velocity damping coefficient.
+
+        Applied during rigid body integration as velocity *= (1 - damping * dt). Higher
+        values cause rotational motion to decay faster.
+
+        Range: [0, inf)
+        Units: 1 / seconds"""
+        limits = {
+            dictionary hard = {
+                float minimum = 0
+            }
+        }
+    )
+
+    uniform bool newton:xpbd:restitutionEnabled = false (
+        doc = """Whether restitution is enabled for contacts.
+
+        When enabled, applies velocity corrections after constraint solving to simulate
+        elastic collisions. Restitution coefficients are read from material properties."""
+    )
+}
+
+class "NewtonKaminoSceneAPI" (
+    apiSchemas = ["NewtonSceneAPI"]
+    doc = "Provides Newton's Kamino solver configuration."
+)
+{
+    uniform float newton:kamino:padmm:primalTolerance = 1e-6 (
+        doc = """The tolerance on the total PADMM primal residual `r_primal`.
+
+        The primal residual `r_primal` measures the convergence of the PADMM primal variables,
+        w.r.t the consensus between the primal and slack variables. This reflects how well the
+        solution satisfies the inequality constraints (joint-limits, contacts). Lower values
+        require more iterations for higher accuracy.
+
+        Range: [1e-10, inf)
+        Units: dimensionless"""
+        limits = {
+            dictionary hard = {
+                float minimum = 1e-10
+            }
+        }
+
+    )
+
+    uniform float newton:kamino:padmm:dualTolerance = 1e-6 (
+        doc = """The tolerance on the total PADMM dual residual `r_dual`.
+
+        The dual residual `r_dual` measures the convergence of the PADMM dual variables,
+        and reflects the total violation over the set of constraints (joints, joint-limits,
+        contacts). Lower values require more iterations for higher accuracy.
+
+        Range: [1e-10, inf)
+        Units: dimensionless"""
+        limits = {
+            dictionary hard = {
+                float minimum = 1e-10
+            }
+        }
+    )
+
+    uniform float newton:kamino:padmm:complementarityTolerance = 1e-6 (
+        doc = """The tolerance on the total PADMM complementarity residual `r_compl`.
+
+        The complementarity residual `r_compl` measures how well the solution satisfies the
+        complementarity conditions associated with inequality constraints (joint-limits,
+        contacts). Lower values require more iterations for higher accuracy.
+
+        Range: [1e-10, inf)
+        Units: dimensionless"""
+        limits = {
+            dictionary hard = {
+                float minimum = 1e-10
+            }
+        }
+    )
+
+    uniform token newton:kamino:padmm:warmstarting = "containers" (
+        allowedTokens = ["none", "internal", "containers"]
+        doc = """The warmstarting mode used for the PADMM constraint solver.
+
+        Options:
+        - "none": No warmstarting is performed.
+        - "internal": Warmstart using the PADMM internal solver state from the previous time step.
+        - "containers": Warmstart using cached per-constraint impulses and velocities from the previous time step.
+
+        Default: "containers"
+        """
+    )
+
+    uniform bool newton:kamino:padmm:useAcceleration = true (
+        doc = """Whether to use Nesterov acceleration in the PADMM constraint solver.
+
+        When enabled, Nesterov acceleration is applied to the PADMM
+        iterations to potentially improve the rate of convergence.
+        """
+    )
+
+    uniform bool newton:kamino:constraints:usePreconditioning = true (
+        doc = """Whether to use problem preconditioning in the constraint forward dynamics.
+
+        When enabled, the forward dynamics problem is scaled to improve numerical conditioning, which
+        can lead to solver robustness for very ill-conditioned systems. It may however slow down
+        convergence for well-conditioned systems.
+        """
+    )
+
+    uniform float newton:kamino:constraints:alpha = 0.01 (
+        doc = """Global default Baumgarte stabilization parameter for bilateral joint constraints.
+
+        This parameter controls the amount of configuration-level error correction applied to bilateral
+        joint constraints (e.g. hinge, ball-and-socket). Higher values increase stiffness and reduce
+        positional drift, but may lead to instability if set too high.
+
+        Range: [0.0, 1.0]
+        Units: dimensionless"""
+        limits = {
+            dictionary hard = {
+                float minimum = 0
+                float maximum = 1
+            }
+        }
+    )
+
+    uniform float newton:kamino:constraints:beta = 0.01 (
+        doc = """Global default Baumgarte stabilization parameter for unilateral joint-limit constraints.
+
+        This parameter controls the amount of configuration-level error correction applied to unilateral
+        joint-limit constraints. Higher values increase stiffness and reduce positional drift, but may
+        lead to instability if set too high.
+
+        Range: [0.0, 1.0]
+        Units: dimensionless"""
+        limits = {
+            dictionary hard = {
+                float minimum = 0
+                float maximum = 1
+            }
+        }
+    )
+
+    uniform float newton:kamino:constraints:gamma = 0.01 (
+        doc = """Global default Baumgarte stabilization parameter for unilateral contact constraints.
+
+        This parameter controls the amount of configuration-level error correction applied to unilateral
+        contact constraints. Higher values increase stiffness and reduce positional drift, but may
+        lead to instability if set too high.
+
+        Range: [0.0, 1.0]
+        Units: dimensionless"""
+        limits = {
+            dictionary hard = {
+                float minimum = 0
+                float maximum = 1
+            }
+        }
+    )
+
+    uniform token newton:kamino:jointCorrection = "twopi" (
+        allowedTokens = ["none", "twopi", "continuous"]
+        doc = """The rotation roll-over correction mode to use for rotational joint DoFs.
+
+        Options:
+        - "none": No joint coordinate correction is applied. Rotational joint coordinates are computed to lie within ``[-pi, pi]``.
+        - "twopi": Rotational joint coordinates are computed to always lie within ``[-2*pi, 2*pi]``.
+        - "continuous": Rotational joint coordinates are continuously accumulated and thus unbounded.
+          This means that joint coordinates can increase/decrease indefinitely over time,
+          but are limited to numerical precision limits (i.e. ``[-FLOAT32_MAX, FLOAT32_MAX]``).
+
+        Default: "twopi"
+        """
+    )
+}
+
+class NewtonArticulationRootAPI "NewtonArticulationRootAPI" (
+    apiSchemas = ["PhysicsArticulationRootAPI"]
+    doc = """NewtonArticulationRootAPI extends the `PhysicsArticulationRootAPI` with additional attributes for Newton.
+
+    By applying this schema, the prim also inherits the `PhysicsArticulationRootAPI` schema."""
+)
+{
+    bool newton:selfCollisionEnabled = true (
+        doc = """Whether self collisions should be enabled or disabled for the entire articulation.
+
+        When disabled, this is equivalent to applying `PhysicsFilteredPairsAPI` relationships between all bodies in the articulation."""
+    )
+
+    uniform bool newton:jointsAddMobility = false (
+        doc = """Whether joints within this articulation add mobility or constrain it.
+
+        When false (default), joints constrain degrees of freedom between
+        otherwise-free bodies.
+
+        When true, multiple single-DOF joints connecting the same body pair
+        (stacked joints) add degrees of freedom to bodies that would
+        otherwise be rigidly attached. Engines that do not support the
+        stacked representation may merge them into a compound joint or
+        emit a warning. DOF ordering within stacked joints is determined
+        by traversal order."""
+    )
+}
+
+class NewtonJointAPI "NewtonJointAPI" (
+    doc = """`NewtonJointAPI` applies on top of a `PhysicsJoint`, providing
+    joint configuration for solver behavior, passive dynamics, and limit spring response.
+
+    All scalar attributes broadcast uniformly to every DOF of the joint.
+    Angular attributes use degrees."""
+)
+{
+    float newton:armature = 0 (
+        doc = """Additional diagonal inertia added to each degree of freedom,
+        representing reflected inertia from co-rotating elements (gears,
+        rotors, transmissions) and/or solver regularization.
+
+        In reduced-coordinate solvers this augments the joint-space mass
+        matrix diagonal. In maximal-coordinate solvers it regularizes the
+        constraint system along the joint's DOF directions.
+
+        The value is broadcast to all DOFs of the joint.
+
+        Range: [0, inf)
+        Units: mass * distance * distance (angular DOFs) or mass (linear DOFs)."""
+        limits = {
+            dictionary hard = {
+                float minimum = 0
+            }
+        }
+    )
+
+    float newton:damping = 0 (
+        doc = """Passive velocity-proportional damping applied to each DOF.
+
+        Produces a resistive effort proportional to joint velocity:
+        `effort = -damping * velocity`. This damping is always active,
+        regardless of whether limits are violated or drive targets are set.
+
+        The value is broadcast to all DOFs of the joint.
+
+        Range: [0, inf)
+        Units: effort * seconds / degrees (angular DOFs) or effort * seconds / distance (linear DOFs)."""
+        limits = {
+            dictionary hard = {
+                float minimum = 0
+            }
+        }
+    )
+
+    float newton:friction = 0 (
+        doc = """Dry (Coulomb) friction effort opposing joint motion.
+
+        A constant resistive effort that opposes the direction of motion,
+        independent of velocity magnitude. Solvers that implement this as
+        a constraint may also resist motion at zero velocity (static
+        friction up to the specified magnitude).
+
+        The value is broadcast to all DOFs of the joint.
+
+        Range: [0, inf)
+        Units: effort."""
+        limits = {
+            dictionary hard = {
+                float minimum = 0
+            }
+        }
+    )
+
+    float newton:velocityLimit = inf (
+        doc = """Maximum allowable DOF velocity.
+
+        The solver clamps each DOF's velocity to the range
+        `[-velocityLimit, +velocityLimit]` at every time step.
+        A value of `inf` means no velocity clamping is applied.
+
+        The value is broadcast to all DOFs of the joint.
+
+        Range: (0, inf]
+        Units: degrees / seconds (angular DOFs) or distance / seconds (linear DOFs)."""
+        limits = {
+            dictionary hard = {
+                float minimum = 0
+            }
+        }
+    )
+
+    float newton:limitStiffness = -inf (
+        doc = """Stiffness of the joint limit spring.
+
+        When a DOF's position exceeds the range defined by the joint limits,
+        a restoring effort is applied: `effort = limitStiffness * penetration`,
+        where penetration is the signed distance beyond the limit boundary.
+
+        A value of `inf` is interpreted as a hard limit: solvers that support
+        both soft and hard limits enforce the limit as a rigid positional
+        constraint (no spring). Note: some solvers may ignore this attribute
+        and always enforce hard positional constraints.
+
+        A value of `-inf` means the engine's own default stiffness is used.
+
+        The value is broadcast to all DOFs of the joint.
+
+        Range: [0, inf] when authored (sentinel `-inf` defers to engine default).
+        Units: effort / degrees (angular DOFs) or effort / distance (linear DOFs)."""
+    )
+
+    float newton:limitDamping = -inf (
+        doc = """Damping of the joint limit spring.
+
+        When a DOF's position exceeds the range defined by the joint limits,
+        a velocity-dependent dissipative effort is applied in any direction:
+        `effort = -limitDamping * velocity`. This damps all joint velocity
+        while the limit is exceeded, not only velocity in the penetrating
+        direction.
+
+        Ignored when `limitStiffness` is `inf` (hard limit): a hard limit has
+        no spring to damp. Note: some solvers may ignore this attribute and
+        always enforce hard positional constraints.
+
+        A value of `-inf` means the engine's own default damping is used.
+
+        The value is broadcast to all DOFs of the joint.
+
+        Range: [0, inf) when authored (sentinel `-inf` defers to engine default).
+        Units: effort * seconds / degrees (angular DOFs) or effort * seconds / distance (linear DOFs)."""
+    )
+}
+
+class NewtonMassAPI "NewtonMassAPI" (
+    apiSchemas = ["PhysicsMassAPI"]
+    doc = """`NewtonMassAPI` applies on top of an `Xformable`, providing extra mass attributes for Newton.
+
+    By applying this schema, the prim also inherits the `PhysicsMassAPI` schema.
+
+    `newton:inertia` is a compact symmetric inertia tensor that overrides
+    `physics:diagonalInertia` and `physics:principalAxes` when authored.
+
+    `newton:massModel` and `newton:shellThickness` control how density is
+    integrated into mass and inertia during implicit computation only.
+    Explicit overrides via `physics:mass` or `newton:inertia` take
+    precedence over implicit computation from shape geometry."""
+)
+{
+    double[] newton:inertia = [] (
+        arraySizeConstraint = 6
+        doc = """Symmetric 3x3 inertia tensor as 6 elements
+        `[Ixx, Iyy, Izz, Ixy, Ixz, Iyz]` in the body's local frame.
+
+        When authored on a body prim, overrides `physics:diagonalInertia` and
+        `physics:principalAxes`. An empty array (default) means no opinion —
+        standard `UsdPhysics` mass resolution applies.
+
+        Avoids the eigenvalue decomposition required by the
+        `physics:diagonalInertia` + `physics:principalAxes` representation.
+        Double precision prevents lossy conversion from source data that
+        already represents the full tensor.
+
+        Units: mass * distance * distance"""
+    )
+
+    uniform token newton:massModel = "solid" (
+        allowedTokens = ["solid", "shell"]
+        doc = """Controls how the shape's geometry contributes to implicit
+        mass and inertia computation.
+
+        Only meaningful on collision shape prims (`Gprim`). Has no effect
+        when applied to an `Xform` body prim.
+
+        Only affects implicit computation from shape geometry. When
+        `physics:mass` or `newton:inertia` is authored, those explicit
+        values take precedence regardless of this setting.
+
+        "solid": Mass and inertia are computed assuming uniform density
+        throughout the shape's volume. Density is resolved from
+        `physics:density` on the prim or a bound `PhysicsMaterialAPI`.
+
+        "shell": Mass and inertia are computed assuming density is
+        concentrated in a thin shell at the shape's surface. Density
+        is resolved the same way as "solid" (`physics:density` on the
+        prim or a bound `PhysicsMaterialAPI`). Wall thickness is
+        controlled by `newton:shellThickness`."""
+    )
+
+    float newton:shellThickness = -inf (
+        doc = """Wall thickness for shell mass and inertia computation,
+        measured inward from the outer surface of the shape.
+
+        Only meaningful on collision shape prims (`Gprim`). Has no effect
+        when applied to an `Xform` body prim.
+
+        Only used when `newton:massModel` is "shell"; ignored for "solid".
+
+        If set to `-inf`, the active solver chooses an appropriate thickness.
+        This is a per-solver decision: solvers may fall back to
+        `newton:contactMargin`, use zero-thickness mathematical shell inertia,
+        or apply their own default.
+
+        Range: (0, inf)
+        Units: distance"""
+        limits = {
+            dictionary hard = {
+                float minimum = 0
+            }
+        }
+    )
+}
+
+class NewtonCollisionAPI "NewtonCollisionAPI" (
+    apiSchemas = ["PhysicsCollisionAPI"]
+    doc = """`NewtonCollisionAPI` applies on top of a `Gprim`, providing extra collision attributes for Newton.
+
+    By applying this schema, the prim also inherits the `PhysicsCollisionAPI` schema."""
+)
+{
+    float newton:contactMargin = 0 (
+        doc = """Outward offset/inflation of the shape's surface for collision detection.
+
+        Extends/inflates the effective collision surface outward by this amount. When two shapes collide,
+        their contact margins are summed (`margin_a + margin_b`) to determine the total separation/penetration.
+
+        `newton:contactMargin` is essential for thin shells and cloth to improve simulation stability and reduce
+        self-intersections.
+
+        Range: [0, inf)
+        Units: distance"""
+        limits = {
+            dictionary soft = {
+                float minimum = 0
+            }
+        }
+    )
+    float newton:contactGap = -inf (
+        doc = """Additional contact detection gap.
+
+        AABBs are expanded by this value and potential contact points get added into the solver
+        once their separation is smaller than the contact gap sum (`margin_a + margin_b + gap_a + gap_b`).
+
+        Increasing `newton:contactGap` helps avoid tunneling by detecting contacts earlier.
+
+        If `newton:contactGap` is set to `-inf`, the engine's default should be used instead.
+
+        Range: [0, inf)
+        Units: distance"""
+        limits = {
+            dictionary hard = {
+                float minimum = 0
+            }
+        }
+    )
+}
+
+class NewtonMeshCollisionAPI "NewtonMeshCollisionAPI" (
+    apiSchemas = ["NewtonCollisionAPI", "PhysicsMeshCollisionAPI"]
+    doc = """`NewtonMeshCollisionAPI` applies on top of a `Mesh`, providing extra mesh collision attributes for Newton.
+
+    By applying this schema, the prim also inherits the `PhysicsCollisionAPI`, `NewtonCollisionAPI` and `PhysicsMeshCollisionAPI` schemas."""
+)
+{
+    uniform int newton:maxHullVertices = -1 (
+        doc = """Maximum number of vertices in the resulting convex hull approximation.
+
+        This value is only relevant when `physics:approximation = "convexHull"`.
+
+        If `newton:maxHullVertices` is set to -1, the hull computation should use as many vertices as necessary to produce a perfect convex hull.
+
+        Range: [-1, inf)
+        Units: dimensionless"""
+        limits = {
+            dictionary hard = {
+                int minimum = -1
+            }
+        }
+    )
+}
+
+class NewtonSDFCollisionAPI "NewtonSDFCollisionAPI" (
+    apiSchemas = ["NewtonCollisionAPI"]
+    doc = """Configures SDF-based collision (and optional hydroelastic contact).
+
+    Applying this schema enables signed distance field (SDF) generation for
+    the collision shape. The SDF should be built from the base `Gprim` surface, using the configured resolution and narrow band parameters.
+
+    Hydroelastic contact is opt-in via `newton:hydroelasticEnabled`, and uses
+    the same SDF representation.
+
+    By applying this schema, the prim also inherits the `NewtonCollisionAPI`
+    and `PhysicsCollisionAPI` schemas."""
+)
+{
+    uniform int newton:sdfMaxResolution = 64 (
+        doc = """Maximum dimension for the sparse SDF grid.
+
+        Must be divisible by 8. If `newton:sdfTargetVoxelSize` is also authored,
+        target voxel size takes precedence.
+
+        Range: [8, inf)
+        Units: dimensionless"""
+        limits = {
+            dictionary hard = {
+                int minimum = 8
+            }
+        }
+    )
+    uniform float newton:sdfTargetVoxelSize = -inf (
+        doc = """Target voxel size for the sparse SDF grid.
+
+        When authored with a positive value, takes precedence over
+        `newton:sdfMaxResolution`.
+
+        If `newton:sdfTargetVoxelSize` is set to `-inf`, `newton:sdfMaxResolution`
+        is used instead.
+
+        Range: (0, inf)
+        Units: distance"""
+        limits = {
+            dictionary hard = {
+                float minimum = 0
+            }
+        }
+    )
+    uniform float newton:sdfNarrowBandInner = -0.1 (
+        doc = """Inner (negative) narrow band distance for SDF computation.
+
+        Range: (-inf, 0]
+        Units: distance"""
+        limits = {
+            dictionary soft = {
+                float maximum = 0
+            }
+        }
+    )
+    uniform float newton:sdfNarrowBandOuter = 0.1 (
+        doc = """Outer (positive) narrow band distance for SDF computation.
+
+        Range: [0, inf)
+        Units: distance"""
+        limits = {
+            dictionary soft = {
+                float minimum = 0
+            }
+        }
+    )
+    uniform token newton:sdfTextureFormat = "uint16" (
+        allowedTokens = ["uint8", "uint16", "float32"]
+        doc = """Subgrid texture storage format for the SDF.
+
+        `"uint16"` (default) stores subgrid voxels as 16-bit normalized textures
+        (half the memory of `"float32"`). `"float32"` stores full-precision values.
+        `"uint8"` uses 8-bit textures for minimum memory."""
+    )
+    uniform float newton:sdfPadding = -inf (
+        doc = """SDF AABB padding.
+
+        Enlarges the SDF's bounding box beyond the mesh AABB by this distance,
+        extending the spatial domain in which distance queries are valid.
+
+        If `newton:sdfPadding` is set to `-inf`, the engine's default should be used instead.
+
+        Range: (0, inf)
+        Units: distance"""
+        limits = {
+            dictionary hard = {
+                float minimum = 0
+            }
+        }
+    )
+    bool newton:hydroelasticEnabled = false (
+        doc = """Toggles hydroelastic contacts for this shape.
+
+        When true, the shape participates in hydroelastic contact generation;
+        both shapes in a colliding pair must have this attribute true for
+        hydroelastic contacts to be generated."""
+    )
+    float newton:hydroelasticStiffness = 1e10 (
+        doc = """Hydroelastic contact stiffness coefficient.
+
+        Contact force is computed as: `force = k_eff * area * depth`, where
+        `k_eff` is the effective stiffness of the two shapes in series
+        (harmonic mean). Higher values produce stiffer contacts. Only
+        consulted when `newton:hydroelasticEnabled` is true.
+
+        Range: (0, inf)
+        Units: force / (distance * distance * distance)"""
+        limits = {
+            dictionary hard = {
+                float minimum = 0
+            }
+        }
+    )
+}
+
+class NewtonSiteAPI "NewtonSiteAPI" (
+    doc = """`NewtonSiteAPI` applies on top of a `Gprim`, marking it as a non-colliding, massless
+    reference frame used for sensing, attachment, or coordinate queries.
+
+    Mutually exclusive with `NewtonCollisionAPI`. A site cannot also be a collider — tools that
+    enumerate colliders via `PhysicsCollisionAPI` should exclude sites & vice versa."""
+)
+{
+}
+
+class NewtonMaterialAPI "NewtonMaterialAPI" (
+    apiSchemas = ["PhysicsMaterialAPI"]
+    doc = """`NewtonMaterialAPI` applies on top of a `Material`, providing extra physical material attributes for Newton.
+
+    By applying this schema, the prim also inherits the `PhysicsMaterialAPI` schema."""
+)
+{
+    float newton:torsionalFriction = 0.005 (
+        doc = """Torsional friction coefficient (resistance to spinning at a contact point).
+
+        Range: [0, inf)
+        Units: dimensionless"""
+        limits = {
+            dictionary hard = {
+                float minimum = 0
+            }
+        }
+    )
+
+    float newton:rollingFriction = 0.0001 (
+        doc = """Rolling friction coefficient (resistance to rolling motion).
+
+        Range: [0, inf)
+        Units: dimensionless"""
+        limits = {
+            dictionary hard = {
+                float minimum = 0
+            }
+        }
+    )
+
+    float newton:contactStiffness = -inf (
+        doc = """Normal stiffness of the contact response.
+
+        Controls how rigid or compliant the material feels on contact. Higher values
+        produce stiffer contacts at the cost of requiring smaller time steps.
+
+        If `newton:contactStiffness` is set to `-inf`, the engine's default should be used instead.
+
+        Range: [0, inf)
+        Units: force/distance"""
+        limits = {
+            dictionary soft = {
+                float minimum = 0
+            }
+        }
+    )
+
+    float newton:contactDamping = -inf (
+        doc = """Normal damping of the contact response.
+
+        Controls how much energy the material absorbs during contact. Higher values
+        reduce bouncing.
+
+        If `newton:contactDamping` is set to `-inf`, the engine's default should be used instead.
+
+        Range: [0, inf)
+        Units: force * time / distance"""
+        limits = {
+            dictionary soft = {
+                float minimum = 0
+            }
+        }
+    )
+
+    float newton:contactFrictionGain = -inf (
+        doc = """Gain of the tangential friction response.
+
+        Friction force equals `contactFrictionGain * slip_velocity`, clamped to the
+        Coulomb limit `mu * normal_force`. Larger values produce stronger resistance
+        to small relative motion and more closely approximate ideal Coulomb sticking.
+
+        If `newton:contactFrictionGain` is set to `-inf`, the engine's default should be used instead.
+
+        Range: [0, inf)
+        Units: force * time / distance"""
+        limits = {
+            dictionary soft = {
+                float minimum = 0
+            }
+        }
+    )
+
+    float newton:contactAdhesion = -inf (
+        doc = """Contact adhesion distance.
+
+        When two surfaces are within this distance, an attractive force pulls them together.
+        A value of 0 or less disables adhesion.
+
+        If `newton:contactAdhesion` is set to `-inf`, the engine's default should be used instead.
+
+        Range: [0, inf)
+        Units: distance"""
+        limits = {
+            dictionary soft = {
+                float minimum = 0
+            }
+        }
+    )
+}
+
+class NewtonMimicAPI "NewtonMimicAPI" (
+    doc = """`NewtonMimicAPI` applies on top of a `PhysicsJoint`, adding additional constraints to mimic the DOFs of another joint.
+
+    A mimic constraint enforces that `joint0 = coef0 + coef1 * joint1` for the joint DOFs,
+    where `joint0` is this joint (the follower) and `joint1` (the leader) is specified via the `newton:mimicJoint` relationship.
+
+    The behavior on multi-DOF joints is undefined. The mimic constraint will be applied to each DOF independently,
+    but as the coefficients are shared across all DOFs, the units for translational and rotational DOFs will be mixed.
+    Therefore, it is recommended to only use this API on single-DOF joints.
+    """
+)
+{
+    bool newton:mimicEnabled = true (
+        doc = """Whether the mimic constraint is active.
+
+        When disabled, the follower joint moves independently, as though the mimic constraint was not applied."""
+    )
+
+    rel newton:mimicJoint (
+        doc = "Joint that will be mimicked."
+    )
+
+    float newton:mimicCoef0 = 0.0 (
+        doc = """Offset added after scaling the leader joint's position/angle.
+
+        In the mimic equation which constrains the joint DOFs, `joint0 = coef0 + coef1 * joint1`,
+        this is the constant offset term.
+
+        Range: (-inf, inf)
+        Units: distance or degrees (matches the joint type for single-DOF joints)"""
+    )
+
+    float newton:mimicCoef1 = 1.0 (
+        doc = """Scale factor applied to the leader joint's position/angle.
+
+        In the mimic equation which constrains the joint DOFs, `joint0 = coef0 + coef1 * joint1`,
+        this is the linear coefficient.
+
+        A value of 1.0 means the follower tracks the leader exactly (plus offset from `newton:mimicCoef0`),
+        while negative values reverse the direction.
+
+        Range: (-inf, inf)
+        Units: dimensionless"""
+    )
+}
+
+class NewtonActuator "NewtonActuator" (
+    doc = """Defines a physical actuator that computes effort to apply to a joint.
+
+    EXPERIMENTAL: The Newton actuator schema family is provisional. Attribute names,
+    defaults, and composition rules may change without notice in subsequent releases.
+
+    An actuator computes effort (i.e. force/torque for linear/rotational actuators) to apply
+    to a `PhysicsRevoluteJoint` or `PhysicsPrismaticJoint` specified via the `newton:targets`
+    relationship. Future versions may expand the set of valid target types.
+
+    Actuators must provide a single control law by applying a `NewtonActuatorControlBaseAPI` derived schema (e.g. `NewtonPDControlAPI`).
+
+    Actuator command input delay can be included by applying `NewtonActuatorDelayAPI`. This is useful to model actuator communication or processing lag.
+
+    Additional effort clamping behaviors can be added by applying any number of `NewtonActuatorClampingBaseAPI`
+    derived schemas (e.g. `NewtonMaxEffortClampingAPI`). The order of clamping is not guaranteed to be preserved thus
+    clamping operations must be order independent.
+
+    Note: Newton actuators use radians, diverging from `UsdPhysicsDriveAPI` which uses degrees.
+    Actuator attributes are also documented in joint space, though this is not enforced,
+    and users may scale attributes to fit their own convention by updating their parser
+    and/or integration code accordingly.
+    """
+)
+{
+    rel newton:targets (
+        doc = """The joint driven by this actuator.
+
+        The relationship must be authored. Parsers should raise an error if no target
+        is provided; users should deactivate the prim if they want to disable the actuator.
+
+        Currently only the first target is honored, and it must identify either a
+        `PhysicsRevoluteJoint` or `PhysicsPrismaticJoint`.
+        
+        Multi-DOF `PhysicsJoint` prims are not supported, even when locked via `LimitAPI` to a single axis.
+        """
+    )
+}
+
+class NewtonActuatorDelayAPI "NewtonActuatorDelayAPI" (
+    doc = """Adds command input delay to an actuator to model communication or processing lag.
+
+    Command inputs such as control targets and feedforward terms are delayed by the specified
+    number of actuator timesteps before being used by the controller.
+
+    When `DelayAPI` is applied, command inputs to the controller are always defined.
+    If the delay buffer is empty (e.g. right after reset) or an actuator has
+    `newton:delaySteps == 0`, current command inputs are used. If the requested delay
+    exceeds the available history, the oldest available command input in the buffer is used.
+    """
+)
+{
+    int newton:delaySteps = 1 (
+        doc = """Number of actuator timesteps to delay commanded inputs.
+
+        A value of 0 disables command input delay.
+
+        Range: [0, inf)
+        Units: dimensionless"""
+        limits = {
+            dictionary hard = {
+                int minimum = 0
+            }
+        }
+    )
+}
+
+class NewtonActuatorControlBaseAPI "NewtonActuatorControlBaseAPI" (
+    doc = """Base API for all actuator control laws.
+
+    Control laws compute actuator output effort (i.e. force/torque for linear/rotational actuators)
+    from authored controller parameters, commanded inputs such as control targets and optional
+    feedforward terms, and simulation and actuator state. This output may still be constrained by
+    one or more applied `NewtonActuatorClampingBaseAPI` derived schemas.
+
+    Actuators must provide a single control law by applying a `NewtonActuatorControlBaseAPI` derived schema (e.g. `NewtonPDControlAPI`).
+
+    Applying any control law API (e.g. PD, PID, Network) automatically applies this base.
+    Check `prim.HasAPI('NewtonActuatorControlBaseAPI')` to detect whether any control law is present.
+
+    Only one control law API should be applied to a given `NewtonActuator` prim."""
+)
+{
+}
+
+class NewtonPDControlAPI "NewtonPDControlAPI" (
+    apiSchemas = ["NewtonActuatorControlBaseAPI"]
+    doc = """Stateless PD (Proportional-Derivative) controller.
+
+    Control law: `effort = constEffort + feedforward + kp*(target_pos - q) + kd*(target_vel - v)`"""
+)
+{
+    float newton:constEffort = 0 (
+        doc = """Constant bias effort added to the controller output (in joint space).
+
+        Range: (-inf, inf)
+        Units: force or torque"""
+    )
+
+    float newton:kp = 0 (
+        doc = """Proportional gain (in joint space).
+
+        Multiplied by position error (target_pos - current_pos) to produce
+        a restoring effort proportional to displacement.
+
+        Range: [0, inf)
+        Units: force / distance or torque / radians"""
+        limits = {
+            dictionary hard = {
+                float minimum = 0
+            }
+        }
+    )
+
+    float newton:kd = 0 (
+        doc = """Derivative gain (in joint space).
+
+        Multiplied by velocity error (target_vel - current_vel) to produce
+        a damping effort proportional to velocity.
+
+        Range: [0, inf)
+        Units: force * seconds / distance or torque * seconds / radians"""
+        limits = {
+            dictionary hard = {
+                float minimum = 0
+            }
+        }
+    )
+}
+
+class NewtonStablePDControlAPI "NewtonStablePDControlAPI" (
+    apiSchemas = ["NewtonActuatorControlBaseAPI"]
+    doc = """Stable PD (SPD) controller.
+
+    A semi-implicit PD controller that computes effort using the next-step
+    predicted state, giving improved stability at high gains compared to the
+    explicit `NewtonPDControlAPI`.
+
+    Control law: `effort = kp*(target_pos - (q + dt*v)) + kd*(target_vel - v)`"""
+)
+{
+    float newton:kp = 0 (
+        doc = """Proportional gain (in joint space).
+
+        Multiplied by position error (target_pos - current_pos) to produce
+        a restoring effort proportional to displacement.
+
+        Range: [0, inf)
+        Units: force / distance or torque / radians"""
+        limits = {
+            dictionary hard = {
+                float minimum = 0
+            }
+        }
+    )
+
+    float newton:kd = 0 (
+        doc = """Derivative gain (in joint space).
+
+        Multiplied by velocity error (target_vel - current_vel) to produce
+        a damping effort proportional to velocity.
+
+        Range: [0, inf)
+        Units: force * seconds / distance or torque * seconds / radians"""
+        limits = {
+            dictionary hard = {
+                float minimum = 0
+            }
+        }
+    )
+
+    int newton:numWorlds = 1 (
+        doc = """Optional number of parallel simulation worlds for batched
+        evaluation.
+
+        0 means infer from the simulation/batch.
+
+        Range: [0, inf)"""
+        limits = {
+            dictionary hard = {
+                int minimum = 0
+            }
+        }
+    )
+}
+
+class NewtonPIDControlAPI "NewtonPIDControlAPI" (
+    apiSchemas = ["NewtonActuatorControlBaseAPI"]
+    doc = """Stateful PID (Proportional-Integral-Derivative) controller.
+
+    Includes proportional, integral, and derivative terms for steady-state
+    error elimination.
+
+    Control law: `effort = constEffort + feedforward + kp*(target_pos - q) + ki*integral(target_pos - q) + kd*(target_vel - v)`"""
+)
+{
+    float newton:constEffort = 0 (
+        doc = """Constant bias effort added to the controller output (in joint space).
+
+        Range: (-inf, inf)
+        Units: force or torque"""
+    )
+
+    float newton:kp = 0 (
+        doc = """Proportional gain (in joint space).
+
+        Multiplied by position error (target_pos - current_pos) to produce
+        a restoring effort proportional to displacement.
+
+        Range: [0, inf)
+        Units: force / distance or torque / radians"""
+        limits = {
+            dictionary hard = {
+                float minimum = 0
+            }
+        }
+    )
+
+    float newton:kd = 0 (
+        doc = """Derivative gain (in joint space).
+
+        Multiplied by velocity error (target_vel - current_vel) to produce
+        a damping effort proportional to velocity.
+
+        Range: [0, inf)
+        Units: force * seconds / distance or torque * seconds / radians"""
+        limits = {
+            dictionary hard = {
+                float minimum = 0
+            }
+        }
+    )
+
+    float newton:ki = 0 (
+        doc = """Integral gain.
+
+        Multiplied by the accumulated position error integral to eliminate
+        steady-state error.
+
+        Range: [0, inf)
+        Units: force / (distance * seconds) or torque / (radians * seconds)"""
+        limits = {
+            dictionary hard = {
+                float minimum = 0
+            }
+        }
+    )
+
+    float newton:integralMax = inf (
+        doc = """Anti-windup limit for the integral term.
+
+        The accumulated integral is clamped to [-integralMax, +integralMax]
+        to prevent integral windup under sustained tracking error, such as during actuator saturation.
+
+        Range: [0, inf)
+        Units: distance * seconds or radians * seconds"""
+        limits = {
+            dictionary hard = {
+                float minimum = 0
+            }
+        }
+    )
+}
+
+class NewtonNeuralControlAPI "NewtonNeuralControlAPI" (
+    apiSchemas = ["NewtonActuatorControlBaseAPI"]
+    doc = """Neural-network actuator controller.
+
+    Computes actuator effort from a pre-trained model file (e.g. TorchScript .pt).
+
+    The parser is responsible for inspecting the model and dispatching to the
+    appropriate runtime; unsupported model types must raise an error at parse time.
+    """
+)
+{
+    asset newton:modelPath (
+        doc = """Path to the pre-trained neural model file (e.g. TorchScript .pt)."""
+    )
+}
+
+class NewtonActuatorClampingBaseAPI "NewtonActuatorClampingBaseAPI" (
+    doc = """Base API for all actuator clamping strategies.
+
+    Any number of `NewtonActuatorClampingBaseAPI` derived schemas (e.g. `NewtonMaxEffortClampingAPI`) may be
+    applied to a `NewtonActuator` to constrain actuator output effort (i.e. force/torque for linear/rotational actuators). The order of clamping
+    is not guaranteed to be preserved thus clamping operations must be order independent.
+
+    Applying any clamping API (e.g. `NewtonMaxEffortClampingAPI`, `NewtonDCMotorClampingAPI`, `NewtonPositionBasedClampingAPI`) automatically
+    applies this base. Check `prim.HasAPI('NewtonActuatorClampingBaseAPI')` to detect whether any clamping is present.
+    """
+)
+{
+}
+
+class NewtonMaxEffortClampingAPI "NewtonMaxEffortClampingAPI" (
+    apiSchemas = ["NewtonActuatorClampingBaseAPI"]
+    doc = """Symmetric clamp on actuator output effort.
+
+    Clamps the actuator output to the range [-maxEffort, +maxEffort].
+    """
+)
+{
+    float newton:maxEffort = inf (
+        doc = """Maximum output effort limit (in joint space).
+
+        The actuator output is clamped to the range [-maxEffort, +maxEffort].
+
+        Range: [0, inf)
+        Units: force or torque"""
+        limits = {
+            dictionary hard = {
+                float minimum = 0
+            }
+        }
+    )
+}
+
+class NewtonDCMotorClampingAPI "NewtonDCMotorClampingAPI" (
+    apiSchemas = ["NewtonActuatorClampingBaseAPI"]
+    doc = """DC motor four-quadrant effort clamp.
+
+    A four-quadrant effort clamp based on the DC motor effort-speed characteristic:
+
+        `effort_max(vel) = min(saturationEffort * (1 - vel / velocityLimit),  maxMotorEffort)`
+        `effort_min(vel) = max(saturationEffort * (-1 - vel / velocityLimit), -maxMotorEffort)`
+
+    At zero velocity the motor can produce up to `saturationEffort` (capped by `maxMotorEffort`).
+    As velocity approaches `velocityLimit`, available effort drops to zero in both directions.
+    """
+)
+{
+    float newton:maxMotorEffort = inf (
+        doc = """Effort limit for the effort-speed curve (in joint space).
+
+        Caps the velocity-dependent effort envelope.
+
+        Range: [0, inf)
+        Units: force or torque"""
+        limits = {
+            dictionary hard = {
+                float minimum = 0
+            }
+        }
+    )
+
+    float newton:saturationEffort = inf (
+        doc = """Peak motor effort at stall (zero velocity).
+
+        This is the maximum effort the motor can produce when not spinning,
+        before being capped by `maxMotorEffort`.
+
+        Range: [0, inf)
+        Units: force or torque"""
+        limits = {
+            dictionary hard = {
+                float minimum = 0
+            }
+        }
+    )
+
+    float newton:velocityLimit = inf (
+        doc = """Maximum no-load joint velocity for the effort-speed curve.
+
+        At this velocity, the motor can produce zero effort in the direction
+        of motion due to losses such as back-EMF. A value of inf disables the effort-speed
+        saturation effect.
+
+        Range: (0, inf)
+        Units: distance / seconds or radians / seconds"""
+        limits = {
+            dictionary hard = {
+                float minimum = 0
+            }
+        }
+    )
+}
+
+class NewtonPositionBasedClampingAPI "NewtonPositionBasedClampingAPI" (
+    apiSchemas = ["NewtonActuatorClampingBaseAPI"]
+    doc = """Position-dependent effort clamping via lookup table.
+
+    Provides position-dependent effort limits interpolated from a lookup table
+    to model actuators whose maximum output effort varies with joint position.
+
+    Sampling rules:
+    - Inputs strictly between adjacent (position, effort) entries are linearly interpolated.
+    - Inputs at or below `newton:lookupPositions[0]` clamp to `newton:lookupEfforts[0]`.
+    - Inputs at or above `newton:lookupPositions[-1]` clamp to `newton:lookupEfforts[-1]`.
+    - For rotational actuators, positions do not wrap periodically.
+    """
+)
+{
+    float[] newton:lookupPositions = [] (
+        doc = """Sorted joint positions for the effort lookup table.
+
+        Must be monotonically increasing and the same length as `newton:lookupEfforts`.
+
+        Units: distance or radians"""
+    )
+
+    float[] newton:lookupEfforts = [] (
+        doc = """Maximum output effort values corresponding to each entry in `newton:lookupPositions`.
+
+        Must be the same length as `newton:lookupPositions`.
+
+        Units: force or torque"""
+    )
+}
