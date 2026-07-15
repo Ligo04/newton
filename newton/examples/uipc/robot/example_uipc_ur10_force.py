@@ -372,7 +372,7 @@ class Example:
         Args:
             state: Simulation state the actuator reads ``joint_q`` / ``joint_qd``
                 from. Passed explicitly (rather than ``self.state_0``) so the
-                plain-PD path can be captured into a CUDA graph per physical
+                feedback pass can be captured into a CUDA graph per physical
                 state buffer — see :meth:`_capture_actuator_graphs`.
         """
         self.control.joint_f.zero_()  # pyright: ignore[reportOptionalMemberAccess]  # ty:ignore[unresolved-attribute]
@@ -420,17 +420,16 @@ class Example:
         )
 
     def _capture_actuator_graphs(self):
-        """Capture the plain-PD actuator step into a CUDA graph per state buffer.
+        """Capture the actuator step into a CUDA graph per state buffer.
 
-        The actuator pipeline (zero ``joint_f`` -> ``ControllerPD`` ->
-        ``ClampingMaxEffort`` -> scatter-add) is pure ``wp.launch`` with no
-        host<->device transfers, so it is CUDA-graph capturable. The
-        ``--stable-pd`` path is left eager and this method is skipped: its bias
-        assembly runs :func:`newton.eval_inverse_dynamics` (mass matrix,
-        Jacobian, and RNEA passes) whose kernel launches are not yet vetted for
-        graph capture. The reused :class:`newton.InverseDynamics` container now
-        preallocates all scratch, so wiring this path into a graph is a follow-up
-        (report P3).
+        Both actuator paths are pure ``wp.launch`` sequences with no
+        host<->device transfers: plain PD (zero ``joint_f`` ->
+        ``ControllerPD`` -> ``ClampingMaxEffort`` -> scatter-add), and
+        stable PD, whose bias assembly (:func:`newton.eval_jacobian`,
+        :func:`newton.eval_mass_matrix`, :func:`newton.eval_inverse_dynamics`
+        RNEA passes, and the blocked-LLT solve inside ``ControllerStablePD``)
+        reuses buffers preallocated at init — nothing allocates, reads back,
+        or synchronizes during capture.
 
         ``simulate`` ping-pongs ``state_0``/``state_1`` every substep, and a
         captured graph bakes in the array pointers it was recorded against.
@@ -438,7 +437,7 @@ class Example:
         whichever one currently holds the live state (tracked by
         ``_state_parity``). Falls back to eager execution on non-CUDA devices.
         """
-        if self.stable_pd or not wp.get_device().is_cuda:
+        if not wp.get_device().is_cuda:
             self._actuator_graphs = None
             return
         # Warmup so kernel modules are loaded before capture (capture forbids
@@ -549,8 +548,8 @@ class Example:
                 "Use ControllerStablePD (Tan et al. 2011) instead of ControllerPD. "
                 "The controller runs an on-device (M + diag(Kd)·Δt)·qddot = b "
                 "solve each substep, so the example populates its State with "
-                "M = newton.eval_mass_matrix and bias_forces = Jacobian-T "
-                "gravity plus finite-difference Coriolis every substep. "
+                "M = newton.eval_mass_matrix and bias_forces = RNEA gravity + "
+                "Coriolis via newton.eval_inverse_dynamics every substep. "
                 "Mutually exclusive with --gravity-comp (bias_forces "
                 "already contains gravity)."
             ),
