@@ -434,11 +434,13 @@ class Articulation:
         # -- Animator-facing CPU arrays ------------------------------------
         self.joint_position = wp.zeros(num_activate_joints, dtype=wp.float64, device="cpu")
         self.joint_velocity = wp.zeros(num_activate_joints, dtype=wp.float64, device="cpu")
-        self.target_position = wp.zeros(num_activate_joints, dtype=wp.float64, device="cpu")
-        self.target_velocity = wp.zeros(num_activate_joints, dtype=wp.float64, device="cpu")
-        self.target_force = wp.zeros(num_activate_joints, dtype=wp.float64, device="cpu")
-        self.is_constrained = wp.zeros(num_activate_joints, dtype=wp.int32, device="cpu")
-        self.is_force_constrained = wp.zeros(num_activate_joints, dtype=wp.int32, device="cpu")
+        # Pinned so the cache_control D2H mirror copies are truly async and
+        # legal inside a CUDA graph capture (pageable D2H is neither).
+        self.target_position = wp.zeros(num_activate_joints, dtype=wp.float64, device="cpu", pinned=True)
+        self.target_velocity = wp.zeros(num_activate_joints, dtype=wp.float64, device="cpu", pinned=True)
+        self.target_force = wp.zeros(num_activate_joints, dtype=wp.float64, device="cpu", pinned=True)
+        self.is_constrained = wp.zeros(num_activate_joints, dtype=wp.int32, device="cpu", pinned=True)
+        self.is_force_constrained = wp.zeros(num_activate_joints, dtype=wp.int32, device="cpu", pinned=True)
 
         # -- Device-side mirrors for kernel I/O ----------------------------
         self._joint_position_dev = wp.zeros(num_activate_joints, dtype=wp.float64, device=device)
@@ -684,10 +686,10 @@ class Articulation:
             ],
             device=device,
         )
-        # Mirror device-side results into the CPU arrays consumed by the
-        # UIPC animation callbacks. wp.copy is enqueued on the device
+        # Mirror device-side results into the pinned CPU arrays consumed by
+        # the UIPC animation callbacks. wp.copy is enqueued on the device
         # stream; the caller is responsible for synchronising before the
-        # animator runs (see ArticulationBuilder.cache_joint_control).
+        # animator runs (see ArticulationBuilder.sync_control_transfers).
         wp.copy(self.target_position, self._target_position_dev)
         wp.copy(self.target_velocity, self._target_velocity_dev)
         wp.copy(self.target_force, self._target_force_dev)

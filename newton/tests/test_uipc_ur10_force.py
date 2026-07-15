@@ -97,7 +97,12 @@ def _h_and_bias_stable_pd_style(
     H_fd_buf: wp.array | None,
     coriolis_eps: float = 1.0e-3,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Same recipe as example ``_apply_feedback`` (stable-PD): H, bias = -τ_g + τ_c."""
+    """Independent cross-check of the example's stable-PD quantities: H, bias = -τ_g + τ_c.
+
+    Coriolis comes from a finite-difference Christoffel contraction here, on
+    purpose — the example's ``_apply_feedback`` uses the analytic RNEA path
+    (:func:`newton.eval_inverse_dynamics`), so agreement validates both.
+    """
     dof = model.joint_dof_count
     j_q = state.joint_q
     j_qd = state.joint_qd

@@ -1451,7 +1451,9 @@ class ArticulationBuilder:
 
         Extracts target positions, velocities, and forces from the Newton
         :class:`Control` object and distributes them to each
-        :class:`Articulation`.
+        :class:`Articulation`. Pure kernel + async copy work — safe inside a
+        CUDA graph capture; call :meth:`sync_control_transfers` before any
+        host-side consumer reads the CPU control arrays.
 
         Args:
             control: The Newton control input for this step.
@@ -1484,12 +1486,15 @@ class ArticulationBuilder:
                     blend_aims=self._implicit_pd,
                 )
 
-        # Each Articulation.cache_control wp.copy's the device-side
-        # output buffers into the CPU arrays consumed by the UIPC
-        # animation callbacks. Those copies are async on the device
-        # stream, so synchronise once before world.advance() runs the
-        # animator on the host side.
-        wp.synchronize_device(self._device)
+    def sync_control_transfers(self) -> None:
+        """Block until the ``cache_joint_control`` D2H copies have landed.
+
+        Must run before any host-side consumer of the CPU control arrays
+        (:meth:`apply_mimic_targets`, the UIPC animator callbacks inside
+        ``world.advance()``). Kept out of :meth:`cache_joint_control` so the
+        kernel + copy segment stays CUDA-graph capturable.
+        """
+        wp.synchronize_stream(wp.get_stream(self._device))
 
     def read_joint_state_pre_advance(self) -> None:
         """Snapshot pre-advance edge attributes on each articulation.
