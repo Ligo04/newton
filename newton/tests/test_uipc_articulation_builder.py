@@ -1048,5 +1048,60 @@ class TestUIPCArmatureRuntimeRefresh(unittest.TestCase):
         self.assertAlmostEqual(self._accel(traj), g, delta=0.02 * g)
 
 
+@unittest.skipUnless(_HAS_UIPC, "uipc is not installed")
+class TestUIPCCacheControlGraphCapture(unittest.TestCase):
+    """``cache_joint_control`` must stay CUDA-graph capturable.
+
+    The kernel + D2H mirror copies may not block-synchronize; the sync
+    point is owned by ``SolverUIPC.step()`` (before the host-side mimic /
+    animator consumers read the CPU arrays).
+    """
+
+    def test_cache_joint_control_inside_graph_capture(self):
+        if not wp.get_device().is_cuda:
+            self.skipTest("CUDA device required for graph capture")
+
+        builder = newton.ModelBuilder(up_axis=newton.Axis.Z, gravity=-9.81)
+        link = builder.add_link()
+        builder.add_shape_box(link, hx=0.5, hy=0.02, hz=0.02, xform=wp.transform(wp.vec3(0.5, 0.0, 0.0)))
+        j = builder.add_joint_revolute(parent=-1, child=link, axis=newton.Axis.Y)
+        builder.add_articulation([j])
+        dof = builder.joint_qd_start[j]
+        builder.joint_target_ke[dof] = 100.0
+        builder.joint_target_kd[dof] = 1.0
+        builder.joint_target_mode[dof] = int(newton.JointTargetMode.POSITION)
+        model = builder.finalize()
+
+        solver = newton.solvers.SolverUIPC(
+            model,
+            workspace="/tmp/newton_uipc_graph_capture_test",
+            dt=1.0 / 60.0,
+            logger_level=uipc.Logger.Error,
+        )
+        solver.initialize()
+        art_builder = solver._articulation_builder
+
+        control = model.control()
+        control.joint_target_q.fill_(0.25)
+
+        # Warm-up loads the kernel module and fills the _empty_f32 cache so
+        # the capture below sees no allocations.
+        art_builder.cache_joint_control(control)
+        wp.synchronize_device()
+
+        with wp.ScopedCapture() as capture:
+            art_builder.cache_joint_control(control)
+        wp.capture_launch(capture.graph)
+        wp.synchronize_device()
+
+        checked = 0
+        for art in art_builder.articulations.values():
+            if art.num_active_joints > 0:
+                np.testing.assert_allclose(art.target_position.numpy(), 0.25)
+                np.testing.assert_array_equal(art.is_constrained.numpy(), 1)
+                checked += 1
+        self.assertGreater(checked, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

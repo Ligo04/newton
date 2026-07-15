@@ -1321,7 +1321,12 @@ class SolverUIPC(SolverBase):
 
         # Snapshot pre-advance joint angles/distances so the post-retrieve
         # finite difference yields a true (q_{t+dt} - q_t) / dt velocity.
+        # Pure host work, so it overlaps the in-flight control D2H copies.
         self._articulation_builder.read_joint_state_pre_advance()
+
+        # The mimic pass and the animator (inside world.advance()) read the
+        # CPU control arrays on the host; wait for the D2H copies first.
+        self._articulation_builder.sync_control_transfers()
 
         # Drive mimic followers: must run after control caching and the
         # pre-advance snapshot, before the animator fires in world.advance().
