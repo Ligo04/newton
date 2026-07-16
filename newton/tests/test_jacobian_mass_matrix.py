@@ -474,7 +474,7 @@ def test_add_armature_to_mass_matrix_adds_diagonal(test, device):
     every off-diagonal entry identical to the pure ``eval_mass_matrix`` result."""
     armature_values = [0.3, 0.5, 0.7]
 
-    builder = newton.ModelBuilder(gravity=0.0, up_axis=newton.Axis.Z)
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0), up_axis=newton.Axis.Z)
 
     b1 = builder.add_link(mass=1.0)
     b2 = builder.add_link(mass=1.2)

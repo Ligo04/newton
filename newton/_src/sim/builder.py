@@ -9434,22 +9434,6 @@ class ModelBuilder:
         self._sync_uipc_range_custom_frequencies()
         return soft_range
 
-        soft_range = SoftBodyRange(
-            label=label,
-            particle_start=start_vertex,
-            particle_end=len(self.particle_q),
-            tet_start=start_tet,
-            tet_end=len(self.tet_indices),
-            tri_start=start_tri,
-            tri_end=len(self.tri_indices),
-            edge_start=start_edge,
-            edge_end=len(self.edge_indices),
-            density=density,
-        )
-        self.soft_body_ranges.append(soft_range)
-        self._sync_uipc_range_custom_frequencies()
-        return soft_range
-
     # incrementally updates rigid body mass with additional mass and inertia expressed at a local to the body
     def _update_body_mass(self, i: int, m: float, inertia: Mat33, p: Vec3, q: Quat):
         if i == -1:
