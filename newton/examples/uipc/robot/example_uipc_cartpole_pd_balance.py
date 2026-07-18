@@ -64,7 +64,7 @@
 # For the StablePD actuator we wire:
 #
 #     ctrl_state.mass_matrix = H[pole2, pole2]              # eval_mass_matrix slice
-#     ctrl_state.bias_forces = (C(q,q̇)q̇ + g(q))[pole2]      # eval_inverse_dynamics slice
+#     ctrl_state.bias_forces = (C(q,q̇)q̇ + g(q))[pole2]      # eval_inverse_dynamics_passive slice
 #
 # The bias is the exact RNEA inverse-dynamics term (gravity plus Coriolis)
 # projected onto the pole2 DOF.
@@ -230,9 +230,10 @@ class Example:
             )
             self._pole2_actuator = pole2_actuator
             self._act_state = pole2_actuator.state()
-            # Inverse-dynamics container (bias buffers + internal RNEA scratch);
-            # reused every substep to read out the pole2 bias term.
-            self._inv_dyn = self.model.inverse_dynamics()
+            # Bias-force output buffers (gravity + Coriolis); reused every
+            # substep to read out the pole2 bias term.
+            self._id_gravity_force = wp.zeros(self.model.joint_dof_count, dtype=wp.float32, device=self.model.device)
+            self._id_coriolis_force = wp.zeros(self.model.joint_dof_count, dtype=wp.float32, device=self.model.device)
 
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
         self.viewer.set_model(self.model)
@@ -341,11 +342,12 @@ class Example:
             ctrl_state.mass_matrix.assign(pole2_m)
             # bias_forces = pole2 component of the RNEA bias g(q) + C(q,q̇)q̇.
             # The flat gravity/Coriolis buffers reshape to (world_count, dofs);
-            # pick the pole2 column. eval_inverse_dynamics reads state_0.body_q,
-            # kept consistent by the UIPC readback.
-            eval_type = newton.InverseDynamics.EvalType.GRAVITY_FORCE | newton.InverseDynamics.EvalType.CORIOLIS_FORCE
-            newton.eval_inverse_dynamics(self.model, self.state_0, eval_type=eval_type, inverse_dynamics=self._inv_dyn)
-            bias_flat = self._inv_dyn.gravity_force.numpy() + self._inv_dyn.coriolis_force.numpy()
+            # pick the pole2 column. eval_inverse_dynamics_passive reads
+            # state_0.body_q, kept consistent by the UIPC readback.
+            newton.eval_inverse_dynamics_passive(
+                self.model, self.state_0, gravity_force=self._id_gravity_force, coriolis_force=self._id_coriolis_force
+            )
+            bias_flat = self._id_gravity_force.numpy() + self._id_coriolis_force.numpy()
             bias_pole2 = bias_flat.reshape(self.world_count, self.dofs_per_world)[:, p2 : p2 + 1]
             ctrl_state.bias_forces.assign(np.ascontiguousarray(bias_pole2, dtype=np.float32))
 
@@ -439,7 +441,7 @@ class Example:
                 "(Tan et al. 2011) instead of the hand-rolled scalar PD. "
                 "The per-substep State is populated with pole2's diagonal "
                 "entry from newton.eval_mass_matrix and its bias force from "
-                "newton.eval_inverse_dynamics (gravity plus Coriolis). Cart "
+                "newton.eval_inverse_dynamics_passive (gravity plus Coriolis). Cart "
                 "state feedback is untouched. Multi-world is supported via the "
                 "controller's block-diagonal batched Cholesky."
             ),

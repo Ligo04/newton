@@ -101,7 +101,7 @@ def _h_and_bias_stable_pd_style(
 
     Coriolis comes from a finite-difference Christoffel contraction here, on
     purpose — the example's ``_apply_feedback`` uses the analytic RNEA path
-    (:func:`newton.eval_inverse_dynamics`), so agreement validates both.
+    (:func:`newton.eval_inverse_dynamics_passive`), so agreement validates both.
     """
     dof = model.joint_dof_count
     j_q = state.joint_q

@@ -460,10 +460,11 @@ class Example:
         # MuJoCo example relies on jnt_actgravcomp, which UIPC has no
         # equivalent for). Each step the RNEA bias is turned into an aim
         # offset tau_g/ke — no coexisting force control.
-        # Inverse-dynamics container (bias buffers + internal RNEA scratch);
-        # the single Franka articulation's DOFs are the flat buffers' whole
-        # length, so gravity_force/coriolis_force index the arm DOFs directly.
-        self._inv_dyn = self.model.inverse_dynamics()
+        # Bias-force output buffers (gravity + Coriolis); the single Franka
+        # articulation's DOFs are the buffers' whole length, so
+        # gravity_force/coriolis_force index the arm DOFs directly.
+        self._id_gravity_force = wp.zeros(self.model.joint_dof_count, dtype=wp.float32, device=self.model.device)
+        self._id_coriolis_force = wp.zeros(self.model.joint_dof_count, dtype=wp.float32, device=self.model.device)
         ke = self.model.joint_target_ke.numpy()[:9]
         self._gravity_comp_inv_ke = wp.array(
             np.where(ke > 0.0, 1.0 / np.where(ke > 0.0, ke, 1.0), 0.0).astype(np.float32),
@@ -892,13 +893,14 @@ class Example:
         # Pure position-domain gravity compensation: offset the aim by
         # tau_g/ke so implicit PD holds the commanded pose instead of sagging.
         if self.implicit_pd:
-            # eval_inverse_dynamics reads state_0.body_q, kept consistent by the UIPC readback.
-            eval_type = newton.InverseDynamics.EvalType.GRAVITY_FORCE | newton.InverseDynamics.EvalType.CORIOLIS_FORCE
-            newton.eval_inverse_dynamics(self.model, self.state_0, eval_type=eval_type, inverse_dynamics=self._inv_dyn)
+            # eval_inverse_dynamics_passive reads state_0.body_q, kept consistent by the UIPC readback.
+            newton.eval_inverse_dynamics_passive(
+                self.model, self.state_0, gravity_force=self._id_gravity_force, coriolis_force=self._id_coriolis_force
+            )
             wp.launch(
                 apply_gravity_comp_offset_kernel,
                 dim=9,
-                inputs=[self._inv_dyn.gravity_force, self._inv_dyn.coriolis_force, self._gravity_comp_inv_ke],
+                inputs=[self._id_gravity_force, self._id_coriolis_force, self._gravity_comp_inv_ke],
                 outputs=[self.control.joint_target_q],
             )
 
