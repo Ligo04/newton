@@ -54,11 +54,11 @@
 # ``C(q, q̇)`` fed into the controller state each substep.  Here we wire:
 #
 #     ctrl_state.mass_matrix = newton.eval_mass_matrix(model, state)      # J^T M J
-#     newton.eval_inverse_dynamics(model, state, GRAVITY|CORIOLIS, inv_dyn) # g(q), C(q,q̇)q̇
-#     ctrl_state.bias_forces = inv_dyn.gravity_force + inv_dyn.coriolis_force
+#     newton.eval_inverse_dynamics_passive(model, state, gravity_force=g, coriolis_force=c) # g(q), C(q,q̇)q̇
+#     ctrl_state.bias_forces = g + c
 #
-# ``eval_inverse_dynamics`` fills ``inv_dyn.gravity_force`` and
-# ``inv_dyn.coriolis_force`` (separate flat buffers); their sum is the exact RNEA
+# ``eval_inverse_dynamics_passive`` fills ``gravity_force`` and
+# ``coriolis_force`` (separate flat buffers); their sum is the exact RNEA
 # bias force (gravity plus Coriolis/centrifugal) at q̈ = 0.  Since gravity is
 # already baked into ``bias_forces``, --stable-pd is mutually exclusive with
 # --gravity-comp.
@@ -304,9 +304,10 @@ class Example:
             self._mm_body_I_s = wp.zeros(self.model.body_count, dtype=wp.spatial_matrix, device=dev)
             self._mm_joint_S_s = wp.zeros(self.model.joint_dof_count, dtype=wp.spatial_vector, device=dev)
             self._H_buf = wp.empty((W, max_dofs, max_dofs), dtype=float, device=dev)
-            # Inverse-dynamics container (mass matrix + bias buffers + internal
-            # RNEA scratch) sized for the model; reused every substep.
-            self._inv_dyn = self.model.inverse_dynamics()
+            # Bias-force output buffers (gravity + Coriolis) sized for the
+            # model; reused every substep.
+            self._id_gravity_force = wp.zeros(self.model.joint_dof_count, dtype=wp.float32, device=dev)
+            self._id_coriolis_force = wp.zeros(self.model.joint_dof_count, dtype=wp.float32, device=dev)
 
         # CUDA-graph state for the plain-PD actuator step (see
         # _capture_actuator_graphs). None until captured / when capture is
@@ -393,15 +394,16 @@ class Example:
 
             # Bias g(q) + C(q,q̇)q̇: gravity and Coriolis come back as separate
             # flat buffers, summed on-device into the controller's (W, n) layout
-            # (the sign the Stable-PD rhs subtracts). eval_inverse_dynamics reads
-            # state.body_q, kept consistent by the UIPC readback.
-            eval_type = newton.InverseDynamics.EvalType.GRAVITY_FORCE | newton.InverseDynamics.EvalType.CORIOLIS_FORCE
-            newton.eval_inverse_dynamics(self.model, state, eval_type=eval_type, inverse_dynamics=self._inv_dyn)
+            # (the sign the Stable-PD rhs subtracts). eval_inverse_dynamics_passive
+            # reads state.body_q, kept consistent by the UIPC readback.
+            newton.eval_inverse_dynamics_passive(
+                self.model, state, gravity_force=self._id_gravity_force, coriolis_force=self._id_coriolis_force
+            )
             n = ctrl_state.bias_forces.shape[1]  # ty:ignore[unresolved-attribute]  # pyright: ignore[reportAttributeAccessIssue, reportOptionalMemberAccess]
             wp.launch(
                 _sum_bias_forces_to_worlds,
                 dim=(self.world_count, n),
-                inputs=[self._inv_dyn.gravity_force, self._inv_dyn.coriolis_force, n],
+                inputs=[self._id_gravity_force, self._id_coriolis_force, n],
                 outputs=[ctrl_state.bias_forces],  # ty:ignore[unresolved-attribute]  # pyright: ignore[reportAttributeAccessIssue, reportOptionalMemberAccess]
                 device=self.model.device,
             )
@@ -426,7 +428,7 @@ class Example:
         host<->device transfers: plain PD (zero ``joint_f`` ->
         ``ControllerPD`` -> ``ClampingMaxEffort`` -> scatter-add), and
         stable PD, whose bias assembly (:func:`newton.eval_jacobian`,
-        :func:`newton.eval_mass_matrix`, :func:`newton.eval_inverse_dynamics`
+        :func:`newton.eval_mass_matrix`, :func:`newton.eval_inverse_dynamics_passive`
         RNEA passes, and the blocked-LLT solve inside ``ControllerStablePD``)
         reuses buffers preallocated at init — nothing allocates, reads back,
         or synchronizes during capture.
@@ -549,7 +551,7 @@ class Example:
                 "The controller runs an on-device (M + diag(Kd)·Δt)·qddot = b "
                 "solve each substep, so the example populates its State with "
                 "M = newton.eval_mass_matrix and bias_forces = RNEA gravity + "
-                "Coriolis via newton.eval_inverse_dynamics every substep. "
+                "Coriolis via newton.eval_inverse_dynamics_passive every substep. "
                 "Mutually exclusive with --gravity-comp (bias_forces "
                 "already contains gravity)."
             ),

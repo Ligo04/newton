@@ -9,3 +9,5 @@ LOD = "LOD"
 ix = "ix"
 iy = "iy"
 iz = "iz"
+# "PNGs" tokenizes as PN+Gs — upstream CHANGELOG wording (#3288)
+PN = "PN"
