@@ -308,6 +308,8 @@ files.extend-exclude = [
 ]
 
 [tool.typos.default.extend-words]
+# Affine Body Dynamics — UIPC domain term used in attribute names
+abd = "abd"
 arange = "arange"
 precess = "precess"
 ba = "ba"

@@ -310,9 +310,10 @@ or force-controlled, never both, so compensate in the position domain rather
 than adding a coexisting feedforward torque: the implicit-PD steady state
 satisfies `ke * (q_ref - q) = tau_g` (sag `tau_g / ke`), so pre-adding that
 offset to `control.joint_target_q` lands the joint on the true target.
-Compute the bias with `newton.eval_inverse_dynamics(model, state, tau=...)`
-(`joint_acc=None`) and add `bias / joint_target_ke` to the target each step;
-see `example_uipc_brick_stacking.py --implicit-pd`.
+Compute the bias with `newton.eval_inverse_dynamics_passive(model, state,
+gravity_force=..., coriolis_force=...)` and add `(gravity_force +
+coriolis_force) / joint_target_ke` to the target each step; see
+`example_uipc_brick_stacking.py --implicit-pd`.
 `joint_limit_lower` / `joint_limit_upper` create UIPC joint-limit
 constitutions whose strength comes from the solver-level
 `limit_strength_ratio` parameter (default `10.0`, same global-or-per-joint

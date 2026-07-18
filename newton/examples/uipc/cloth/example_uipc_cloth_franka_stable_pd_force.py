@@ -142,9 +142,10 @@ class Example:
         if self._act_state is None or self._act_state.controller_state is None:
             raise ValueError("ControllerStablePD actuator state was not initialized")
         self._H_buf: wp.array | None = None
-        # Inverse-dynamics container (bias buffers + internal RNEA scratch),
-        # sized for the model and reused every control step.
-        self._inv_dyn = self.model.inverse_dynamics()
+        # Bias-force output buffers (gravity + Coriolis), sized for the
+        # model and reused every control step.
+        self._id_gravity_force = wp.zeros(self.model.joint_dof_count, dtype=wp.float32, device=self.model.device)
+        self._id_coriolis_force = wp.zeros(self.model.joint_dof_count, dtype=wp.float32, device=self.model.device)
         self.home_q = self.robot.get_attribute("joint_q", self.state_0).numpy()[0, 0].copy()
 
         self.viewer.set_model(self.model)
@@ -419,17 +420,18 @@ class Example:
         ctrl_state.mass_matrix.assign(self._H_buf)
         # Tan 2011 stable-PD needs gravity on BOTH sides of the implicit solve:
         #   1. bias_forces = C(q,q̇)·q̇ + g(q) at q̈ = 0; without it the -kd·q̈·dt
-        #      damping term is wrong and the wrist DOFs explode. eval_inverse_dynamics
+        #      damping term is wrong and the wrist DOFs explode. eval_inverse_dynamics_passive
         #      returns gravity and Coriolis as separate flat buffers, summed below.
         #   2. feedforward joint_act = tau_g so the static effort holds pose at q̈→0.
-        # (eval_inverse_dynamics reads state_0.body_q, kept consistent by UIPC readback.)
-        eval_type = newton.InverseDynamics.EvalType.GRAVITY_FORCE | newton.InverseDynamics.EvalType.CORIOLIS_FORCE
-        newton.eval_inverse_dynamics(self.model, self.state_0, eval_type=eval_type, inverse_dynamics=self._inv_dyn)
+        # (eval_inverse_dynamics_passive reads state_0.body_q, kept consistent by UIPC readback.)
+        newton.eval_inverse_dynamics_passive(
+            self.model, self.state_0, gravity_force=self._id_gravity_force, coriolis_force=self._id_coriolis_force
+        )
         n = ctrl_state.bias_forces.shape[1]
         wp.launch(
             _sum_bias_forces_to_worlds,
             dim=(1, n),
-            inputs=[self._inv_dyn.gravity_force, self._inv_dyn.coriolis_force, n],
+            inputs=[self._id_gravity_force, self._id_coriolis_force, n],
             outputs=[ctrl_state.bias_forces],
             device=self.model.device,
         )

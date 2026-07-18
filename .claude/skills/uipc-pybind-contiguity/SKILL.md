@@ -1,6 +1,6 @@
 ---
 name: uipc-pybind-contiguity
-description: Use when passing numpy arrays into any UIPC C++ binding (uipc.geometry.trimesh, simplicial complexes, position/topology buffers, AffineBody constitutions). Pybind11 silently mis-reads non-C-contiguous arrays as column-major, transposing meshes and producing negative-volume garbage that triggers `Assertion volume > 0 failed` in `affine_body_constitution.cpp`.
+description: Use when passing numpy arrays into any UIPC C++ binding (uipc.geometry.trimesh, simplicial complexes, position/topology buffers, AffineBody constitutions). Pybind11 silently misreads non-C-contiguous arrays as column-major, transposing meshes and producing negative-volume garbage that triggers `Assertion volume > 0 failed` in `affine_body_constitution.cpp`.
 ---
 
 # UIPC pybind11 Contiguity Gotcha
