@@ -12,6 +12,7 @@ wheels/
 # Tool cache
 .cache/
 .thumbs/
+.kimix_cache/
 
 # Coverage reports
 .coverage
