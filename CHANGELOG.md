@@ -64,6 +64,7 @@
 - Fix actuator USD parsing silently dropping authored `newton:` API schemas whose definition is missing from the installed `newton-usd-schemas` plugin (e.g. a schema newer than the plugin); authored schema tokens are now folded in alongside the registered ones.
 - Fix the `uipc_ur10` example importing its USD without `floating=False`: the asset's default D6 base joint is silently skipped by `SolverUIPC` and the example runs with contact disabled, so nothing anchored the arm. The base is now welded to the world with an explicit FIXED joint.
 - Fix `SolverUIPC` giving shapeless (geometry-less) articulation links a hardcoded unit mass and zero center of mass; their ABD proxies now carry the Newton-authored `body_mass`, `body_com`, and `body_inertia`, so fixed-attached frame/mount links no longer inject phantom mass into the articulation dynamics.
+- Fix `SensorTiledCamera` deformable triangle rendering to respect per-particle world indices.
 
 ## [1.4.0] - 2026-07-16
 
