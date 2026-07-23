@@ -60,7 +60,7 @@ class Example:
         self.random_offset_xy = 0.001  # m (0.5 cm) - random XY offset
 
         # Build the model (using meters)
-        builder = newton.ModelBuilder(gravity=-9.8)  # m/s²
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, -9.8))  # m/s²
         newton.solvers.SolverUIPC.register_custom_attributes(builder)
 
         # Add a static cube for cards to stack on
@@ -227,7 +227,8 @@ class Example:
             wp.copy(self.model.body_q, self.state_0.body_q)
             wp.copy(self.model.body_qd, self.state_0.body_qd)
 
-        self.contacts = self.model.contacts()
+        self.collision_pipeline = newton.CollisionPipeline(self.model)
+        self.contacts = self.collision_pipeline.contacts()
 
         self.viewer.set_model(self.model)
         self.viewer._paused = True  # Start paused to inspect initial setup

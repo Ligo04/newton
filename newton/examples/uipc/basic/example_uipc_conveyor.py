@@ -301,7 +301,7 @@ class Example:
 
         self.state_1 = self.model.state()
         self.control = self.model.control()
-        self.contacts = self.model.contacts()
+        self.contacts = newton.CollisionPipeline(self.model).contacts()
 
         # Cache belt DOF index for runtime target updates
         qd_starts = self.model.joint_qd_start.numpy()

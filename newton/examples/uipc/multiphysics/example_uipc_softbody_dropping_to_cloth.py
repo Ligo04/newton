@@ -79,7 +79,7 @@ class Example:
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
         self.control = self.model.control()
-        self.contacts = self.model.contacts()
+        self.contacts = newton.CollisionPipeline(self.model).contacts()
         self.viewer.set_model(self.model)
         self.viewer.set_camera(pos=wp.vec3(2.8, -2.8, 1.6), pitch=-18.0, yaw=-45.0)
         if hasattr(self.viewer, "camera") and hasattr(self.viewer.camera, "fov"):

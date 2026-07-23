@@ -191,7 +191,7 @@ class Example:
         self.control = self.model.control()
         # UIPC needs a Contacts object even for collision-free runs; the
         # maximal-/minimal-coordinate articulation solvers don't.
-        self.contacts = self.model.contacts() if self._uses_contacts else None
+        self.contacts = newton.CollisionPipeline(self.model).contacts() if self._uses_contacts else None
 
         # Selection view over every replicated cartpole — read/write
         # (world_count, 1, dofs_per_arti) tensors through a single handle

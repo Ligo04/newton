@@ -143,7 +143,7 @@ class Example:
 
         self.state_1 = self.model.state()
         self.control = self.model.control()
-        self.contacts = self.model.contacts()
+        self.contacts = newton.CollisionPipeline(self.model).contacts()
 
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
 
