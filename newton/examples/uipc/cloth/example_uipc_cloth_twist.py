@@ -64,7 +64,7 @@ class Example:
         mesh_indices = cloth_mesh.indices
         vertices = [wp.vec3(v) for v in mesh_points]
 
-        builder = newton.ModelBuilder(gravity=0.0)
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
         newton.solvers.SolverUIPC.register_custom_attributes(builder)
         builder.add_cloth_mesh(
             pos=wp.vec3(0.0, 0.0, 0.0),
@@ -87,7 +87,7 @@ class Example:
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
         self.control = self.model.control()
-        self.contacts = self.model.contacts()
+        self.contacts = newton.CollisionPipeline(self.model).contacts()
 
         cloth_size = int(round(math.sqrt(len(mesh_points))))
         if cloth_size * cloth_size != len(mesh_points):

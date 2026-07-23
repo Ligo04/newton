@@ -114,7 +114,7 @@ class Example:
 
         self.state_1 = self.model.state()
         self.control = self.model.control()
-        self.contacts = self.model.contacts()
+        self.contacts = newton.CollisionPipeline(self.model).contacts()
 
         # Selection view over every replicated cartpole — lets us read/write
         # per-DOF control/state tensors as (world_count, 1, dof_per_arti)

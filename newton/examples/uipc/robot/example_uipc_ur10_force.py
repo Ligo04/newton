@@ -234,7 +234,7 @@ class Example:
 
         self.state_1 = self.model.state()
         self.control = self.model.control()
-        self.contacts = self.model.contacts() if self._uses_contacts else None
+        self.contacts = newton.CollisionPipeline(self.model).contacts() if self._uses_contacts else None
 
         # Selection view over every replicated UR10. Exclude FREE/DISTANCE
         # joints in case the asset carries them — the controller only works

@@ -113,7 +113,7 @@ class Example:
 
         self.state_1 = self.model.state()
         self.control = self.model.control()
-        self.contacts = self.model.contacts()
+        self.contacts = newton.CollisionPipeline(self.model).contacts()
 
         self.dof_per_world = self.model.joint_dof_count // self.world_count if self.world_count > 0 else 0
 

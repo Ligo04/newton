@@ -85,7 +85,7 @@ class Example:
 
         self.state_1 = self.model.state()
         self.control = self.model.control()
-        self.contacts = self.model.contacts()
+        self.contacts = newton.CollisionPipeline(self.model).contacts()
 
         # Cache joint limit arrays on CPU for target clamping
         self.joint_limit_lower = self.model.joint_limit_lower.numpy()

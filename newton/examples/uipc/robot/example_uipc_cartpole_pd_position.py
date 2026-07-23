@@ -104,7 +104,7 @@ class Example:
 
         self.state_1 = self.model.state()
         self.control = self.model.control()
-        self.contacts = self.model.contacts()
+        self.contacts = newton.CollisionPipeline(self.model).contacts()
 
         # DOFs per world, used to index the cart slider in every replica.
         self.dofs_per_world = self.model.joint_dof_count // self.world_count

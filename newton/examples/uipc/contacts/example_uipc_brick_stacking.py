@@ -453,7 +453,7 @@ class Example:
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
         self.control = self.model.control()
-        self.contacts = self.model.contacts()
+        self.contacts = newton.CollisionPipeline(self.model).contacts()
 
         # Pure position-domain gravity compensation for --implicit-pd:
         # without it the arm sags by tau_g/ke at each joint (the original
