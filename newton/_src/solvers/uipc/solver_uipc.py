@@ -17,7 +17,7 @@ import warp as wp
 import newton
 from newton import BodyFlags, Contacts, Control, JointType, Model, ModelBuilder, State, StateFlags
 
-from ..flags import SolverNotifyFlags
+from ...sim import ModelFlags
 from ..solver import SolverBase
 
 try:
@@ -404,7 +404,7 @@ class SolverUIPC(SolverBase):
                 are read at initialization; to change them at runtime,
                 write the model arrays and call
                 :meth:`notify_model_changed` with
-                :attr:`~newton.SolverNotifyFlags.JOINT_DOF_PROPERTIES`.
+                :attr:`~newton.ModelFlags.JOINT_DOF_PROPERTIES`.
         """
         super().__init__(model=model)
         self.import_uipc()
@@ -1488,17 +1488,17 @@ class SolverUIPC(SolverBase):
         so the user must recreate the solver to apply them.
 
         Supported flags:
-            - :attr:`~newton.SolverNotifyFlags.BODY_PROPERTIES`: push
+            - :attr:`~newton.ModelFlags.BODY_PROPERTIES`: push
               ``model.body_q`` and ``model.body_qd`` into the UIPC backend
               for the mapped affine bodies (state reset).
-            - :attr:`~newton.SolverNotifyFlags.JOINT_PROPERTIES`: recompute
+            - :attr:`~newton.ModelFlags.JOINT_PROPERTIES`: recompute
               forward kinematics from ``model.joint_q`` / ``joint_qd`` via
               :func:`newton.eval_fk` and push the resulting ``body_q`` /
               ``body_qd`` into UIPC.
-            - :attr:`~newton.SolverNotifyFlags.MODEL_PROPERTIES`: propagate
+            - :attr:`~newton.ModelFlags.MODEL_PROPERTIES`: propagate
               ``model.gravity`` into the live UIPC ``scene.config()``; the
               new gravity takes effect on the next ``world.advance()``.
-            - :attr:`~newton.SolverNotifyFlags.JOINT_DOF_PROPERTIES`:
+            - :attr:`~newton.ModelFlags.JOINT_DOF_PROPERTIES`:
               re-apply ``model.joint_armature`` to the live reflected-inertia
               constraints, and (``implicit_pd`` only) re-derive the joint
               drive strengths and aim-blend weights from the current
@@ -1537,11 +1537,11 @@ class SolverUIPC(SolverBase):
         # Baked into scene objects at build time — one aggregated warning;
         # the user must recreate the solver.
         unsupported_mask = (
-            SolverNotifyFlags.BODY_INERTIAL_PROPERTIES
-            | SolverNotifyFlags.SHAPE_PROPERTIES
-            | SolverNotifyFlags.CONSTRAINT_PROPERTIES
-            | SolverNotifyFlags.TENDON_PROPERTIES
-            | SolverNotifyFlags.ACTUATOR_PROPERTIES
+            ModelFlags.BODY_INERTIAL_PROPERTIES
+            | ModelFlags.SHAPE_PROPERTIES
+            | ModelFlags.CONSTRAINT_PROPERTIES
+            | ModelFlags.TENDON_PROPERTIES
+            | ModelFlags.ACTUATOR_PROPERTIES
         )
         if flags & unsupported_mask:
             warnings.warn(
@@ -1555,7 +1555,7 @@ class SolverUIPC(SolverBase):
         # Armature + (implicit_pd) ke/kd re-derive; libuipc re-reads both
         # every step. Friction/limits stay baked, as do gains without
         # implicit_pd (drive strength is a solver knob there).
-        if flags & SolverNotifyFlags.JOINT_DOF_PROPERTIES:
+        if flags & ModelFlags.JOINT_DOF_PROPERTIES:
             self._articulation_builder.refresh_armature(self.model)
             if self._implicit_pd:
                 self._articulation_builder.refresh_drive_strengths(self.model)
@@ -1564,11 +1564,11 @@ class SolverUIPC(SolverBase):
         # single state push to UIPC.
         self._state_dirty = False
 
-        if flags & SolverNotifyFlags.JOINT_PROPERTIES:
+        if flags & ModelFlags.JOINT_PROPERTIES:
             self._notify_joint_properties()
-        if flags & SolverNotifyFlags.BODY_PROPERTIES:
+        if flags & ModelFlags.BODY_PROPERTIES:
             self._notify_body_properties()
-        if flags & SolverNotifyFlags.MODEL_PROPERTIES:
+        if flags & ModelFlags.MODEL_PROPERTIES:
             self._notify_model_properties()
 
         if self._state_dirty:
@@ -1580,7 +1580,7 @@ class SolverUIPC(SolverBase):
     # ------------------------------------------------------------------
 
     def _notify_joint_properties(self) -> None:
-        """Handle :attr:`~newton.SolverNotifyFlags.JOINT_PROPERTIES`.
+        """Handle :attr:`~newton.ModelFlags.JOINT_PROPERTIES`.
 
         Recomputes forward kinematics with :func:`newton.eval_fk` so that
         ``model.body_q`` / ``model.body_qd`` reflect the updated
@@ -1603,7 +1603,7 @@ class SolverUIPC(SolverBase):
         self._state_dirty = True
 
     def _notify_body_properties(self) -> None:
-        """Handle :attr:`~newton.SolverNotifyFlags.BODY_PROPERTIES`.
+        """Handle :attr:`~newton.ModelFlags.BODY_PROPERTIES`.
         Flags Newton-owned state buffers for a push into UIPC so that
         ``model.body_q`` / ``model.body_qd`` and FEM particle state are
         mirrored by the backend.
@@ -1611,7 +1611,7 @@ class SolverUIPC(SolverBase):
         self._state_dirty = True
 
     def _notify_model_properties(self) -> None:
-        """Handle :attr:`~newton.SolverNotifyFlags.MODEL_PROPERTIES`.
+        """Handle :attr:`~newton.ModelFlags.MODEL_PROPERTIES`.
 
         Propagates ``model.gravity`` into the live UIPC ``scene.config()``.
         UIPC expects gravity as a ``3x1`` column-vector-of-lists, matching

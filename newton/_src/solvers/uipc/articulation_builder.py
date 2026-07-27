@@ -1355,7 +1355,7 @@ class ArticulationBuilder:
     def refresh_drive_strengths(self, model: Any) -> None:
         """Re-derive implicit-PD drive parameters from the live model gains.
 
-        Handler for :attr:`~newton.SolverNotifyFlags.JOINT_DOF_PROPERTIES`:
+        Handler for :attr:`~newton.ModelFlags.JOINT_DOF_PROPERTIES`:
         recomputes each driven joint's ``driving/strength_ratio`` edge
         attribute and aim-blend weight from the current
         ``joint_target_ke`` / ``joint_target_kd``. libuipc re-reads that
@@ -1396,7 +1396,7 @@ class ArticulationBuilder:
     def refresh_armature(self, model: Any) -> None:
         """Re-read ``model.joint_armature`` into the live armature constraints.
 
-        Handler for :attr:`~newton.SolverNotifyFlags.JOINT_DOF_PROPERTIES`:
+        Handler for :attr:`~newton.ModelFlags.JOINT_DOF_PROPERTIES`:
         rewrites the mass diagonal of each ExternalArticulationConstraint
         geometry (see :meth:`_build_external_articulation`) from the current
         ``model.joint_armature``. libuipc re-collects the ``joint_joint``

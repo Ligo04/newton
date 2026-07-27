@@ -356,7 +356,7 @@ mapped by joint type:
 
 If you edit `Model.joint_X_p` or `Model.joint_X_c` for a fixed-root articulation
 after constructing the solver, call `SolverBase.notify_model_changed` with the
-`SolverNotifyFlags.JOINT_PROPERTIES` flag to synchronize the updated fixed-root
+`ModelFlags.JOINT_PROPERTIES` flag to synchronize the updated fixed-root
 poses into MuJoCo.
 
 (mujoco-code-pointers)=

@@ -644,7 +644,7 @@ class TestUIPCImplicitPD(unittest.TestCase):
         kd_np = model.joint_target_kd.numpy()
         kd_np[dof] = 0.0
         model.joint_target_kd.assign(kd_np)
-        solver.notify_model_changed(newton.solvers.SolverNotifyFlags.JOINT_DOF_PROPERTIES)
+        solver.notify_model_changed(newton.ModelFlags.JOINT_DOF_PROPERTIES)
 
         self.assertAlmostEqual(read_strength(), 400.0 * dt * dt / mass_sum, places=6)
         # kd -> 0: pure position spring, blend entry must be dropped.
@@ -693,7 +693,7 @@ class TestUIPCImplicitPD(unittest.TestCase):
         ke_np = model.joint_target_ke.numpy()
         ke_np[dof] = 400.0
         model.joint_target_ke.assign(ke_np)
-        solver.notify_model_changed(newton.solvers.SolverNotifyFlags.JOINT_DOF_PROPERTIES)
+        solver.notify_model_changed(newton.ModelFlags.JOINT_DOF_PROPERTIES)
 
         sag_stiff = run(120)
         self.assertAlmostEqual(sag_stiff, tau_g / 400.0, delta=0.05 * tau_g / 400.0)
@@ -1022,13 +1022,13 @@ class TestUIPCArmatureRuntimeRefresh(unittest.TestCase):
         # First window: armature = 2x body mass, set through the same
         # runtime path so the whole test exercises refresh_armature.
         model.joint_armature.assign(np.array([2.0 * m_body], dtype=np.float32))
-        solver.notify_model_changed(newton.solvers.SolverNotifyFlags.JOINT_DOF_PROPERTIES)
+        solver.notify_model_changed(newton.ModelFlags.JOINT_DOF_PROPERTIES)
         first = self._step_window(model, solver, frames=40)
         self.assertAlmostEqual(self._accel(first), g / 3.0, delta=0.05 * g / 3.0)
 
         # Second window: rewrite to 0.5x body mass mid-run.
         model.joint_armature.assign(np.array([0.5 * m_body], dtype=np.float32))
-        solver.notify_model_changed(newton.solvers.SolverNotifyFlags.JOINT_DOF_PROPERTIES)
+        solver.notify_model_changed(newton.ModelFlags.JOINT_DOF_PROPERTIES)
         second = self._step_window(model, solver, frames=40)
         expected = g * m_body / (m_body + 0.5 * m_body)
         self.assertAlmostEqual(self._accel(second), expected, delta=0.05 * expected)
@@ -1042,7 +1042,7 @@ class TestUIPCArmatureRuntimeRefresh(unittest.TestCase):
 
         model.joint_armature.assign(np.array([2.0 * m_body], dtype=np.float32))
         with self.assertWarnsRegex(UserWarning, "Recreate the solver"):
-            solver.notify_model_changed(newton.solvers.SolverNotifyFlags.JOINT_DOF_PROPERTIES)
+            solver.notify_model_changed(newton.ModelFlags.JOINT_DOF_PROPERTIES)
 
         traj = self._step_window(model, solver, frames=40)
         self.assertAlmostEqual(self._accel(traj), g, delta=0.02 * g)
