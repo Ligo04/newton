@@ -780,6 +780,9 @@ If you run the examples from a source checkout with uv, use
       <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/uipc/contacts/example_uipc_two_brick_stack.py">
         <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_brick_stacking.jpg" alt="UIPC Two Brick Stack">
       </a>
+      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/contacts/example_newton_cradle.py">
+        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_newton_cradle.jpg" alt="Newton Cradle">
+      </a>
     </td>
   </tr>
   <tr>
@@ -809,6 +812,31 @@ If you run the examples from a source checkout with uv, use
       <code>python -m newton.examples uipc_cube_reset</code>
     </td>
     <td align="center" width="33%">
+    </td>
+    <td align="center" width="33%">
+      <code>python -m newton.examples newton_cradle</code>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="33%">
+      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/contacts/example_balance_bird.py">
+        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_balance_bird.jpg" alt="Balance Bird">
+      </a>
+    </td>
+    <td align="center" width="33%">
+      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/contacts/example_domino_spiral.py">
+        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_domino_spiral.jpg" alt="Domino Spiral">
+      </a>
+    </td>
+    <td align="center" width="33%">
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="33%">
+      <code>python -m newton.examples balance_bird</code>
+    </td>
+    <td align="center" width="33%">
+      <code>python -m newton.examples domino_spiral</code>
     </td>
     <td align="center" width="33%">
     </td>

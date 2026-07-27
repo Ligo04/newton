@@ -298,7 +298,7 @@ plain `POSITION` damps toward rest; `VELOCITY` mode becomes a velocity servo
 (the damping spring alone tracks `joint_target_qd`, `joint_target_ke` is
 ignored). Gains are read at initialization; to change them at runtime, write
 `joint_target_ke` / `joint_target_kd` and call
-`notify_model_changed(SolverNotifyFlags.JOINT_DOF_PROPERTIES)` — the drive
+`notify_model_changed(ModelFlags.JOINT_DOF_PROPERTIES)` — the drive
 strengths are re-derived and take effect on the next step (libuipc re-reads
 them every frame). The same call re-applies `joint_armature` to the live
 reflected-inertia constraints (for joints that carried armature at build
