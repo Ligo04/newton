@@ -5424,6 +5424,7 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
         shape_transform = model.shape_transform.numpy()
         shape_type = model.shape_type.numpy()
         shape_size = model.shape_scale.numpy()
+        shape_is_solid = model.shape_is_solid.numpy()
         shape_flags = model.shape_flags.numpy()
         shape_collision_group = model.shape_collision_group.numpy()
         shape_world = model.shape_world.numpy()
@@ -5941,10 +5942,19 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
                             f"{model.shape_label[shape]!r} (shape {shape}). Use use_mujoco_contacts=False so "
                             "Newton's collision pipeline handles this mesh, or replace it with a plane/box/thick mesh."
                         )
+                    # Newton writes body inertia explicitly. Thin components from a convex
+                    # decomposition therefore need shell mesh inertia only to compile
+                    # reliably, without changing the body's authored mass properties.
+                    mesh_inertia = (
+                        mujoco.mjtMeshInertia.mjMESH_INERTIA_SHELL
+                        if stype == GeoType.CONVEX_MESH or not shape_is_solid[shape]
+                        else mujoco.mjtMeshInertia.mjMESH_INERTIA_CONVEX
+                    )
                     spec.add_mesh(
                         name=name,
                         uservert=vertices.flatten(),
                         userface=indices.flatten(),
+                        inertia=mesh_inertia,
                         maxhullvert=maxhullvert,
                     )
                     geom_params["meshname"] = name

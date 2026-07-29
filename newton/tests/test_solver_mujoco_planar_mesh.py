@@ -87,6 +87,30 @@ class TestSolverMuJoCoPlanarMesh(unittest.TestCase):
         self.assertEqual(solver.mj_model.mesh_vertnum[0], 4)
         self.assertEqual(solver.mj_model.mesh_facenum[0], 4)
 
+    def test_thin_convex_mesh_compiles_with_shell_inertia(self):
+        """Compile thin convex mesh components with shell inertia."""
+        vertices = np.array(
+            [
+                [0.0, 0.0, 0.0],
+                [1.0e-4, 0.0, 0.0],
+                [0.0, 1.0e-4, 0.0],
+                [0.0, 0.0, 1.0e-7],
+            ],
+            dtype=np.float32,
+        )
+        indices = np.array([0, 2, 1, 0, 1, 3, 1, 2, 3, 2, 0, 3], dtype=np.int32)
+
+        builder = newton.ModelBuilder()
+        body = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 1.0), wp.quat_identity()))
+        builder.add_shape_sphere(body=body, radius=0.01)
+        mesh = newton.Mesh(vertices=vertices, indices=indices, compute_inertia=False)
+        builder.add_shape_convex_hull(body=-1, mesh=mesh, label="thin_convex")
+        model = builder.finalize(device="cpu")
+
+        solver = SolverMuJoCo(model, use_mujoco_cpu=True, use_mujoco_contacts=False)
+
+        self.assertEqual(solver.mj_model.nmesh, 1)
+
     def test_planar_mesh_rejects_mujoco_contacts(self):
         vertices = np.array(
             [
