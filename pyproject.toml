@@ -39,8 +39,8 @@ dependencies = [
 # Core simulation dependencies
 sim = [
     # MuJoCo simulation
-    "mujoco-warp~=3.10.0,>=3.10.0.2",  # MuJoCo, warp-accelerated
-    "mujoco~=3.10.0",       # MuJoCo physics engine
+    "mujoco-warp~=3.11.0",  # MuJoCo, warp-accelerated
+    "mujoco~=3.11.0",       # MuJoCo physics engine
 ]
 
 # Optional ONNX policy inference for neural actuators and RL policy examples.
@@ -68,8 +68,8 @@ importers = [
     "usd-core>=25.5,<26.5 ; platform_machine != 'aarch64' and python_version < '3.14'",
     "usd-exchange>=2.2.0 ; platform_machine == 'aarch64' and python_version < '3.13'",
 
-    # Newton USD Schemas (vendored in extern/, adds NewtonStablePDControlAPI on top of upstream 0.4.0)
-    "newton-usd-schemas>=0.4.0",
+    # Newton USD Schemas (vendored in extern/, adds NewtonStablePDControlAPI on top of upstream 0.4.1)
+    "newton-usd-schemas>=0.4.1",
 ]
 
 # Remeshing dependencies (for SurfaceReconstructor)
