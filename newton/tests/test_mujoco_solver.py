@@ -2369,6 +2369,116 @@ class TestMuJoCoSolverKinematicBodyProperties(unittest.TestCase):
                     )
 
 
+class TestMuJoCoSolverCollisionMasks(unittest.TestCase):
+    def test_large_graph_skips_before_pair_enumeration(self):
+        """Skip large mask graphs before enumerating every shape pair."""
+
+        class ShapeGroups:
+            def numpy(self):
+                return np.ones(257, dtype=np.int32)
+
+        class ModelStub:
+            shape_collision_group = ShapeGroups()
+
+            def shape_collision_filter_mask(self, _pairs):
+                raise AssertionError("large graphs must skip before querying candidate pairs")
+
+        result = SolverMuJoCo._compile_newton_collision_masks(
+            ModelStub(),
+            np.arange(257, dtype=np.int32),
+        )
+
+        self.assertTrue(result.skipped)
+
+    def test_sparse_filters_map_without_pair_enumeration(self):
+        """Map sparse filters into a selected collision graph directly."""
+
+        class ShapeGroups:
+            def numpy(self):
+                return np.ones(5, dtype=np.int32)
+
+        class ModelStub:
+            shape_count = 5
+            shape_collision_group = ShapeGroups()
+
+            def shape_collision_filter_pairs_array(self):
+                return np.array([[0, 4], [1, 3]], dtype=np.int32)
+
+            def shape_collision_filter_mask(self, _pairs):
+                raise AssertionError("sparse filters must not require candidate-pair enumeration")
+
+        result = SolverMuJoCo._compile_newton_collision_masks(
+            ModelStub(),
+            np.array([1, 3, 4], dtype=np.int32),
+        )
+
+        actual = ((result.collision_type[:, None] & result.collision_affinity[None, :]) != 0) | (
+            (result.collision_type[None, :] & result.collision_affinity[:, None]) != 0
+        )
+        expected = np.array(
+            [
+                [False, False, True],
+                [False, False, True],
+                [True, True, False],
+            ]
+        )
+        np.testing.assert_array_equal(actual, expected)
+
+    def test_native_newton_graph_compiles_exact_masks(self):
+        """Compile native signed groups and pair filters into exact MuJoCo masks."""
+        builder = newton.ModelBuilder()
+        groups = [0, 1, 1, 2, 2, -3, -3, -7]
+        shapes = []
+        for index, group in enumerate(groups):
+            body = builder.add_link(label=f"body_{index}")
+            joint = builder.add_joint_free(parent=-1, child=body, label=f"joint_{index}")
+            builder.add_articulation([joint])
+            cfg = newton.ModelBuilder.ShapeConfig(collision_group=group)
+            shapes.append(builder.add_shape_sphere(body, radius=0.1, cfg=cfg, label=f"shape_{index}"))
+        builder.add_shape_collision_filter_pair(shapes[1], shapes[2])
+        builder.add_shape_collision_filter_pair(shapes[3], shapes[5])
+
+        model = builder.finalize(device="cpu")
+        solver = SolverMuJoCo(model, use_mujoco_contacts=True)
+        mapping = solver.mjc_geom_to_newton_shape.numpy()[0]
+        contype = solver.mj_model.geom_contype
+        conaffinity = solver.mj_model.geom_conaffinity
+
+        for geom_a in range(solver.mj_model.ngeom - 1):
+            shape_a = int(mapping[geom_a])
+            for geom_b in range(geom_a + 1, solver.mj_model.ngeom):
+                shape_b = int(mapping[geom_b])
+                group_a = groups[shape_a]
+                group_b = groups[shape_b]
+                if group_a == 0 or group_b == 0:
+                    expected = False
+                elif group_a > 0:
+                    expected = group_a == group_b or group_b < 0
+                else:
+                    expected = group_a != group_b
+                expected = expected and not model.shape_collision_filter_contains(shape_a, shape_b)
+                actual = bool(
+                    (int(contype[geom_a]) & int(conaffinity[geom_b]))
+                    or (int(contype[geom_b]) & int(conaffinity[geom_a]))
+                )
+                self.assertEqual(actual, expected, f"MuJoCo pair {(shape_a, shape_b)}")
+
+    def test_falls_back_when_exact_masks_exceed_32_bits(self):
+        """Fall back for a graph that provably needs 33 mask bits."""
+        builder = newton.ModelBuilder()
+        for index, group in enumerate(np.repeat(np.arange(1, 34), 2)):
+            body = builder.add_link(label=f"body_{index}")
+            joint = builder.add_joint_free(parent=-1, child=body, label=f"joint_{index}")
+            builder.add_articulation([joint])
+            cfg = newton.ModelBuilder.ShapeConfig(collision_group=int(group))
+            builder.add_shape_sphere(body, radius=0.1, cfg=cfg, label=f"shape_{index}")
+
+        with warnings.catch_warnings():
+            warnings.filterwarnings("error", message=r"The selected Newton collision graph.*")
+            solver = SolverMuJoCo(builder.finalize(device="cpu"), use_mujoco_contacts=True)
+        self.assertEqual(solver.mj_model.ngeom, 66)
+
+
 class TestMuJoCoSolverGeomProperties(TestMuJoCoSolverPropertiesBase):
     def test_geom_property_conversion(self):
         """
@@ -4477,14 +4587,23 @@ class TestMuJoCoSolverNewtonContacts(unittest.TestCase):
             solver._last_nacon_count,
             "_last_nacon_count must be eagerly pre-allocated in __init__",
         )
+        self.assertIsNotNone(
+            solver._contact_tid_to_cid,
+            "_contact_tid_to_cid must be eagerly pre-allocated in __init__",
+        )
         self.assertIsInstance(solver._last_contact_generation, wp.array)
         self.assertIsInstance(solver._last_nacon_count, wp.array)
+        self.assertIsInstance(solver._contact_tid_to_cid, wp.array)
         self.assertEqual(solver._last_contact_generation.dtype, wp.int32)
         self.assertEqual(solver._last_nacon_count.dtype, wp.int32)
+        self.assertEqual(solver._contact_tid_to_cid.dtype, wp.int32)
         self.assertEqual(solver._last_contact_generation.shape, (1,))
         self.assertEqual(solver._last_nacon_count.shape, (1,))
+        self.assertEqual(solver._contact_tid_to_cid.shape, (solver.mjw_data.naconmax,))
         self.assertEqual(solver._last_contact_generation.device, model.device)
         self.assertEqual(solver._last_nacon_count.device, model.device)
+        self.assertEqual(solver._contact_tid_to_cid.device, model.device)
+        self.assertTrue(np.all(solver._contact_tid_to_cid.numpy() == -1))
 
         # Calling _invalidate_contact_fast_path() before any step must succeed
         # cleanly — this is the exact path that previously hit stale captured
@@ -7624,7 +7743,9 @@ class TestMuJoCoArticulationConversion(unittest.TestCase):
         body = builder.add_link(mass=1.0, inertia=wp.mat33(np.eye(3)))
         root_joint = builder.add_joint_free(body)
         builder.add_articulation([root_joint])
-        loop_joint = builder.add_joint_fixed(parent=-1, child=body)
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message=".*FREE joint parallel.*", category=UserWarning)
+            loop_joint = builder.add_joint_fixed(parent=-1, child=body)
 
         self.assertEqual(builder.joint_articulation[loop_joint], -1)
 
@@ -7641,12 +7762,14 @@ class TestMuJoCoArticulationConversion(unittest.TestCase):
         builder = newton.ModelBuilder()
         b0 = builder.add_link(mass=0.01)
         b1 = builder.add_link(mass=0.01)
+        b2 = builder.add_link(mass=0.01)
         j0 = builder.add_joint_revolute(-1, b0)
         j1 = builder.add_joint_revolute(b0, b1)
-        builder.add_articulation([j0, j1])
+        j2 = builder.add_joint_revolute(b1, b2)
+        builder.add_articulation([j0, j1, j2])
         # add a loop joint with asymmetric xforms to exercise relpose computation
         builder.add_joint_fixed(
-            b1,
+            b2,
             b0,
             parent_xform=wp.transform(wp.vec3(0.0, 0.0, -0.45), wp.quat_identity()),
             child_xform=wp.transform(wp.vec3(0.0, 0.1, -0.3), wp.quat_identity()),
@@ -7659,7 +7782,7 @@ class TestMuJoCoArticulationConversion(unittest.TestCase):
         world_builder.replicate(builder, world_count=world_count)
         model = world_builder.finalize()
         solver = SolverMuJoCo(model, separate_worlds=True)
-        self.assertEqual(solver.mj_model.nv, 2)
+        self.assertEqual(solver.mj_model.nv, 3)
         # Fixed loop joint → 1 weld constraint
         self.assertEqual(solver.mj_model.neq, 1)
         self.assertEqual(int(solver.mj_model.eq_type[0]), int(solver._mujoco.mjtEq.mjEQ_WELD))
@@ -7745,10 +7868,12 @@ class TestMuJoCoArticulationConversion(unittest.TestCase):
         inertia = wp.mat33(np.eye(3))
         b0 = builder.add_link(mass=1.0, com=wp.vec3(0.0), inertia=inertia)
         b1 = builder.add_link(mass=1.0, com=wp.vec3(0.0), inertia=inertia)
+        b2 = builder.add_link(mass=1.0, com=wp.vec3(0.0), inertia=inertia)
         j0 = builder.add_joint_revolute(-1, b0, axis=(0.0, 0.0, 1.0))
         j1 = builder.add_joint_revolute(b0, b1, axis=(0.0, 1.0, 0.0))
-        builder.add_articulation([j0, j1])
-        builder.add_joint_revolute(b1, b0, axis=(0.0, 0.0, 1.0))
+        j2 = builder.add_joint_revolute(b1, b2, axis=(1.0, 0.0, 0.0))
+        builder.add_articulation([j0, j1, j2])
+        builder.add_joint_revolute(b2, b0, axis=(0.0, 0.0, 1.0))
 
         world_count = 3
         world_builder = newton.ModelBuilder()
@@ -7757,7 +7882,7 @@ class TestMuJoCoArticulationConversion(unittest.TestCase):
         solver = SolverMuJoCo(model, separate_worlds=True, disable_contacts=True)
 
         self.assertEqual(solver.mj_model.neq, 2)
-        expected = np.array([[2, 2], [5, 5], [8, 8]], dtype=np.int32)
+        expected = np.array([[3, 3], [7, 7], [11, 11]], dtype=np.int32)
         np.testing.assert_array_equal(solver.mjc_eq_to_newton_jnt.numpy(), expected)
 
     def test_mjc_equality_target_remaps_in_add_builder(self):
@@ -7882,11 +8007,13 @@ class TestMuJoCoArticulationConversion(unittest.TestCase):
             builder.add_shape_box(body=tip, hx=0.1, hy=0.1, hz=0.1)
             builder.add_articulation([j0, j1, j2])
 
-            connect_joint = builder.add_joint_ball(
-                parent=root,
-                child=mid,
-                enabled=bool(connect_enabled[world]),
-            )
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", message=".*undefined semantics.*", category=UserWarning)
+                connect_joint = builder.add_joint_ball(
+                    parent=root,
+                    child=mid,
+                    enabled=bool(connect_enabled[world]),
+                )
             _add_equality_constraint(
                 builder,
                 constraint_type=newton.solvers.SolverMuJoCo.EqType.CONNECT,
@@ -7902,11 +8029,13 @@ class TestMuJoCoArticulationConversion(unittest.TestCase):
                     "mujoco:equality_constraint_objtype": MJC_OBJ_BODY,
                 },
             )
-            weld_joint = builder.add_joint_fixed(
-                parent=mid,
-                child=tip,
-                enabled=bool(weld_enabled[world]),
-            )
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", message=".*undefined semantics.*", category=UserWarning)
+                weld_joint = builder.add_joint_fixed(
+                    parent=mid,
+                    child=tip,
+                    enabled=bool(weld_enabled[world]),
+                )
             _add_equality_constraint(
                 builder,
                 constraint_type=newton.solvers.SolverMuJoCo.EqType.WELD,
@@ -7973,10 +8102,12 @@ class TestMuJoCoArticulationConversion(unittest.TestCase):
         """
         builder = newton.ModelBuilder()
 
-        # 2-link articulation: b1 offset from b0 by (0, 0, 1) so the loop
+        # 3-link articulation: b1 offset from b0 by (0, 0, 1), with b2
+        # colocated with b1, so the loop
         # joint can use asymmetric local anchors that coincide in world space.
         b0 = builder.add_link(mass=1.0, com=wp.vec3(0, 0, 0), inertia=wp.mat33(np.eye(3)))
         b1 = builder.add_link(mass=1.0, com=wp.vec3(0, 0, 0), inertia=wp.mat33(np.eye(3)))
+        b2 = builder.add_link(mass=1.0, com=wp.vec3(0, 0, 0), inertia=wp.mat33(np.eye(3)))
         j0 = builder.add_joint_revolute(-1, b0, axis=(0, 0, 1))
         j1 = builder.add_joint_revolute(
             b0,
@@ -7984,13 +8115,14 @@ class TestMuJoCoArticulationConversion(unittest.TestCase):
             axis=(0, 0, 1),
             parent_xform=wp.transform(wp.vec3(0, 0, 1), wp.quat_identity()),
         )
-        builder.add_articulation([j0, j1])
+        j2 = builder.add_joint_revolute(b1, b2, axis=(0, 1, 0))
+        builder.add_articulation([j0, j1, j2])
 
         # Revolute loop joint BEFORE the free body — creates q_start offset.
-        # Asymmetric anchors: (0, 0, -0.5) on b1 at (0,0,1) → world (0, 0, 0.5)
+        # Asymmetric anchors: (0, 0, -0.5) on b2 at (0,0,1) → world (0, 0, 0.5)
         #                     (0, 0,  0.5) on b0 at origin   → world (0, 0, 0.5)
         loop_j = builder.add_joint_revolute(
-            b1,
+            b2,
             b0,
             parent_xform=wp.transform(wp.vec3(0, 0, -0.5), wp.quat_identity()),
             child_xform=wp.transform(wp.vec3(0, 0, 0.5), wp.quat_identity()),
@@ -8017,10 +8149,10 @@ class TestMuJoCoArticulationConversion(unittest.TestCase):
         self.assertEqual(solver.mj_model.neq, 2)
         self.assertEqual(int(solver.mj_model.eq_type[0]), int(solver._mujoco.mjtEq.mjEQ_CONNECT))
         self.assertEqual(int(solver.mj_model.eq_type[1]), int(solver._mujoco.mjtEq.mjEQ_CONNECT))
-        # First CONNECT: parent anchor on b1 at (0, 0, -0.5)
+        # First CONNECT: parent anchor on b2 at (0, 0, -0.5)
         assert np.allclose(solver.mj_model.eq_data[0, 0:3], [0, 0, -0.5], atol=1e-6)
         # MuJoCo auto-computes child anchor from body positions at compile time:
-        # world point = b1_pos + (0,0,-0.5) = (0,0,1) + (0,0,-0.5) = (0,0,0.5)
+        # world point = b2_pos + (0,0,-0.5) = (0,0,1) + (0,0,-0.5) = (0,0,0.5)
         # in b0 frame: (0,0,0.5) - b0_pos = (0,0,0.5)
         assert np.allclose(solver.mj_model.eq_data[0, 3:6], [0, 0, 0.5], atol=1e-6)
         # Second CONNECT: offset along hinge axis (0, 0, 1) by 0.1
@@ -8064,16 +8196,18 @@ class TestMuJoCoArticulationConversion(unittest.TestCase):
         """
         builder = newton.ModelBuilder()
 
-        # 2-link articulation
+        # 3-link articulation
         b0 = builder.add_link(mass=1.0, com=wp.vec3(0, 0, 0), inertia=wp.mat33(np.eye(3)))
         b1 = builder.add_link(mass=1.0, com=wp.vec3(0, 0, 0), inertia=wp.mat33(np.eye(3)))
+        b2 = builder.add_link(mass=1.0, com=wp.vec3(0, 0, 0), inertia=wp.mat33(np.eye(3)))
         j0 = builder.add_joint_revolute(-1, b0, axis=(0, 0, 1))
         j1 = builder.add_joint_revolute(b0, b1, axis=(0, 0, 1))
-        builder.add_articulation([j0, j1])
+        j2 = builder.add_joint_revolute(b1, b2, axis=(0, 1, 0))
+        builder.add_articulation([j0, j1, j2])
 
         # Ball loop joint BEFORE the free body — creates 4q/3qd offset
         loop_j = builder.add_joint_ball(
-            b1,
+            b2,
             b0,
             parent_xform=wp.transform(wp.vec3(0, 0, -0.5), wp.quat_identity()),
             child_xform=wp.transform(wp.vec3(0, 0, -0.5), wp.quat_identity()),
@@ -10506,7 +10640,7 @@ class TestUsdActuatorInheritrange(unittest.TestCase):
     promoted to ``CtrlSource.JOINT_TARGET`` (matching MJCF), so the compiled
     MuJoCo actuator built by :class:`SolverMuJoCo` is rebuilt from
     ``joint_target_*`` and intentionally does not carry the input ctrlrange.
-    Inputs are driven via ``Control.joint_target_pos`` instead.
+    Inputs are driven via ``Control.joint_target_q`` instead.
     """
 
     JOINT_LO_DEG = -90.0
