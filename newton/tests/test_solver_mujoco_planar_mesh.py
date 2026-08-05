@@ -143,6 +143,36 @@ class TestSolverMuJoCoPlanarMesh(unittest.TestCase):
         self.assertEqual(model.shape_source[1].vertices.shape[0], 4)
         self.assertEqual(model.shape_source[1].indices.shape[0], 6)
 
+    def test_planar_mjcf_mesh_preserves_collision_masks(self):
+        """Preserve imported MuJoCo masks while inflating a planar mesh."""
+        mjcf = """<mujoco>
+            <asset>
+                <mesh name="flat" vertex="-5 -5 0  5 -5 0  -5 5 0  5 5 0" face="0 1 2  1 3 2"/>
+            </asset>
+            <worldbody>
+                <geom name="flat_mesh" type="mesh" mesh="flat" contype="2" conaffinity="4"/>
+                <body name="sphere" pos="0 0 0.005">
+                    <freejoint/>
+                    <geom name="sphere" type="sphere" size="0.01" contype="4" conaffinity="2"/>
+                </body>
+            </worldbody>
+        </mujoco>"""
+        builder = newton.ModelBuilder()
+        builder.add_mjcf(mjcf, parse_visuals=False)
+        flat_mesh = next(shape for shape, label in enumerate(builder.shape_label) if label.endswith("/flat_mesh"))
+
+        # Preserved MJCF masks remain authoritative even if Newton's group no
+        # longer marks this shape as an automatic-contact participant.
+        builder.shape_collision_group[flat_mesh] = 0
+        model = builder.finalize(device="cpu")
+        solver = SolverMuJoCo(model, use_mujoco_cpu=True, use_mujoco_contacts=True)
+
+        self.assertEqual(solver.mj_model.nmesh, 1)
+        self.assertEqual(solver.mj_model.mesh_vertnum[0], 8)
+        self.assertEqual(solver.mj_model.mesh_facenum[0], 12)
+        np.testing.assert_array_equal(solver.mj_model.geom_contype, [2, 4])
+        np.testing.assert_array_equal(solver.mj_model.geom_conaffinity, [4, 2])
+
     def test_planar_convex_mesh_generates_mujoco_contacts(self):
         """Verify a planar convex mesh generates MuJoCo contacts."""
         vertices = np.array(
