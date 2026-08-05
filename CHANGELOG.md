@@ -132,6 +132,7 @@
 
 ### Fixed
 
+- Allow `SolverMuJoCo(use_mujoco_contacts=True)` to collide planar mesh shapes by exporting a symmetric thin contact proxy, including shapes retained only for explicit MuJoCo contact pairs.
 - Fix MPR returning scale-dependent, excessively deep contacts for small convex shapes on large mesh triangles while preserving triangle-specific shared-edge manifold witnesses.
 - Make deterministic collision pipelines cover hydroelastic contact generation and reduction, including unique reduced-contact sort keys and overflow-safe fixed-point pressure accumulation.
 - Fix `SolverMuJoCo` retaining an invalid external-contact cache when its first step is captured in a CUDA graph. (#3767)

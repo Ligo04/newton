@@ -19,15 +19,19 @@ class TestSolverMuJoCoPlanarMesh(unittest.TestCase):
             self.skipTest(str(exc))
 
     @staticmethod
-    def _build_mesh_model(vertices, indices):
+    def _build_mesh_model(vertices, indices, body_height=1.0, convex=False):
         builder = newton.ModelBuilder()
-        body = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 1.0), wp.quat_identity()))
+        body = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, body_height), wp.quat_identity()))
         builder.add_shape_sphere(body=body, radius=0.01)
         mesh = newton.Mesh(vertices=vertices, indices=indices, compute_inertia=False)
-        builder.add_shape_mesh(body=-1, mesh=mesh, label="flat_mesh")
+        if convex:
+            builder.add_shape_convex_hull(body=-1, mesh=mesh, label="flat_mesh")
+        else:
+            builder.add_shape_mesh(body=-1, mesh=mesh, label="flat_mesh")
         return builder.finalize(device="cpu")
 
     def test_planar_quad_compiles_with_newton_contacts(self):
+        """Verify a planar quad compiles when Newton supplies contacts."""
         vertices = np.array(
             [
                 [-5.0, -5.0, 0.0],
@@ -49,6 +53,7 @@ class TestSolverMuJoCoPlanarMesh(unittest.TestCase):
         self.assertEqual(model.shape_source[1].indices.shape[0], 6)
 
     def test_planar_triangle_compiles_with_newton_contacts(self):
+        """Verify a planar triangle compiles when Newton supplies contacts."""
         vertices = np.array(
             [
                 [-1.0, 0.0, 0.0],
@@ -69,6 +74,7 @@ class TestSolverMuJoCoPlanarMesh(unittest.TestCase):
         self.assertEqual(model.shape_source[1].indices.shape[0], 3)
 
     def test_nonplanar_mesh_is_not_inflated(self):
+        """Verify a non-planar mesh keeps its authored geometry."""
         vertices = np.array(
             [
                 [-1.0, -1.0, 0.0],
@@ -111,7 +117,8 @@ class TestSolverMuJoCoPlanarMesh(unittest.TestCase):
 
         self.assertEqual(solver.mj_model.nmesh, 1)
 
-    def test_planar_mesh_rejects_mujoco_contacts(self):
+    def test_planar_mesh_compiles_with_mujoco_contacts(self):
+        """Verify a planar mesh compiles when MuJoCo supplies contacts."""
         vertices = np.array(
             [
                 [-5.0, -5.0, 0.0],
@@ -124,10 +131,38 @@ class TestSolverMuJoCoPlanarMesh(unittest.TestCase):
         indices = np.array([0, 1, 2, 1, 3, 2], dtype=np.int32)
         model = self._build_mesh_model(vertices, indices)
 
-        with self.assertRaisesRegex(ValueError, "planar mesh collider"):
-            SolverMuJoCo(model, use_mujoco_cpu=True, use_mujoco_contacts=True)
+        solver = SolverMuJoCo(model, use_mujoco_cpu=True, use_mujoco_contacts=True)
 
-    def test_planar_mesh_rejects_explicit_mujoco_pair_contacts(self):
+        self.assertEqual(solver.mj_model.nmesh, 1)
+        self.assertEqual(solver.mj_model.mesh_vertnum[0], 8)
+        self.assertEqual(solver.mj_model.mesh_facenum[0], 12)
+        mesh_vertices = solver.mj_model.mesh_vert[
+            solver.mj_model.mesh_vertadr[0] : solver.mj_model.mesh_vertadr[0] + solver.mj_model.mesh_vertnum[0]
+        ]
+        self.assertGreater(float(np.min(np.ptp(mesh_vertices, axis=0))), 0.0)
+        self.assertEqual(model.shape_source[1].vertices.shape[0], 4)
+        self.assertEqual(model.shape_source[1].indices.shape[0], 6)
+
+    def test_planar_convex_mesh_generates_mujoco_contacts(self):
+        """Verify a planar convex mesh generates MuJoCo contacts."""
+        vertices = np.array(
+            [
+                [-5.0, -5.0, 0.0],
+                [5.0, -5.0, 0.0],
+                [-5.0, 5.0, 0.0],
+                [5.0, 5.0, 0.0],
+            ],
+            dtype=np.float32,
+        )
+        indices = np.array([0, 1, 2, 1, 3, 2], dtype=np.int32)
+        model = self._build_mesh_model(vertices, indices, body_height=0.005, convex=True)
+
+        solver = SolverMuJoCo(model, use_mujoco_cpu=True, use_mujoco_contacts=True)
+
+        self.assertGreater(solver.mj_data.ncon, 0)
+
+    def test_planar_mesh_compiles_with_explicit_mujoco_pair_contacts(self):
+        """Verify an explicit MuJoCo pair retains a planar mesh collider."""
         vertices = np.array(
             [
                 [-5.0, -5.0, 0.0],
@@ -166,8 +201,11 @@ class TestSolverMuJoCoPlanarMesh(unittest.TestCase):
         )
         model = builder.finalize(device="cpu")
 
-        with self.assertRaisesRegex(ValueError, "planar mesh collider"):
-            SolverMuJoCo(model, use_mujoco_cpu=True, use_mujoco_contacts=True)
+        solver = SolverMuJoCo(model, use_mujoco_cpu=True, use_mujoco_contacts=True)
+
+        self.assertEqual(solver.mj_model.nmesh, 1)
+        self.assertEqual(solver.mj_model.mesh_vertnum[0], 8)
+        self.assertEqual(solver.mj_model.mesh_facenum[0], 12)
 
 
 if __name__ == "__main__":

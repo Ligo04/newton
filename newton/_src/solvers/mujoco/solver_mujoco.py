@@ -371,7 +371,16 @@ def _make_nonplanar_mujoco_mesh(
     maxhullvert: int,
     extent_axis: np.ndarray | None = None,
     eps: float = 1.0e-6,
+    *,
+    preserve_surface: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, int]:
+    """Give a planar mesh enough thickness for MuJoCo's convex-hull compiler.
+
+    When MuJoCo owns contact generation, ``preserve_surface`` creates a thin
+    symmetric prism so the authored plane stays at the center of the contact
+    proxy. Otherwise a single off-plane triangle is sufficient because Newton's
+    collision pipeline still owns the contacts.
+    """
     vertices = np.asarray(vertices).reshape(-1, 3)
     indices = np.asarray(indices, dtype=np.int32).flatten()
     if len(vertices) < 3 or indices.size < 3 or indices.size % 3 != 0:
@@ -399,6 +408,44 @@ def _make_nonplanar_mujoco_mesh(
         if normal_length <= eps:
             raise ValueError("Unable to build a temporary non-planar MuJoCo mesh from coincident vertices")
         normal /= normal_length
+
+    if preserve_surface:
+        faces = indices.reshape(-1, 3)
+        for tri in faces:
+            face_normal = np.cross(vertices[tri[1]] - vertices[tri[0]], vertices[tri[2]] - vertices[tri[0]])
+            if np.linalg.norm(face_normal) > edge_tolerance:
+                if np.dot(face_normal, normal) < 0.0:
+                    normal = -normal
+                break
+
+        half_thickness = 0.5 * max(1.0e-3, 1.0e-3 * extent)
+        top_vertices = vertices + normal * half_thickness
+        bottom_vertices = vertices - normal * half_thickness
+        vertex_count = len(vertices)
+
+        top_faces = faces
+        bottom_faces = faces[:, ::-1] + vertex_count
+        edge_counts: dict[tuple[int, int], tuple[int, int, int]] = {}
+        for tri in faces:
+            for raw_a, raw_b in ((tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])):
+                a = int(raw_a)
+                b = int(raw_b)
+                edge_key = (min(a, b), max(a, b))
+                count, first_a, first_b = edge_counts.get(edge_key, (0, a, b))
+                edge_counts[edge_key] = (count + 1, first_a, first_b)
+
+        side_faces = []
+        for count, a, b in edge_counts.values():
+            if count != 1:
+                continue
+            side_faces.extend(((a, a + vertex_count, b + vertex_count), (a, b + vertex_count, b)))
+
+        inflated_vertices = np.vstack((top_vertices, bottom_vertices))
+        face_groups = [top_faces, bottom_faces]
+        if side_faces:
+            face_groups.append(np.asarray(side_faces, dtype=np.int32))
+        inflated_indices = np.concatenate(face_groups).astype(np.int32, copy=False).flatten()
+        return inflated_vertices, inflated_indices, max(maxhullvert, len(inflated_vertices))
 
     apex = vertices.mean(axis=0, dtype=np.float64) + normal * max(1.0e-3, 1.0e-3 * extent)
 
@@ -5813,7 +5860,7 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
                         actuator_required_shapes.add(site_shape_by_label[label])
 
         required_shapes = tendon_required_shapes | actuator_required_shapes | mujoco_pair_contact_shapes
-        mesh_export_cache: dict[tuple[int, tuple[float, float, float]], tuple[np.ndarray, np.ndarray, int, bool]] = {}
+        mesh_export_cache: dict[tuple[int, tuple[float, float, float], bool], tuple[np.ndarray, np.ndarray, int]] = {}
 
         def add_geoms(newton_body_id: int):
             body = mj_bodies[body_mapping[newton_body_id]]
@@ -5912,7 +5959,11 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
                 elif stype == GeoType.MESH or stype == GeoType.CONVEX_MESH:
                     mesh_src = model.shape_source[shape]
                     size = shape_size[shape]
-                    key = _mesh_scale_key(mesh_src, size)
+                    uses_mujoco_contacts = (
+                        bool(shape_flags[shape] & ShapeFlags.COLLIDE_SHAPES) and int(shape_collision_group[shape]) != 0
+                    ) or shape in mujoco_pair_contact_shapes
+                    preserve_surface = self._use_mujoco_contacts and not disable_contacts and uses_mujoco_contacts
+                    key = (*_mesh_scale_key(mesh_src, size), preserve_surface)
                     mesh_export = mesh_export_cache.get(key)
                     if mesh_export is None:
                         vertices = mesh_src.vertices * size
@@ -5922,26 +5973,20 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
                         is_planar = _mujoco_mesh_vertices_are_planar(vertices, extent_axis)
                         if is_planar:
                             # MuJoCo compiles every mesh geom through its convex-hull path,
-                            # which rejects lower-dimensional vertex clouds. When Newton
-                            # supplies contacts, the MuJoCo mesh only needs to compile and
-                            # keep a stable geom id, so add a tiny referenced off-plane
-                            # vertex to the exported asset.
+                            # which rejects lower-dimensional vertex clouds. Preserve the
+                            # authored surface with a symmetric thin proxy when MuJoCo owns
+                            # contacts; otherwise one off-plane triangle is sufficient.
                             vertices, indices, maxhullvert = _make_nonplanar_mujoco_mesh(
-                                vertices, indices, maxhullvert, extent_axis
+                                vertices,
+                                indices,
+                                maxhullvert,
+                                extent_axis,
+                                preserve_surface=preserve_surface,
                             )
-                        mesh_export = (vertices, indices, maxhullvert, is_planar)
+                        mesh_export = (vertices, indices, maxhullvert)
                         mesh_export_cache[key] = mesh_export
 
-                    vertices, indices, maxhullvert, is_planar = mesh_export
-                    uses_mujoco_contacts = (
-                        bool(shape_flags[shape] & ShapeFlags.COLLIDE_SHAPES) and int(shape_collision_group[shape]) != 0
-                    ) or shape in mujoco_pair_contact_shapes
-                    if is_planar and self._use_mujoco_contacts and not disable_contacts and uses_mujoco_contacts:
-                        raise ValueError(
-                            f"MuJoCo contact generation does not support planar mesh collider "
-                            f"{model.shape_label[shape]!r} (shape {shape}). Use use_mujoco_contacts=False so "
-                            "Newton's collision pipeline handles this mesh, or replace it with a plane/box/thick mesh."
-                        )
+                    vertices, indices, maxhullvert = mesh_export
                     # Newton writes body inertia explicitly. Thin components from a convex
                     # decomposition therefore need shell mesh inertia only to compile
                     # reliably, without changing the body's authored mass properties.
@@ -6826,15 +6871,17 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
             eq.data[3] = 0.0
             eq.data[4] = 0.0
 
-        # Count non-colliding geoms that were kept because they are required by spatial tendons
-        tendon_extra_geoms = sum(
+        # Count non-colliding geoms retained for explicit pairs, spatial tendons,
+        # or actuators. They are absent from ``colliding_shapes_per_world`` but
+        # intentionally survive the visual-only filtering above.
+        required_extra_geoms = sum(
             1
-            for s in tendon_required_shapes
+            for s in required_shapes
             if s in selected_shapes_set
             and not (shape_flags[s] & ShapeFlags.SITE)
             and not (shape_flags[s] & ShapeFlags.COLLIDE_SHAPES)
         )
-        if skip_visual_only_geoms and len(spec.geoms) != colliding_shapes_per_world + tendon_extra_geoms:
+        if skip_visual_only_geoms and len(spec.geoms) != colliding_shapes_per_world + required_extra_geoms:
             raise ValueError(
                 "The number of geoms in the MuJoCo model does not match the number of colliding shapes in the Newton model."
             )
