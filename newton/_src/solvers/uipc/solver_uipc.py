@@ -21,7 +21,7 @@ from ...sim import ModelFlags
 from ..solver import SolverBase
 
 try:
-    from typing import override
+    from typing import override  # ty: ignore[unresolved-import]
 except ImportError:  # Python < 3.12
     from typing_extensions import override
 
