@@ -21,6 +21,7 @@ from newton import JointTargetMode
 
 class Example:
     def __init__(self, viewer, args):
+        newton.use_coord_layout_targets = True
         self.fps = 60
         self.frame_dt = 1.0 / self.fps
         self.sim_time = 0.0
@@ -48,8 +49,8 @@ class Example:
         if len(articulation_builder.joint_q) > 6:
             articulation_builder.joint_q[3:7] = [0.0, 0.0, 0.0, 1.0]
 
-        # joint_target_* and joint_armature are indexed by DOF, while
-        # joint_type is indexed by joint — walk both spaces in parallel.
+        # Drive gains, modes, and armature are indexed by DOF, while joint_type
+        # is indexed by joint — walk both spaces in parallel.
         joint_count = len(articulation_builder.joint_type)
         for j in range(joint_count):
             jtype = articulation_builder.joint_type[j]

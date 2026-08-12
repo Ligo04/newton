@@ -1264,6 +1264,33 @@ add_example_test(
 
 
 class TestUIPCSoftbodyExamples(unittest.TestCase):
+    def test_uipc_examples_with_multicoordinate_joints_use_coord_layout_targets(self):
+        """Require coordinate-layout targets in affected UIPC examples."""
+        examples_dir = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "examples",
+            "uipc",
+        )
+        affected_examples = (
+            "basic/example_uipc_conveyor.py",
+            "basic/example_uipc_joints.py",
+            "basic/example_uipc_load_usd.py",
+            "cloth/example_uipc_cloth_poker_cards.py",
+            "contacts/example_uipc_brick_stacking.py",
+            "robot/example_uipc_allegro_hand.py",
+            "robot/example_uipc_anymal_d.py",
+            "robot/example_uipc_g1.py",
+            "robot/example_uipc_h1.py",
+            "robot/example_uipc_panda.py",
+            "sensors/example_uipc_sensor_contact_scene.py",
+        )
+
+        for relative_path in affected_examples:
+            with self.subTest(example=relative_path):
+                with open(os.path.join(examples_dir, relative_path)) as example_file:
+                    source = example_file.read()
+                self.assertIn("newton.use_coord_layout_targets = True", source)
+
     def test_uipc_brick_stacking_matches_core_original_behaviors(self):
         example_path = os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -1291,6 +1318,7 @@ class TestUIPCSoftbodyExamples(unittest.TestCase):
         self.assertIn("default=True", source)
         self.assertIn('self.enable_contact = getattr(args, "enable_contact", True)', source)
         self.assertIn("self.solver.set_contact(enable=self.enable_contact, d_hat=self.uipc_gap)", source)
+        self.assertIn("newton.use_coord_layout_targets = True", source)
         self.assertIn("BRICK_ABD_KAPPA = 10.0 * uipc.unit.GPa", source)
         self.assertIn("newton.solvers.SolverUIPC.register_custom_attributes(builder)", source)
         self.assertIn('custom_attributes={"uipc:abd_kappa": BRICK_ABD_KAPPA}', source)

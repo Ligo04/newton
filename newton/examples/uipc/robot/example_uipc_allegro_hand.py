@@ -23,6 +23,7 @@ from newton import JointTargetMode
 
 class Example:
     def __init__(self, viewer, args):
+        newton.use_coord_layout_targets = True
         self.fps = 60
         self.frame_dt = 1.0 / self.fps
         self.sim_time = 0.0
@@ -107,6 +108,7 @@ class Example:
         self.joint_limit_lower = self.model.joint_limit_lower.numpy()
         self.joint_limit_upper = self.model.joint_limit_upper.numpy()
         self.joint_qd_start = self.model.joint_qd_start.numpy()
+        self.joint_target_q_start = self.model.joint_target_q_start.numpy()
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
         self.solver.initialize(self.state_0)
         self.viewer.set_model(self.model)
@@ -125,18 +127,20 @@ class Example:
         t = self.sim_time
 
         for w in range(self.world_count):
-            # Each world has 22 joints; the root joint DOF start
+            # Each world has 22 joints; cache its coordinate and DOF starts.
             root_joint_id = w * 22
+            root_target_q_start = self.joint_target_q_start[root_joint_id]
             root_dof_start = self.joint_qd_start[root_joint_id]
 
             # Animate the 20 finger DOFs (skip the fixed root and cube free joint)
             for i in range(20):
-                di = root_dof_start + i
+                target_q_idx = root_target_q_start + i
+                dof_idx = root_dof_start + i
                 val = np.sin(t + i * 0.6) * 0.1 + 0.3
-                target_pos[di] = np.clip(
+                target_pos[target_q_idx] = np.clip(
                     val,
-                    self.joint_limit_lower[di],
-                    self.joint_limit_upper[di],
+                    self.joint_limit_lower[dof_idx],
+                    self.joint_limit_upper[dof_idx],
                 )
 
         self.control.joint_target_q.assign(target_pos)

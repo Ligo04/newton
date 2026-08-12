@@ -130,6 +130,7 @@ def create_annular_prism_mesh(
 
 class Example:
     def __init__(self, viewer, args=None):
+        newton.use_coord_layout_targets = True
         self.fps = 60
         self.frame_dt = 1.0 / self.fps
         self.sim_time = 0.0
@@ -176,10 +177,11 @@ class Example:
             label="conveyor_belt_joint",
         )
 
+        belt_q_start = builder.joint_q_start[self.belt_joint]
         belt_qd_start = builder.joint_qd_start[self.belt_joint]
         builder.joint_target_ke[belt_qd_start] = 1e5
         builder.joint_target_kd[belt_qd_start] = 1e3
-        builder.joint_target_q[belt_qd_start] = 0.0
+        builder.joint_target_q[belt_q_start] = 0.0
         builder.joint_target_mode[belt_qd_start] = int(JointTargetMode.POSITION)
         builder.joint_qd[belt_qd_start] = self.belt_angular_speed
         builder.add_articulation([self.belt_joint], label="conveyor_belt")
@@ -303,9 +305,9 @@ class Example:
         self.control = self.model.control()
         self.contacts = newton.CollisionPipeline(self.model).contacts()
 
-        # Cache belt DOF index for runtime target updates
-        qd_starts = self.model.joint_qd_start.numpy()
-        self.belt_qd_start = int(qd_starts[self.belt_joint])
+        # Cache belt coordinate index for runtime target updates.
+        target_q_starts = self.model.joint_target_q_start.numpy()
+        self.belt_target_q_start = int(target_q_starts[self.belt_joint])
 
         self.viewer.set_model(self.model)
         self.viewer.set_camera(wp.vec3(2.7, -1.3, 5.0), -60.0, -200.0)
@@ -315,7 +317,7 @@ class Example:
         """Set belt revolute joint target angle for constant-speed rotation."""
         target_angle = self.belt_angular_speed * self.sim_time
         target_pos = self.control.joint_target_q.numpy()
-        target_pos[self.belt_qd_start] = target_angle
+        target_pos[self.belt_target_q_start] = target_angle
         self.control.joint_target_q.assign(target_pos)
 
     def simulate(self):
