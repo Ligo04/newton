@@ -33,6 +33,7 @@ _DEFAULT_USD = str(Path(newton.__file__).parent / "tests" / "assets" / "four_lin
 
 class Example:
     def __init__(self, viewer, args: argparse.Namespace):
+        newton.use_coord_layout_targets = True
         self.fps = 60
         self.frame_dt = 1.0 / self.fps
         self.sim_time = 0.0
