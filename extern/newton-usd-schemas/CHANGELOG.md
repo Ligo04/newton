@@ -1,3 +1,21 @@
+# 0.5.0
+
+## Features
+
+- Added `NewtonCurvesDeformableMaterialAPI`, which extends the AOUSD proposed `PhysicsCurvesDeformableMaterialAPI` with damping attributes
+- Added `NewtonPointsDeformableSimAPI`, which extends the AOUSD proposed Deformables schemas for particle simulation
+  - Marks a `Points` prim as deformable simulation geometry. Particle positions, velocities, widths, and stable identifiers use the standard `UsdGeomPoints` `points`, `velocities`, `widths` (or `primvars:widths`), and `ids` attributes. Widths are diameters, so radius is `width / 2`.
+  - As with the other `*DeformableSimAPI`, apply `PhysicsDeformableBodyAPI` to this prim or its parent to define the deformable body and associate it with a `Scene` prim via the `physics:simulationOwner` relationship on the body.
+- Added `NewtonMPMSceneAPI`, which further extends a `PhysicsScene` with Newton's MPM solver configuration
+  - Applying `NewtonMPMSceneAPI` implicitly applies the `NewtonSceneAPI` as well
+- Added `NewtonMPMMaterialAPI`, which provides constitutive parameters for Newton's MPM solver
+  - Applying this schema also applies `PhysicsMaterialAPI`, but it does not apply `NewtonMaterialAPI`, which describes surface-contact response.
+
+## Fixes
+
+- Document contact friction coefficients as length-dimensioned
+  - `newton:torsionalFriction` and `newton:rollingFriction` were previously documented as dimensionless, but both are length-dimensioned in all solvers that use them.
+
 # 0.4.1
 
 ## Features
