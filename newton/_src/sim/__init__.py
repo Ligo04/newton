@@ -11,6 +11,7 @@ from .articulation import (
 )
 from .builder import ModelBuilder
 from .collide import CollisionPipeline
+from .contact_kinematics import eval_rigid_contact_kinematics
 from .contacts import Contacts
 from .control import Control
 from .enums import (
@@ -47,4 +48,5 @@ __all__ = [
     "eval_inverse_dynamics_passive",
     "eval_jacobian",
     "eval_mass_matrix",
+    "eval_rigid_contact_kinematics",
 ]

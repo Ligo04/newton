@@ -68,8 +68,8 @@ importers = [
     "usd-core>=25.5,<26.5 ; platform_machine != 'aarch64' and python_version < '3.14'",
     "usd-exchange>=2.2.0 ; platform_machine == 'aarch64' and python_version < '3.13'",
 
-    # Newton USD Schemas (vendored in extern/, adds NewtonStablePDControlAPI on top of upstream 0.4.1)
-    "newton-usd-schemas>=0.4.1",
+    # Newton USD Schemas (vendored in extern/, extends upstream 0.5.0 with NewtonStablePDControlAPI)
+    "newton-usd-schemas>=0.5.0",
 ]
 
 # Remeshing dependencies (for SurfaceReconstructor)
