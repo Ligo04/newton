@@ -83,6 +83,7 @@ _UIPC_INERTIA_ATTR: str = "inertia"
 _UIPC_ABD_MASS_ATTR: str = "abd_mass"
 _UIPC_ABD_MX_ATTR: str = "abd_mass_x_bar"
 _UIPC_ABD_MXX_ATTR: str = "abd_mass_x_bar_x_bar"
+_UIPC_ADAPTIVE_KAPPA: float = -1.0
 
 
 class SolverUIPC(SolverBase):
@@ -334,7 +335,8 @@ class SolverUIPC(SolverBase):
             dt: Time step [s]. UIPC uses a fixed time step configured here.
             scene_config: Optional UIPC scene configuration dict passed directly
                 to ``uipc.Scene()``. If ``None``, uses ``Scene.default_config()``
-                with ``dt`` and ``gravity`` overridden from the Newton model.
+                with full-GPU FusedPCG CUDA Graph mode enabled and ``dt`` and
+                ``gravity`` overridden from the Newton model.
             kappa: AffineBody stiffness parameter [Pa]. Defaults to ``1 GPa``.
             default_mass_density: Default mass density [kg/m^3] for bodies.
             logger_level: UIPC logger verbosity. Use ``uipc.Logger.Critical``,
@@ -440,6 +442,10 @@ class SolverUIPC(SolverBase):
         # Scene config: start from UIPC defaults, apply Newton model overrides.
         if scene_config is None:
             scene_config: dict[str, Any] = UScene.default_config()
+            scene_config["linear_system"]["solver"] = "fused_pcg"
+            scene_config["linear_system"]["use_cuda_graph"] = 2
+            scene_config["linear_system"]["fem_preconditioner"] = "mas"
+            scene_config["contact"]["constitution"] = "ipc"
         scene_config["dt"] = dt
         scene_config["contact"]["d_hat"] = 0.001
         scene_config["contact"]["enable"] = False
@@ -626,8 +632,9 @@ class SolverUIPC(SolverBase):
         - **robo_elem** - applied to articulated robot links (non-free joints).
         - **actor_elem** - applied to bodies attached via free joints.
 
-        Default contact pairs (friction ``0.5``, stiffness ``1 GPa``) are
-        inserted for all combinations except ``robo-robo``.  The callback is
+        Default contact pairs use friction ``0.5`` and UIPC's adaptive contact
+        stiffness (``kappa=-1.0``). They are inserted for all combinations,
+        with selected pairs such as ``robo-robo`` disabled. The callback is
         invoked once per world so that users can create additional elements,
         insert custom contact pairs, or modify the defaults.
 
@@ -1011,15 +1018,15 @@ class SolverUIPC(SolverBase):
             env_elem = contact_tabular.create(f"env{suffix}")
             robo_elem = contact_tabular.create(f"robot{suffix}")
             actor_elem = contact_tabular.create(f"actor{suffix}")
-            contact_tabular.insert(env_elem, env_elem, 0.5, 1.0 * GPa, False)
-            contact_tabular.insert(env_elem, robo_elem, 0.5, 1.0 * GPa, True)
-            contact_tabular.insert(env_elem, actor_elem, 0.5, 1.0 * GPa, True)
-            contact_tabular.insert(ground_elem, env_elem, 0.5, 1.0 * GPa, False)
-            contact_tabular.insert(ground_elem, robo_elem, 0.5, 1.0 * GPa, True)
-            contact_tabular.insert(ground_elem, actor_elem, 0.5, 1.0 * GPa, True)
-            contact_tabular.insert(robo_elem, robo_elem, 0.5, 1.0 * GPa, False)
-            contact_tabular.insert(robo_elem, actor_elem, 0.5, 1.0 * GPa, True)
-            contact_tabular.insert(actor_elem, actor_elem, 0.5, 1.0 * GPa, True)
+            contact_tabular.insert(env_elem, env_elem, 0.5, _UIPC_ADAPTIVE_KAPPA, False)
+            contact_tabular.insert(env_elem, robo_elem, 0.5, _UIPC_ADAPTIVE_KAPPA, True)
+            contact_tabular.insert(env_elem, actor_elem, 0.5, _UIPC_ADAPTIVE_KAPPA, True)
+            contact_tabular.insert(ground_elem, env_elem, 0.5, _UIPC_ADAPTIVE_KAPPA, False)
+            contact_tabular.insert(ground_elem, robo_elem, 0.5, _UIPC_ADAPTIVE_KAPPA, True)
+            contact_tabular.insert(ground_elem, actor_elem, 0.5, _UIPC_ADAPTIVE_KAPPA, True)
+            contact_tabular.insert(robo_elem, robo_elem, 0.5, _UIPC_ADAPTIVE_KAPPA, False)
+            contact_tabular.insert(robo_elem, actor_elem, 0.5, _UIPC_ADAPTIVE_KAPPA, True)
+            contact_tabular.insert(actor_elem, actor_elem, 0.5, _UIPC_ADAPTIVE_KAPPA, True)
 
             if self._contact_tabular_fn is not None:
                 overrides = self._contact_tabular_fn(

@@ -181,7 +181,7 @@ class Example:
             {
                 "linear_system": {"tol_rate": UIPC_SOLVE_TOL},
                 "newton": {
-                    "translation_tol": UIPC_SOLVE_TOL,
+                    "transrate_tol": UIPC_SOLVE_TOL,
                     "velocity_tol": UIPC_SOLVE_TOL,
                 },
             }

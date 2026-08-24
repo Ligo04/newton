@@ -11,7 +11,7 @@ import numpy as np
 import uipc.builtin as uipc_builtin
 from uipc.constitution import ARAP, ElasticModuli, SoftPositionConstraint, StableNeoHookean
 from uipc.core import ContactElement, SubsceneElement
-from uipc.geometry import flip_inward_triangles, label_surface, label_triangle_orient, mesh_partition
+from uipc.geometry import flip_inward_triangles, label_surface, label_triangle_orient
 from uipc.geometry import tetmesh as uipc_tetmesh
 
 from newton import Model
@@ -140,8 +140,6 @@ class DeformableBodyBuilder:
         label_surface(sc)
         label_triangle_orient(sc)
         sc = flip_inward_triangles(sc)
-        mesh_partition(sc, 16)
-
         mass_density = self._estimate_mass_density(
             model, selected_particle_indices, local_tets, deformable_verts, authored_density
         )

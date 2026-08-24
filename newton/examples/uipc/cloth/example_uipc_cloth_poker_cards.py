@@ -203,7 +203,7 @@ class Example:
         self.solver.set_contact(enable=True, d_hat=0.0005)
         self.solver.configure_scene(
             {
-                "newton": {"velocity_tol": 1.0e-3, "translation_tol": 1.0e-3},
+                "newton": {"velocity_tol": 1.0e-3, "transrate_tol": 1.0e-3},
                 "line_search": {"max_iter": 8},
             }
         )

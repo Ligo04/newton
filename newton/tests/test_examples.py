@@ -1398,6 +1398,44 @@ class TestUIPCSoftbodyExamples(unittest.TestCase):
         self.assertTrue(default_args.enable_contact)
         self.assertFalse(disabled_args.enable_contact)
 
+    def test_uipc_brick_stacking_custom_contact_pairs_use_adaptive_kappa(self):
+        if not _HAS_UIPC:
+            self.skipTest("Requires uipc")
+
+        class ContactTabularRecorder:
+            def __init__(self):
+                self.created_name: str | None = None
+                self.inserts: list[tuple[int, int, float, float, bool]] = []
+
+            def create(self, name: str) -> int:
+                self.created_name = name
+                return 4
+
+            def insert(self, left: int, right: int, friction: float, resistance: float, enabled: bool) -> None:
+                self.inserts.append((left, right, friction, resistance, enabled))
+
+        contact_tabular = ContactTabularRecorder()
+        example = types.SimpleNamespace(board_floor_bodies=[10, 11])
+
+        body_contact_elements = UIPCBrickStackingExample._configure_contact_tabular(
+            example,
+            contact_tabular,
+            0,
+            0,
+            1,
+            2,
+            3,
+        )
+
+        self.assertEqual(contact_tabular.created_name, "board_floor")
+        self.assertEqual(len(contact_tabular.inserts), 6)
+        self.assertEqual(
+            {(min(left, right), max(left, right)) for left, right, *_ in contact_tabular.inserts},
+            {(0, 1), (0, 4), (1, 4), (2, 4), (3, 4), (4, 4)},
+        )
+        self.assertTrue(all(resistance == -1.0 for _, _, _, resistance, _ in contact_tabular.inserts))
+        self.assertEqual(body_contact_elements, {10: 4, 11: 4})
+
     def test_uipc_brick_stacking_initial_pose_is_red_approach(self):
         if not _HAS_UIPC:
             self.skipTest("Requires uipc")
@@ -1545,7 +1583,7 @@ class TestUIPCSoftbodyExamples(unittest.TestCase):
         self.assertIn("mu=THREAD_CONTACT_MU", source)
         self.assertNotIn("mu=0.12", source)
         self.assertIn("self.solver.configure_scene", source)
-        self.assertIn('"translation_tol": UIPC_SOLVE_TOL', source)
+        self.assertIn('"transrate_tol": UIPC_SOLVE_TOL', source)
         self.assertIn('"velocity_tol": UIPC_SOLVE_TOL', source)
         self.assertIn('"linear_system": {"tol_rate": UIPC_SOLVE_TOL}', source)
         self.assertIn('parser.add_argument(\n            "--mesh-source"', source)

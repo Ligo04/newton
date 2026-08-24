@@ -20,7 +20,7 @@
 | `backend` | `"cuda"` | `uipc.Engine(backend_name=...)` | 选择 UIPC engine backend。 |
 | `workspace` | `"/tmp/newton_uipc"` | `uipc.Engine(..., workspace=...)` | UIPC 输出目录，也用于 dump 和 profile 报告。 |
 | `dt` | `1.0 / 60.0` | `scene_config["dt"]` | UIPC 固定步长 [s]。 |
-| `scene_config` | `UScene.default_config()` | `uipc.Scene(scene_config)` | 可直接传入 UIPC scene 配置；构造时会覆盖 `dt`、`gravity`、部分 contact/newton 默认值。 |
+| `scene_config` | `UScene.default_config()` | `uipc.Scene(scene_config)` | 未传入时启用全 GPU FusedPCG CUDA Graph；显式传入的配置会保留其 linear solver、graph mode 和 contact constitution。构造时仍会覆盖 `dt`、`gravity`、部分 contact/newton 默认值。 |
 | `kappa` | `100 * MPa` | `AffineBodyConstitution`、关节 builder | 刚体 AffineBody stiffness 参数 [Pa]。 |
 | `default_mass_density` | `1000.0` | 刚体 / 软体 fallback 密度 | 当无法从质量和体积估计密度时使用 [kg/m^3]。 |
 | `logger_level` | `ULogger.Warn` | `ULogger.set_level()` | UIPC 日志等级。 |
@@ -34,14 +34,20 @@
 
 | 配置项 | 当前默认值 | 说明 |
 | --- | --- | --- |
+| `scene_config["linear_system"]["solver"]` | `"fused_pcg"` | 使用融合 PCG 求解器。 |
+| `scene_config["linear_system"]["use_cuda_graph"]` | `2` | 尝试把一次 FusedPCG 初始化、预条件、迭代和设备侧收敛判断捕获为全 GPU CUDA Graph。 |
+| `scene_config["linear_system"]["fem_preconditioner"]` | `"mas"` | 让 UIPC 在内部为所有非 Empty FEM 几何自动分区并使用 MAS；替代 0.0.25 的 Python `mesh_partition()`。 |
+| `scene_config["contact"]["constitution"]` | `"ipc"` | 选择 IPC contact；AL-IPC 会关闭 FusedPCG CUDA Graph。 |
 | `scene_config["contact"]["enable"]` | `False` | UIPC contact 默认关闭；需要在 scene config 中打开后才启用。 |
 | `scene_config["contact"]["d_hat"]` | `0.001` | IPC 接触安全层距离 [m]。 |
 | `scene_config["newton"]["velocity_tol"]` | `0.001` | UIPC Newton 迭代速度容差。 |
-| `scene_config["newton"]["translation_tol"]` | `0.01` | UIPC Newton 迭代平移容差。 |
+| `scene_config["newton"]["transrate_tol"]` | `0.01` | UIPC Newton 迭代平移容差。 |
 | `scene_config["gravity"]` | 来自 `model.gravity` | 若 model 有 gravity，则写入 UIPC scene。 |
 | 默认 contact pair `friction` | `0.5` | 内置 `env/robot/actor/ground` pair 的摩擦系数。 |
-| 默认 contact pair `stiffness` | `1.0 * GPa` | 内置 contact pair 的接触 stiffness。 |
+| 默认 contact pair `stiffness` | `-1.0` | 启用 UIPC scene-adaptive kappa；有效刚度由场景质量、尺度、`d_hat` 和时间步计算。 |
 | 默认 contact pair `ccd` | 按 pair 设置 | `env-robot`、`env-actor`、`ground-robot`、`ground-actor`、`robot-actor`、`actor-actor` 默认开启 CCD；同类静态/机器人 pair 多数关闭。 |
+
+Mode 2 只捕获一次 FusedPCG 求解，不捕获整帧仿真。Newton 外层迭代、碰撞检测与动态接触集合生成、梯度/Hessian 装配、CCD、CFL、line search、Newton 收敛判断和 scene retrieve 仍由 CPU 编排。CUDA 条件图节点不可用时会退回 Mode 1；捕获失败时会退回 block replay 或普通 kernel launch。Mode 1 通常具有更低的帧耗时，Mode 2 的主要用途是让 CPU 不参与 PCG 内层循环。
 
 ## 刚体 / AffineBody 参数
 
@@ -81,7 +87,6 @@
 | `model.tet_materials[:, 2]` (`k_damp`) | 当前 UIPC builder 未写入 | `ModelBuilder.default_tet_k_damp = 0.0` | Newton 会保存该列，但当前 UIPC deformable builder 没有映射 damping 参数。 |
 | `enable_soft_position_constraint` | `SoftPositionConstraint.apply_to(sc)` | `True` | 为软体顶点添加软位置约束属性；具体目标值由内部同步逻辑写入。 |
 | contact element | `actor_elem` | 默认 | 当前 solver 构建 soft body 时默认归入 actor contact element。 |
-| `mesh_partition(sc, 16)` | UIPC mesh partition | 固定值 `16` | 构建时用于 UIPC 内部分区。 |
 
 ## 布料 / Cloth 参数
 
@@ -104,7 +109,6 @@
 | `enable_soft_position_constraint` | `SoftPositionConstraint.apply_to(sc, strength_ratio)` | `True` | 为布料顶点添加软位置约束属性；具体目标值由内部同步逻辑写入。 |
 | `cloth_soft_position_strength_ratio` | cloth `SoftPositionConstraint` 默认强度 | `100.0` | 只在布料 builder 中作为默认 ratio 传入。 |
 | contact element | `actor_elem` | 默认 | 当前 solver 构建 cloth 时默认归入 actor contact element。 |
-| `mesh_partition(sc, 16)` | UIPC mesh partition | 固定值 `16` | 构建时用于 UIPC 内部分区。 |
 
 ## ModelBuilder 中与 UIPC 相关的材料默认值
 

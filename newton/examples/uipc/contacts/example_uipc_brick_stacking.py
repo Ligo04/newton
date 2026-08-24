@@ -34,6 +34,7 @@ BRICK_HEIGHT = 0.0096
 BRICK_SCALE = 1.0
 BRICK_DENSITY = 565.0  # ABS plastic [kg/m³]
 BRICK_ABD_KAPPA = 10.0 * uipc.unit.GPa
+ADAPTIVE_CONTACT_KAPPA = -1.0
 UIPC_GAP = 0.0005
 
 
@@ -695,14 +696,13 @@ class Example:
             self.brick_bodies.append(body)
 
     def _configure_contact_tabular(self, contact_tabular, _world_index, ground_elem, env_elem, robo_elem, actor_elem):
-        GPa = 1.0e9
         floor_elem = contact_tabular.create("board_floor")
-        contact_tabular.insert(floor_elem, actor_elem, 0.5, GPa, True)
-        contact_tabular.insert(floor_elem, robo_elem, 0.5, GPa, True)
-        contact_tabular.insert(floor_elem, ground_elem, 0.5, GPa, False)
-        contact_tabular.insert(floor_elem, env_elem, 0.5, GPa, False)
-        contact_tabular.insert(floor_elem, floor_elem, 0.5, GPa, False)
-        contact_tabular.insert(env_elem, ground_elem, 0.5, GPa, False)
+        contact_tabular.insert(floor_elem, actor_elem, 0.5, ADAPTIVE_CONTACT_KAPPA, True)
+        contact_tabular.insert(floor_elem, robo_elem, 0.5, ADAPTIVE_CONTACT_KAPPA, True)
+        contact_tabular.insert(floor_elem, ground_elem, 0.5, ADAPTIVE_CONTACT_KAPPA, False)
+        contact_tabular.insert(floor_elem, env_elem, 0.5, ADAPTIVE_CONTACT_KAPPA, False)
+        contact_tabular.insert(floor_elem, floor_elem, 0.5, ADAPTIVE_CONTACT_KAPPA, False)
+        contact_tabular.insert(env_elem, ground_elem, 0.5, ADAPTIVE_CONTACT_KAPPA, False)
         return dict.fromkeys(self.board_floor_bodies, floor_elem)
 
     def _get_home_pos(self, model: newton.Model) -> wp.vec3:

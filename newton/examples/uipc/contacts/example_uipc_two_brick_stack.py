@@ -84,7 +84,7 @@ class Example:
             {
                 "line_search": {"max_iter": 64},
                 "newton": {
-                    "translation_tol": 1.0e-5,
+                    "transrate_tol": 1.0e-5,
                     "velocity_tol": 1.0e-5,
                 },
             }

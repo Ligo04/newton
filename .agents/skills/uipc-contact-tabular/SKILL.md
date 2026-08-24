@@ -32,20 +32,21 @@ elements. Per-world element names always use the `_{world_index}` suffix.
 Inserted automatically by `SolverUIPC.initialize()`:
 
 ```python
-# Friction μ = 0.5, stiffness k = 1 GPa for every pair.
+# Friction μ = 0.5 for every pair. A kappa of -1.0 opts into UIPC's
+# scene-adaptive contact stiffness.
 # The third positional arg after the two elements is μ, then k, then
 # `enable` (True = contact enabled, False = disabled).
 
 # Per-world (repeated for every Newton world):
-contact_tabular.insert(env_elem,    env_elem,    0.5, 1.0 * GPa, False)
-contact_tabular.insert(env_elem,    robo_elem,   0.5, 1.0 * GPa, True )
-contact_tabular.insert(env_elem,    actor_elem,  0.5, 1.0 * GPa, True )
-contact_tabular.insert(ground_elem, env_elem,    0.5, 1.0 * GPa, False)  # ← note: False!
-contact_tabular.insert(ground_elem, robo_elem,   0.5, 1.0 * GPa, True )
-contact_tabular.insert(ground_elem, actor_elem,  0.5, 1.0 * GPa, True )
-contact_tabular.insert(robo_elem,   robo_elem,   0.5, 1.0 * GPa, False)  # ← self-collision off
-contact_tabular.insert(robo_elem,   actor_elem,  0.5, 1.0 * GPa, True )
-contact_tabular.insert(actor_elem,  actor_elem,  0.5, 1.0 * GPa, True )
+contact_tabular.insert(env_elem,    env_elem,    0.5, -1.0, False)
+contact_tabular.insert(env_elem,    robo_elem,   0.5, -1.0, True )
+contact_tabular.insert(env_elem,    actor_elem,  0.5, -1.0, True )
+contact_tabular.insert(ground_elem, env_elem,    0.5, -1.0, False)  # ← note: False!
+contact_tabular.insert(ground_elem, robo_elem,   0.5, -1.0, True )
+contact_tabular.insert(ground_elem, actor_elem,  0.5, -1.0, True )
+contact_tabular.insert(robo_elem,   robo_elem,   0.5, -1.0, False)  # ← self-collision off
+contact_tabular.insert(robo_elem,   actor_elem,  0.5, -1.0, True )
+contact_tabular.insert(actor_elem,  actor_elem,  0.5, -1.0, True )
 ```
 
 **Critical defaults to remember**
@@ -57,6 +58,10 @@ contact_tabular.insert(actor_elem,  actor_elem,  0.5, 1.0 * GPa, True )
   ground does NOT generate contacts with it. The table is kinematic so it
   won't fall, but if you stack dynamic bodies on it and need ground as a
   backstop, the actor/ground pair (which IS on) will catch them.
+- **Built-in pair kappa is `-1.0`** → UIPC computes scene-adaptive contact
+  stiffness from mass, scale, `d_hat`, and the time step. User callbacks may
+  replace a pair with an explicit non-negative kappa when fixed stiffness is
+  required.
 - Every pair that involves at least one dynamic category (robo/actor) is
   **ON**.
 - Unlisted pairs are treated by UIPC as "not declared" and will not
@@ -69,8 +74,8 @@ contact_tabular.insert(
     element_a,   # ContactElement
     element_b,   # ContactElement (order does not matter, symmetric)
     mu,          # float — Coulomb friction coefficient
-    kappa,       # float — barrier stiffness in Pa. `GPa = 1e9` is imported
-                 #         from `newton._src.solvers.uipc.solver_uipc`.
+    kappa,       # float — barrier stiffness in Pa; -1.0 enables UIPC's
+                 #         adaptive kappa for IPC contact.
     enable,      # bool — True to enable contact, False to skip this pair
 )
 ```

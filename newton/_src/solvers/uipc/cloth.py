@@ -17,7 +17,7 @@ from uipc.constitution import (
     StrainLimitingBaraffWitkinShell,
 )
 from uipc.core import ContactElement, SubsceneElement
-from uipc.geometry import is_trimesh_closed, label_surface, mesh_partition
+from uipc.geometry import is_trimesh_closed, label_surface
 from uipc.geometry import trimesh as uipc_trimesh
 
 from newton import Model
@@ -232,8 +232,6 @@ class ClothBuilder:
         if subscene_elem is not None:
             subscene_elem.apply_to(sc)
         label_surface(sc)
-
-        mesh_partition(sc, 16)
 
         thickness_values = self._get_thickness_values(model, cloth_particle_indices)
         density_thickness = (

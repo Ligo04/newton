@@ -1,0 +1,1 @@
+Default `SolverUIPC` to UIPC 0.0.26 with full-GPU FusedPCG CUDA Graph mode, the scene-level MAS FEM preconditioner, and scene-adaptive contact stiffness, including the brick-stacking example's custom board contact pairs; pass an explicit `scene_config` or call `configure_scene()` to select another solver mode.

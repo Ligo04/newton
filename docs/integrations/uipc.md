@@ -346,7 +346,9 @@ three contact elements per Newton world:
 - `robo_elem` — articulated robot links.
 - `actor_elem` — free-joint actors, cloth, and deformables.
 
-Default contact pairs use friction `0.5` and stiffness `1 GPa`:
+Default contact pairs use friction `0.5` and `kappa=-1.0`, which opts into
+UIPC's scene-adaptive contact stiffness. UIPC chooses the effective kappa from
+the scene mass, scale, `d_hat`, and time step:
 
 | Pair | Enabled by default |
 | --- | --- |
@@ -454,7 +456,7 @@ Important constructor arguments:
 | `backend` | `"cuda"` | Passed to `uipc.Engine(backend_name=...)`. |
 | `workspace` | `"/tmp/newton_uipc"` | UIPC engine workspace, surface-dump directory, and default performance-report root. |
 | `dt` | `1.0 / 60.0` | Fixed UIPC scene time step [s]. |
-| `scene_config` | `uipc.Scene.default_config()` | Mutated with Newton defaults for `dt`, gravity, contact, and Newton tolerances. |
+| `scene_config` | `uipc.Scene.default_config()` | Defaults to FusedPCG, full-GPU CUDA Graph mode 2, the MAS FEM preconditioner, and IPC contact, then applies Newton overrides for `dt`, gravity, contact, and Newton tolerances. Explicit scene configs retain these solver choices. |
 | `kappa` | `1 GPa` | Solver-level AffineBody stiffness [Pa]. |
 | `default_mass_density` | `1000.0` | Fallback density [kg/m³] for rigid/deformable construction. |
 | `dump_enable` | `False` | Dumps UIPC surface OBJ snapshots before each physics advance. |
@@ -464,6 +466,26 @@ Important constructor arguments:
 
 Use `configure_scene` for UIPC scene configuration not exposed as constructor
 arguments. It deep-merges nested dictionaries before initialization.
+
+### FusedPCG CUDA Graph scope
+
+The default scene config uses `linear_system.solver="fused_pcg"`,
+`linear_system.use_cuda_graph=2`, `linear_system.fem_preconditioner="mas"`,
+and `contact.constitution="ipc"`. UIPC 0.0.26 auto-partitions non-Empty FEM
+geometries for MAS; this replaces its removed Python `mesh_partition()` API.
+Mode 2 captures one FusedPCG solve, including initialization,
+preconditioning, iterations, and device-side convergence checks, in one CUDA
+Graph launch. It does not capture the whole frame: Newton iteration
+orchestration, collision detection and dynamic contact generation,
+gradient/Hessian assembly, CCD, CFL, line search, Newton convergence, and
+scene retrieval remain outside the graph.
+
+Mode 2 requires CUDA conditional graph-node support. UIPC falls back to mode 1
+when that support is unavailable, and falls back to block replay or ordinary
+kernel launches if capture fails. UIPC also disables graph replay for AL-IPC.
+Mode 1 is generally faster; mode 2 is intended for workloads that benefit from
+keeping the CPU out of the PCG loop. Call `configure_scene` before
+`initialize()` to select a different mode.
 
 ## Unsupported Newton features and caveats
 

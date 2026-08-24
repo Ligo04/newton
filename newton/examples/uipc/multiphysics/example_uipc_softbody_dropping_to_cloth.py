@@ -96,7 +96,7 @@ class Example:
         self.solver.set_contact(enable=True, d_hat=0.001)
         self.solver.configure_scene(
             {
-                "linear_system": {"precond": {"mas": {"contact_aware": True}}},
+                "linear_system": {"fem_preconditioner": "mas"},
             }
         )
         self.solver.initialize(self.state_0)
