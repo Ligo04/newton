@@ -25,7 +25,7 @@ from .utils import _view_attr
 
 
 @wp.func
-def com_twist_to_point_velocity(qd: wp.spatial_vector, X_wb: wp.transform, body_com: wp.vec3, point: wp.vec3):
+def com_twist_to_point_velocity(qd: wp.spatial_vector, X_wb: wp.transform, body_com: wp.vec3, point: wp.vec3):  # ty:ignore[invalid-type-form]
     """Evaluate a point velocity from a COM-referenced body twist.
 
     Local copy of Newton's COM-twist point-velocity helper so the UIPC backend
@@ -143,7 +143,7 @@ def _write_readback_kernel(
 def _free_joint_readback_kernel(
     free_joint_indices: wp.array[wp.int32],
     body_q: wp.array[wp.transform],
-    body_qd: wp.array[wp.spatial_vector],
+    body_qd: wp.array[wp.spatial_vector],  # ty:ignore[invalid-type-form]
     body_com: wp.array[wp.vec3],
     joint_parent: wp.array[wp.int32],
     joint_child: wp.array[wp.int32],
@@ -173,9 +173,9 @@ def _free_joint_readback_kernel(
 
     # Parent anchor frame in world space (world frame when parent == -1).
     X_wpj = X_pj
-    v_wp = wp.spatial_vector()
+    v_wp = wp.spatial_vector()  # ty:ignore[no-matching-overload]
     w_p = wp.vec3()
-    X_wp = wp.transform_identity()
+    X_wp = wp.transform_identity()  # ty:ignore[missing-argument]
     if parent >= 0:
         X_wp = body_q[parent]
         X_wpj = X_wp * X_pj
@@ -189,36 +189,36 @@ def _free_joint_readback_kernel(
 
     q_p = wp.transform_get_rotation(X_wpj)
     q_c = wp.transform_get_rotation(X_wcj)
-    x_err = wp.transform_get_translation(X_wcj) - wp.transform_get_translation(X_wpj)
-    w_err = w_c - w_p
+    x_err = wp.transform_get_translation(X_wcj) - wp.transform_get_translation(X_wpj)  # ty:ignore[unsupported-operator]
+    w_err = w_c - w_p  # ty:ignore[unsupported-operator]
 
-    q_pc = wp.quat_inverse(q_p) * q_c
+    q_pc = wp.quat_inverse(q_p) * q_c  # ty:ignore[unsupported-operator]
     x_err_c = wp.quat_rotate_inv(q_p, x_err)
 
     x_child_com_world = wp.transform_point(X_wc, body_com[child])
     v_com_err = wp.spatial_top(v_wc)
     if parent >= 0:
-        v_com_err = v_com_err - com_twist_to_point_velocity(v_wp, X_wp, body_com[parent], x_child_com_world)
+        v_com_err = v_com_err - com_twist_to_point_velocity(v_wp, X_wp, body_com[parent], x_child_com_world)  # ty:ignore[invalid-argument-type]
     v_err_c = wp.quat_rotate_inv(q_p, v_com_err)
     w_err_c = wp.quat_rotate_inv(q_p, w_err)
 
     q_start = joint_q_start[joint_idx]
     qd_start = joint_qd_start[joint_idx]
 
-    joint_q[q_start + 0] = x_err_c[0]
-    joint_q[q_start + 1] = x_err_c[1]
-    joint_q[q_start + 2] = x_err_c[2]
-    joint_q[q_start + 3] = q_pc[0]
-    joint_q[q_start + 4] = q_pc[1]
-    joint_q[q_start + 5] = q_pc[2]
-    joint_q[q_start + 6] = q_pc[3]
+    joint_q[q_start + 0] = x_err_c[0]  # ty:ignore[invalid-assignment]
+    joint_q[q_start + 1] = x_err_c[1]  # ty:ignore[invalid-assignment]
+    joint_q[q_start + 2] = x_err_c[2]  # ty:ignore[invalid-assignment]
+    joint_q[q_start + 3] = q_pc[0]  # ty:ignore[invalid-assignment]
+    joint_q[q_start + 4] = q_pc[1]  # ty:ignore[invalid-assignment]
+    joint_q[q_start + 5] = q_pc[2]  # ty:ignore[invalid-assignment]
+    joint_q[q_start + 6] = q_pc[3]  # ty:ignore[invalid-assignment]
 
-    joint_qd[qd_start + 0] = v_err_c[0]
-    joint_qd[qd_start + 1] = v_err_c[1]
-    joint_qd[qd_start + 2] = v_err_c[2]
-    joint_qd[qd_start + 3] = w_err_c[0]
-    joint_qd[qd_start + 4] = w_err_c[1]
-    joint_qd[qd_start + 5] = w_err_c[2]
+    joint_qd[qd_start + 0] = v_err_c[0]  # ty:ignore[invalid-assignment]
+    joint_qd[qd_start + 1] = v_err_c[1]  # ty:ignore[invalid-assignment]
+    joint_qd[qd_start + 2] = v_err_c[2]  # ty:ignore[invalid-assignment]
+    joint_qd[qd_start + 3] = w_err_c[0]  # ty:ignore[invalid-assignment]
+    joint_qd[qd_start + 4] = w_err_c[1]  # ty:ignore[invalid-assignment]
+    joint_qd[qd_start + 5] = w_err_c[2]  # ty:ignore[invalid-assignment]
 
 
 # -- Placeholder for empty warp arrays passed to kernels -------------------
@@ -656,6 +656,16 @@ class Articulation:
         """
         if not self._ensure_state():
             return
+        assert self.target_position is not None
+        assert self.target_velocity is not None
+        assert self.target_force is not None
+        assert self.is_constrained is not None
+        assert self.is_force_constrained is not None
+        assert self._target_position_dev is not None
+        assert self._target_velocity_dev is not None
+        assert self._target_force_dev is not None
+        assert self._is_constrained_dev is not None
+        assert self._is_force_constrained_dev is not None
 
         J = self.num_active_joints
         device = self._device
@@ -723,6 +733,10 @@ class Articulation:
         # -- Active (driven) joints: scatter the animator-cached state. ----
         # Skipped for FREE-only articulations, which never run setup_state.
         if self.num_active_joints > 0 and self._ensure_state():
+            assert self.joint_position is not None
+            assert self.joint_velocity is not None
+            assert self._joint_position_dev is not None
+            assert self._joint_velocity_dev is not None
             # Mirror animator-updated CPU joint state up to the solver device.
             # The kernel launch below is enqueued on the same device stream so
             # it observes these copies without an explicit sync.

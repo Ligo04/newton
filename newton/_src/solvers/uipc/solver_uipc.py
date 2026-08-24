@@ -36,7 +36,6 @@ if TYPE_CHECKING:
         ContactSystemFeature,
         ContactTabular,
         FiniteElementStateAccessorFeature,
-        SanityCheckResult,
         SceneIO,
         SubsceneElement,
     )
@@ -222,7 +221,7 @@ class SolverUIPC(SolverBase):
             return
         global uipc, ULogger, UScene, USimulationStats, GPa
         global AffineBodyStateAccessorFeature, ContactSystemFeature
-        global FiniteElementStateAccessorFeature, SanityCheckResult, SceneIO
+        global FiniteElementStateAccessorFeature, SceneIO
         global ArticulationBuilder, ClothBuilder, DeformableBodyBuilder, RigidBodyBuilder
         global ContactForceReadback, UIpcMappingInfo, _view_attr
         global _populate_contact_pairs_kernel, _scatter_contact_forces_kernel
@@ -239,7 +238,6 @@ class SolverUIPC(SolverBase):
                 AffineBodyStateAccessorFeature,
                 ContactSystemFeature,
                 FiniteElementStateAccessorFeature,
-                SanityCheckResult,
                 SceneIO,
             )
             from uipc.core import Scene as UScene
@@ -1677,6 +1675,7 @@ class SolverUIPC(SolverBase):
         mapping = self.mapping
         if mapping.num_mapped_bodies > 0 and mapping.body_geo_slots and model.body_world is not None:
             if self._mapped_body_world is None:
+                assert mapping.body_indices_wp is not None
                 self._mapped_body_world = model.body_world.numpy()[mapping.body_indices_wp.numpy()]
             rows = _rows_for_world(self._mapped_body_world)
             if rows is None or rows.size > 0:
@@ -1929,7 +1928,7 @@ class SolverUIPC(SolverBase):
         """Raise when UIPC reports an invalid world after a state push."""
         checker = self.world.sanity_checker()
         result = checker.check()
-        if result == SanityCheckResult.Success:
+        if result == type(result).Success:
             return
 
         report = checker.report()
