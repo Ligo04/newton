@@ -1677,6 +1677,7 @@ class SolverUIPC(SolverBase):
         mapping = self.mapping
         if mapping.num_mapped_bodies > 0 and mapping.body_geo_slots and model.body_world is not None:
             if self._mapped_body_world is None:
+                assert mapping.body_indices_wp is not None
                 self._mapped_body_world = model.body_world.numpy()[mapping.body_indices_wp.numpy()]
             rows = _rows_for_world(self._mapped_body_world)
             if rows is None or rows.size > 0:
