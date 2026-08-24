@@ -12,7 +12,7 @@ consumed by :class:`SolverUIPC` each simulation step.
 from __future__ import annotations
 
 import warnings
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import uipc.builtin as uipc_builtin
@@ -1335,7 +1335,7 @@ class ArticulationBuilder:
         _view_attr(articulation_geo["joint_joint"].find("mass"))[:] = mass_mat.flatten()
 
         obj: Object = self._scene.objects().create(f"external_articulation_{art_idx}")
-        geo_slot: SimplicialComplexSlot = obj.geometries().create(articulation_geo)[0]
+        geo_slot = cast(SimplicialComplexSlot, obj.geometries().create(articulation_geo)[0])
         # Keep the live slot so refresh_armature can rewrite the mass
         # diagonal at runtime (libuipc re-collects it every step).
         self._armature_slots.append((geo_slot, dof_indices))

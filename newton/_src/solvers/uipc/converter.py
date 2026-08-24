@@ -38,17 +38,17 @@ def _transform_to_mat44_kernel(
     r = wp.transform_get_rotation(q)
 
     # Quaternion to rotation matrix (Warp quat: x, y, z, w)
-    x = wp.float64(r[0])
-    y = wp.float64(r[1])
-    z = wp.float64(r[2])
-    w = wp.float64(r[3])
+    x = wp.float64(r[0])  # ty:ignore[not-subscriptable]
+    y = wp.float64(r[1])  # ty:ignore[not-subscriptable]
+    z = wp.float64(r[2])  # ty:ignore[not-subscriptable]
+    w = wp.float64(r[3])  # ty:ignore[not-subscriptable]
 
     one = wp.float64(1.0)
     two = wp.float64(2.0)
     zero = wp.float64(0.0)
-    px = wp.float64(p[0])
-    py = wp.float64(p[1])
-    pz = wp.float64(p[2])
+    px = wp.float64(p[0])  # ty:ignore[not-subscriptable]
+    py = wp.float64(p[1])  # ty:ignore[not-subscriptable]
+    pz = wp.float64(p[2])  # ty:ignore[not-subscriptable]
 
     m = wp.mat44d(
         one - two * (y * y + z * z),
@@ -68,12 +68,12 @@ def _transform_to_mat44_kernel(
         zero,
         one,
     )
-    out_transforms[tid] = m
+    out_transforms[tid] = m  # ty:ignore[invalid-assignment]
 
 
 @wp.kernel(enable_backward=False)
 def _spatial_to_vel_mat44_kernel(
-    body_qd: wp.array[wp.spatial_vector],
+    body_qd: wp.array[wp.spatial_vector],  # ty:ignore[invalid-type-form]
     body_q: wp.array[wp.transform],
     body_indices: wp.array[wp.int32],
     out_velocities: wp.array[wp.mat44d],
@@ -105,10 +105,10 @@ def _spatial_to_vel_mat44_kernel(
     # Rotation matrix R (Warp row-major, R[i,j]) from quaternion (x, y, z, w).
     one = float(1.0)
     two = float(2.0)
-    rx = r[0]
-    ry = r[1]
-    rz = r[2]
-    rw = r[3]
+    rx = r[0]  # ty:ignore[not-subscriptable]
+    ry = r[1]  # ty:ignore[not-subscriptable]
+    rz = r[2]  # ty:ignore[not-subscriptable]
+    rw = r[3]  # ty:ignore[not-subscriptable]
     r00 = one - two * (ry * ry + rz * rz)
     r01 = two * (rx * ry - rz * rw)
     r02 = two * (rx * rz + ry * rw)
@@ -158,7 +158,7 @@ def _spatial_to_vel_mat44_kernel(
         wp.float64(v_com[2]),
         zero,
     )
-    out_velocities[tid] = m
+    out_velocities[tid] = m  # ty:ignore[invalid-assignment]
 
 
 @wp.kernel(enable_backward=False)
@@ -172,8 +172,8 @@ def _write_to_backend_kernel(
     """Scatter body transforms/velocities into UIPC backend arrays by offset."""
     tid = wp.tid()
     dst_idx = backend_offsets[tid]
-    dst_transforms[dst_idx] = src_transforms[tid]
-    dst_velocities[dst_idx] = src_velocities[tid]
+    dst_transforms[dst_idx] = src_transforms[tid]  # ty:ignore[invalid-assignment]
+    dst_velocities[dst_idx] = src_velocities[tid]  # ty:ignore[invalid-assignment]
 
 
 @wp.kernel(enable_backward=False)
@@ -183,7 +183,7 @@ def _read_from_backend_kernel(
     src_velocities: wp.array[wp.mat44d],
     body_indices: wp.array[wp.int32],
     out_body_q: wp.array[wp.transform],
-    out_body_qd: wp.array[wp.spatial_vector],
+    out_body_qd: wp.array[wp.spatial_vector],  # ty:ignore[invalid-type-form]
 ):
     """Gather UIPC backend transforms/velocities back into Newton state arrays.
 
@@ -260,7 +260,7 @@ def _read_from_backend_kernel(
         qz = qz * inv_norm
         qw = qw * inv_norm
 
-    out_body_q[body_idx] = wp.transform(
+    out_body_q[body_idx] = wp.transform(  # ty:ignore[invalid-assignment]
         wp.vec3(px, py, pz),
         wp.quat(wp.float32(qx), wp.float32(qy), wp.float32(qz), wp.float32(qw)),
     )
@@ -309,7 +309,7 @@ def _read_from_backend_kernel(
     omega_y = v00 * m02 + v10 * m12 + v20 * m22
     omega_z = v01 * m00 + v11 * m10 + v21 * m20
 
-    out_body_qd[body_idx] = wp.spatial_vector(v_com, wp.vec3(omega_x, omega_y, omega_z))
+    out_body_qd[body_idx] = wp.spatial_vector(v_com, wp.vec3(omega_x, omega_y, omega_z))  # ty:ignore[invalid-assignment]
 
 
 @wp.kernel(enable_backward=False)
@@ -328,8 +328,8 @@ def _write_fem_particles_to_backend_kernel(
 
     q = src_particle_q[particle_idx]
     qd = src_particle_qd[particle_idx]
-    dst_positions[backend_idx] = wp.vec3d(wp.float64(q[0]), wp.float64(q[1]), wp.float64(q[2]))
-    dst_velocities[backend_idx] = wp.vec3d(wp.float64(qd[0]), wp.float64(qd[1]), wp.float64(qd[2]))
+    dst_positions[backend_idx] = wp.vec3d(wp.float64(q[0]), wp.float64(q[1]), wp.float64(q[2]))  # ty:ignore[invalid-assignment]
+    dst_velocities[backend_idx] = wp.vec3d(wp.float64(qd[0]), wp.float64(qd[1]), wp.float64(qd[2]))  # ty:ignore[invalid-assignment]
 
 
 @wp.kernel(enable_backward=False)
@@ -345,7 +345,7 @@ def _write_fem_particle_positions_to_backend_kernel(
     particle_idx = particle_indices[tid]
 
     q = src_particle_q[particle_idx]
-    dst_positions[backend_idx] = wp.vec3d(wp.float64(q[0]), wp.float64(q[1]), wp.float64(q[2]))
+    dst_positions[backend_idx] = wp.vec3d(wp.float64(q[0]), wp.float64(q[1]), wp.float64(q[2]))  # ty:ignore[invalid-assignment]
 
 
 @wp.kernel(enable_backward=False)
@@ -364,8 +364,8 @@ def _read_fem_particles_from_backend_kernel(
 
     q = src_positions[backend_idx]
     qd = src_velocities[backend_idx]
-    out_particle_q[particle_idx] = wp.vec3(wp.float32(q[0]), wp.float32(q[1]), wp.float32(q[2]))
-    out_particle_qd[particle_idx] = wp.vec3(wp.float32(qd[0]), wp.float32(qd[1]), wp.float32(qd[2]))
+    out_particle_q[particle_idx] = wp.vec3(wp.float32(q[0]), wp.float32(q[1]), wp.float32(q[2]))  # ty:ignore[invalid-assignment]
+    out_particle_qd[particle_idx] = wp.vec3(wp.float32(qd[0]), wp.float32(qd[1]), wp.float32(qd[2]))  # ty:ignore[invalid-assignment]
 
 
 @wp.kernel(enable_backward=False)
@@ -381,7 +381,7 @@ def _read_fem_particle_positions_from_backend_kernel(
     particle_idx = particle_indices[tid]
 
     q = src_positions[backend_idx]
-    out_particle_q[particle_idx] = wp.vec3(wp.float32(q[0]), wp.float32(q[1]), wp.float32(q[2]))
+    out_particle_q[particle_idx] = wp.vec3(wp.float32(q[0]), wp.float32(q[1]), wp.float32(q[2]))  # ty:ignore[invalid-assignment]
 
 
 # ---------------------------------------------------------------------------
@@ -798,4 +798,4 @@ def populate_backend_offsets(mapping: UIpcMappingInfo, device: wp.Device) -> Non
     mapping.body_indices_wp = wp.from_numpy(indices_np, dtype=wp.int32, device=device)
     mapping.backend_offsets_wp = wp.from_numpy(offsets_np, dtype=wp.uint32, device=device)
     mapping.num_mapped_bodies = n
-    mapping.max_backend_count = int(offsets_np.max()) + 1 if n > 0 else 0
+    mapping.max_backend_count = int(offsets_np.max()) + 1 if n > 0 else 0  # ty:ignore[invalid-argument-type]
