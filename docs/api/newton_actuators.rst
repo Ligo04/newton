@@ -40,6 +40,7 @@ construction.
    ControllerPID
    ControllerStablePD
    Delay
+   ResponseOracle
    SchemaNames
 
 .. rubric:: Functions

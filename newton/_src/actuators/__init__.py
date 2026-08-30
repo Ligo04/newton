@@ -12,6 +12,7 @@ from .controllers import (
     ControllerStablePD,
 )
 from .delay import Delay
+from .response_oracle import ResponseOracle
 from .usd_parser import ActuatorParsed, ComponentKind, SchemaNames, parse_actuator_prim, register_actuator_component
 
 __all__ = [
@@ -29,6 +30,7 @@ __all__ = [
     "ControllerPID",
     "ControllerStablePD",
     "Delay",
+    "ResponseOracle",
     "SchemaNames",
     "parse_actuator_prim",
     "register_actuator_component",
