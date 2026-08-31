@@ -76,11 +76,11 @@ Mode 2 只捕获一次 FusedPCG 求解，不捕获整帧仿真。Newton 外层�
 | Newton 来源 / Solver 参数 | UIPC 目标 / 用法 | 默认 / 计算方式 | 说明 |
 | --- | --- | --- | --- |
 | `model.particle_q` | UIPC tetmesh vertices | 直接拷贝选中粒子坐标 | 软体几何顶点位置 [m]。 |
-| `model.tet_indices` | UIPC tetmesh tetrahedra | 按 `soft_body_ranges` 或 particle range 选取并重映射 | 软体四面体拓扑。 |
-| `model.soft_body_ranges` | 分组构建 deformable object | 有 range 时逐组构建 | 避免不同软体混到一个 UIPC geometry。 |
+| `model.tet_indices` | UIPC tetmesh tetrahedra | 按 `model.uipc.deformable_body_*` rows 或 particle range 选取并重映射 | 软体四面体拓扑。 |
+| `model.uipc.deformable_body_{label,world,particle_*,tetrahedron_*,triangle_*,edge_*,density}` | 分组构建 deformable object | `SolverUIPC.register_custom_attributes(builder)` 在 `finalize()` 时生成 | 使用 inclusive `first/last` 索引保存每个 authored soft body，避免不同软体混到一个 UIPC geometry。 |
 | `model.particle_mass` | mass density 估计；fixed marker | `sum(mass) / tet_volume`；失败时 `default_mass_density` | `particle_mass <= 0.0` 的粒子会写成 UIPC vertex `is_fixed = 1`。 |
 | `default_mass_density` | `StableNeoHookean.apply_to(..., mass_density=...)` fallback | `1000.0 kg/m^3` | 质量或体积不可用时使用。 |
-| `model.uipc.deformable_model[i]` | 第 `i` 个 `soft_body_ranges` 的软体四面体本构选择 | `"stable_neo_hookean"` | 需先调用 `SolverUIPC.register_custom_attributes(builder)` 再添加 soft body；支持 `"stable_neo_hookean"` 和 `"arap"`。 |
+| `model.uipc.deformable_model[i]` | 第 `i` 个 `uipc:deformable_body` row 的软体四面体本构选择 | `"stable_neo_hookean"` | 需在 `finalize()` 前调用 `SolverUIPC.register_custom_attributes(builder)`；支持 `"stable_neo_hookean"` 和 `"arap"`。 |
 | `model.tet_materials[:, 0]` (`k_mu`) | UIPC tet `mu` | 写入 `(4 / 3) * k_mu` | UIPC StableNeoHookean 的 `mu` 不是原样写入，而是做了变换。 |
 | `model.tet_materials[:, 1]` (`k_lambda`) | UIPC tet `lambda` | 写入 `k_lambda + (5 / 6) * k_mu` | UIPC StableNeoHookean 的 `lambda` 会叠加部分 `k_mu`。 |
 | `model.tet_materials[:, 0]` (`k_mu`) 且对应 `model.uipc.deformable_model[i] == "arap"` | UIPC tet `kappa` | 原样写入 `k_mu` | ARAP 不使用 StableNeoHookean 的 `mu/lambda` 变换。 |
@@ -93,9 +93,9 @@ Mode 2 只捕获一次 FusedPCG 求解，不捕获整帧仿真。Newton 外层�
 | Newton 来源 / Solver 参数 | UIPC 目标 / 用法 | 默认 / 计算方式 | 说明 |
 | --- | --- | --- | --- |
 | `model.particle_q` | UIPC trimesh vertices | 直接拷贝选中 cloth 粒子坐标 | 布料几何顶点位置 [m]。 |
-| `model.tri_indices` | UIPC trimesh faces | 按 `cloth_ranges` 或 legacy heuristic 选取并重映射 | 布料三角面拓扑。闭合三角网格会报错，建议闭合体使用软体或刚体。 |
-| `model.cloth_ranges` | 分组构建 cloth object | 有 range 时逐组构建 | 避免多个 cloth 混成一个 UIPC geometry。 |
-| `model.uipc.cloth_model[i]` | 第 `i` 个 `cloth_ranges` 的 membrane constitution | 默认 `StrainLimitingBaraffWitkinShell`；可选 `NeoHookeanShell` | 需先调用 `SolverUIPC.register_custom_attributes(builder)` 再添加 cloth；两种 membrane 后续都会写入 `mu/lambda` 三角属性。 |
+| `model.tri_indices` | UIPC trimesh faces | 按 `model.uipc.cloth_*` rows 或 legacy heuristic 选取并重映射 | 布料三角面拓扑。闭合三角网格会报错，建议闭合体使用软体或刚体。 |
+| `model.uipc.cloth_{label,world,particle_*,triangle_*,edge_*,spring_*,surface_density}` | 分组构建 cloth object | `SolverUIPC.register_custom_attributes(builder)` 在 `finalize()` 时生成 | 使用 inclusive `first/last` 索引保存每个 authored cloth，避免多个 cloth 混成一个 UIPC geometry。 |
+| `model.uipc.cloth_model[i]` | 第 `i` 个 `uipc:cloth` row 的 membrane constitution | 默认 `StrainLimitingBaraffWitkinShell`；可选 `NeoHookeanShell` | 需在 `finalize()` 前调用 `SolverUIPC.register_custom_attributes(builder)`；两种 membrane 后续都会写入 `mu/lambda` 三角属性。 |
 | `model.particle_radius` | vertex `thickness` 和 `volume` 修正 | 直接读取 cloth 粒子的 `particle_radius`；负值报错；缺失时回退默认厚度 | 布料 thickness 与粒子碰撞半径保持一致。 |
 | `model.particle_mass` + `model.tri_areas` | membrane `mass_density` | `sum(particle_mass) / sum(tri_area) / thickness`；失败时 `100.0` | UIPC shell 使用体密度 [kg/m^3]。 |
 | `model.tri_materials[:, 0]` (`tri_ke`) | UIPC triangle `mu` | 当前实现原样写入 | 虽然注释提到 Young's modulus，但实际代码把该列写到 `mu`。 |

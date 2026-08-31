@@ -29,7 +29,6 @@ newton
 
    Axis
    BodyFlags
-   ClothRange
    CollisionPipeline
    Contacts
    Control
@@ -46,7 +45,6 @@ newton
    ParticleFlags
    SDF
    ShapeFlags
-   SoftBodyRange
    State
    StateFlags
    TetMesh

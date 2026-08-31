@@ -24,6 +24,11 @@ AttributeAssignment = Model.AttributeAssignment
 AttributeFrequency = Model.AttributeFrequency
 
 
+def _resolve_test_item_count(builder: ModelBuilder) -> int:
+    """Return one custom-frequency row per body."""
+    return builder.body_count
+
+
 class TestCustomAttributes(unittest.TestCase):
     """Test custom attributes functionality via ModelBuilder kwargs."""
 
@@ -1591,6 +1596,33 @@ class TestCustomFrequencyAttributes(unittest.TestCase):
 
         self.assertEqual(model.get_custom_frequency_count("test:item"), 5)
         self.assertEqual(model.test.item_name, ["default", "default", "custom", "default", "default"])
+
+    def test_custom_frequency_count_resolver_materializes_default_rows(self):
+        """Resolve a custom-frequency count from final builder state."""
+        builder = ModelBuilder()
+        builder.add_custom_frequency(
+            ModelBuilder.CustomFrequency(
+                name="item",
+                namespace="test",
+                count_resolver=_resolve_test_item_count,
+            )
+        )
+        builder.add_custom_attribute(
+            ModelBuilder.CustomAttribute(
+                name="item_value",
+                frequency="test:item",
+                dtype=wp.int32,
+                default=7,
+                namespace="test",
+            )
+        )
+        builder.add_body()
+        builder.add_body()
+
+        model = builder.finalize(device=self.device)
+
+        self.assertEqual(model.get_custom_frequency_count("test:item"), 2)
+        np.testing.assert_array_equal(model.test.item_value.numpy(), [7, 7])
 
     def test_custom_frequency_requires_registration(self):
         """Test that using an unregistered custom frequency raises ValueError."""

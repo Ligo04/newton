@@ -31,6 +31,7 @@ class Example:
         self.sim_dt = self.frame_dt / self.sim_substeps
 
         builder = newton.ModelBuilder()
+        SolverUIPC.register_custom_attributes(builder)
         builder.add_ground_plane()
 
         # Add soft body (tetrahedral grid) at elevated position

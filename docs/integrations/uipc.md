@@ -32,6 +32,7 @@ import newton
 from newton.solvers import SolverUIPC
 
 builder = newton.ModelBuilder()
+SolverUIPC.register_custom_attributes(builder)
 # ...build or import a model...
 model = builder.finalize()
 
@@ -188,8 +189,9 @@ armature on a non-driven joint (NONE/EFFORT mode, or VELOCITY without
 ## UIPC-specific custom attributes
 
 `SolverUIPC.register_custom_attributes` registers Newton's UIPC namespace on a
-`ModelBuilder`. Call it before adding or importing bodies when you want to
-author UIPC-specific values:
+`ModelBuilder`. Call it before :meth:`~newton.ModelBuilder.finalize` when the
+model contains cloth or soft bodies. Registering immediately after builder
+construction is recommended:
 
 ```python
 import newton
@@ -205,8 +207,19 @@ Currently registered:
 | Attribute | Frequency | Default | Meaning |
 | --- | --- | --- | --- |
 | `model.uipc.abd_kappa` | Body | `-1.0` | Per-body AffineBody stiffness override [Pa]. Negative values inherit the solver-level `kappa`. |
-| `model.uipc.cloth_model` | `uipc:cloth` | `"strain_limiting_baraff_witkin"` | Per-`cloth_ranges` membrane constitution. Supported values are `"strain_limiting_baraff_witkin"` and `"neo_hookean"`. |
-| `model.uipc.deformable_model` | `uipc:deformable_body` | `"stable_neo_hookean"` | Per-`soft_body_ranges` tetrahedral deformable constitution. Supported values are `"stable_neo_hookean"` and `"arap"`. |
+| `model.uipc.cloth_model` | `uipc:cloth` | `"strain_limiting_baraff_witkin"` | Per-authored-cloth membrane constitution. Supported values are `"strain_limiting_baraff_witkin"` and `"neo_hookean"`. |
+| `model.uipc.deformable_model` | `uipc:deformable_body` | `"stable_neo_hookean"` | Per-authored-soft-body tetrahedral constitution. Supported values are `"stable_neo_hookean"` and `"arap"`. |
+
+The same custom-frequency rows carry group labels, owning worlds, inclusive
+`first`/`last` indices for the particle/topology domains, and authored density:
+
+- `model.uipc.cloth_{label,world,particle_*,triangle_*,edge_*,spring_*,surface_density}`
+- `model.uipc.deformable_body_{label,world,particle_*,tetrahedron_*,triangle_*,edge_*,density}`
+
+The row counts are resolved from the final builder group registries, so
+registration may occur after authoring but must occur before `finalize()`.
+Without registration, `SolverUIPC` retains the legacy topology selectors and
+does not preserve multiple authored groups that share one Newton world.
 
 ## Cloth
 
@@ -217,7 +230,7 @@ triangle mesh plus a membrane constitution and `DiscreteShellBending`.
 | Newton source | UIPC target | Notes |
 | --- | --- | --- |
 | `particle_q` | Cloth mesh vertices | World-space particle positions [m]. |
-| `tri_indices` / `cloth_ranges` | Cloth mesh faces and grouping | Authored `cloth_ranges` are preferred; otherwise the legacy selector uses triangle connectivity not claimed by tetrahedra. |
+| `tri_indices` / `model.uipc.cloth_*` | Cloth mesh faces and grouping | Registered custom-frequency rows preserve each authored cloth; otherwise the legacy selector uses triangle connectivity not claimed by tetrahedra. |
 | `particle_mass` / `tri_areas` | Membrane mass density | Estimated as total mass divided by total area and shell thickness, unless an authored cloth surface density is present. |
 | `particle_radius` | Vertex shell thickness | Cloth collision thickness follows Newton particle radius. |
 | `tri_materials[:, 0]` / `tri_materials[:, 1]` | Triangle `mu` / `lambda` attributes | Written directly to UIPC membrane attributes after applying the chosen membrane model. |
@@ -225,9 +238,9 @@ triangle mesh plus a membrane constitution and `DiscreteShellBending`.
 | `particle_mass <= 0.0` | UIPC `is_fixed` vertex marker | Marks kinematic cloth vertices. |
 
 The default membrane model is `StrainLimitingBaraffWitkinShell`. Call
-`SolverUIPC.register_custom_attributes(builder)` before adding cloth, then set
+`SolverUIPC.register_custom_attributes(builder)` before `finalize()`, then set
 `model.uipc.cloth_model[cloth_index]` before constructing `SolverUIPC` to choose
-`NeoHookeanShell` for one authored `model.cloth_ranges` entry. Closed /
+`NeoHookeanShell` for one authored `uipc:cloth` row. Closed /
 watertight triangle meshes are rejected as cloth; use a deformable or rigid
 representation for closed volumes.
 
@@ -241,15 +254,15 @@ dormant UIPC `SoftPositionConstraint` attributes. Use
 Newton deformables are built from particles and tetrahedra. UIPC deformables
 use `tetmesh` geometry, surface labels for contact, and
 `StableNeoHookean` elasticity by default. Call
-`SolverUIPC.register_custom_attributes(builder)` before adding soft bodies, then
+`SolverUIPC.register_custom_attributes(builder)` before `finalize()`, then
 set `model.uipc.deformable_model[soft_index]` before constructing `SolverUIPC`
 to choose a different supported constitution for one authored
-`model.soft_body_ranges` entry.
+`uipc:deformable_body` row.
 
 | Newton source | UIPC target | Notes |
 | --- | --- | --- |
 | `particle_q` | Tet mesh vertices | World-space particle positions [m]. |
-| `tet_indices` / `soft_body_ranges` | Tet mesh topology and grouping | Authored `soft_body_ranges` keep multiple soft bodies separate. |
+| `tet_indices` / `model.uipc.deformable_body_*` | Tet mesh topology and grouping | Registered custom-frequency rows keep multiple authored soft bodies separate. |
 | `particle_mass` + tet volume | Mass density | Falls back to `default_mass_density` when the estimate is unavailable. |
 | `tet_materials[:, 0]` / `tet_materials[:, 1]` | Deformable material attributes | Stable Neo-Hookean writes converted `mu` / `lambda`; ARAP writes `tet_materials[:, 0]` to UIPC `kappa`. |
 | `particle_mass <= 0.0` | UIPC `is_fixed` vertex marker | Marks kinematic deformable vertices. |

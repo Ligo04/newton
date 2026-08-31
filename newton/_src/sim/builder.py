@@ -67,7 +67,7 @@ from .graph_coloring import (
     combine_independent_coloring_plan,
     construct_particle_graph,
 )
-from .model import ClothRange, Model, SoftBodyRange, _pack_shape_pair_codes
+from .model import Model, _pack_shape_pair_codes
 
 if TYPE_CHECKING:
     from pxr import Usd
@@ -362,13 +362,9 @@ class ModelBuilder:
             Model.AttributeFrequency.ONCE,
             compaction_policy="passthrough",
         ),
-        # UIPC entity ranges: dataclass entries span multiple index domains, so
-        # they are translated manually in _merge_builder_entity_ranges().
-        "cloth_ranges": Model.AttributeSpec(Model.AttributeFrequency.ONCE, compaction_policy="passthrough"),
-        "soft_body_ranges": Model.AttributeSpec(Model.AttributeFrequency.ONCE, compaction_policy="passthrough"),
     }
 
-    _BUILDER_GROUP_REFERENCES: ClassVar[dict[str, dict[str, Model.AttributeFrequency]]] = {
+    _BUILDER_GROUP_REFERENCES: ClassVar[dict[str, dict[str, Model.AttributeFrequency | None]]] = {
         "cable": {
             "body_start": Model.AttributeFrequency.BODY,
             "body_end": Model.AttributeFrequency.BODY,
@@ -382,12 +378,20 @@ class ModelBuilder:
             "tri_end": Model.AttributeFrequency.TRIANGLE,
             "edge_start": Model.AttributeFrequency.EDGE,
             "edge_end": Model.AttributeFrequency.EDGE,
+            "spring_start": Model.AttributeFrequency.SPRING,
+            "spring_end": Model.AttributeFrequency.SPRING,
+            "surface_density": None,
         },
         "soft": {
             "particle_start": Model.AttributeFrequency.PARTICLE,
             "particle_end": Model.AttributeFrequency.PARTICLE,
             "tet_start": Model.AttributeFrequency.TETRAHEDRON,
             "tet_end": Model.AttributeFrequency.TETRAHEDRON,
+            "tri_start": Model.AttributeFrequency.TRIANGLE,
+            "tri_end": Model.AttributeFrequency.TRIANGLE,
+            "edge_start": Model.AttributeFrequency.EDGE,
+            "edge_end": Model.AttributeFrequency.EDGE,
+            "density": None,
         },
     }
 
@@ -1161,6 +1165,14 @@ class ModelBuilder:
         these values like other entity labels.
         """
 
+        count_resolver: Callable[[ModelBuilder], int] | None = None
+        """Optional callback that derives the authoritative row count from builder state.
+
+        The callback runs during :meth:`ModelBuilder.finalize`. Use it for
+        custom frequencies whose rows mirror builder-owned registries rather
+        than calls to :meth:`ModelBuilder.add_custom_values`.
+        """
+
         def __post_init__(self):
             """Validate frequency naming and callback relationships."""
             if not self.name or ":" in self.name:
@@ -1195,7 +1207,7 @@ class ModelBuilder:
         up_axis: AxisType = Axis.Z,
         gravity: float | Vec3 | None = None,
         sdf_texture_paired_samples: bool = True,
-    ):
+    ) -> None:
         """
         Initializes a new ModelBuilder instance for constructing simulation models.
 
@@ -1321,10 +1333,6 @@ class ModelBuilder:
         """Particle color groups accumulated for :attr:`Model.particle_color_groups`."""
         self.particle_world: list[int] = []
         """World indices accumulated for :attr:`Model.particle_world`."""
-        self.soft_body_ranges: list[SoftBodyRange] = []
-        """Soft body entity ranges accumulated for :attr:`Model.soft_body_ranges`."""
-        self.cloth_ranges: list[ClothRange] = []
-        """Cloth entity ranges accumulated for :attr:`Model.cloth_ranges`."""
 
         # shapes (each shape has an entry in these arrays)
         self.shape_label: list[str] = []
@@ -1579,8 +1587,8 @@ class ModelBuilder:
         self.articulation_world: list[int] = []
         """World indices accumulated for :attr:`Model.articulation_world`."""
 
-        # Deformable group registries: prim-path-labelled, world-tagged index ranges for each
-        # imported cable/cloth/volume (mirrors articulation_start/end/label/world). Ranges are
+        # Deformable group registries: labelled, world-tagged index ranges for each authored
+        # cable/cloth/volume (mirrors articulation_start/end/label/world). Ranges are
         # [start, end) into the corresponding builder arrays, and replicate()/add_builder() carry
         # them per world so each group stays indexable by path.
         self._cable_label: list[str] = []
@@ -1597,7 +1605,7 @@ class ModelBuilder:
         """Exclusive joint-range end of each cable group."""
 
         self._cloth_label: list[str] = []
-        """Prim-path labels of imported cloth groups."""
+        """Labels of authored cloth groups."""
         self._cloth_world: list[int] = []
         """World index of each cloth group."""
         self._cloth_particle_start: list[int] = []
@@ -1612,9 +1620,15 @@ class ModelBuilder:
         """Inclusive edge-range start of each cloth group."""
         self._cloth_edge_end: list[int] = []
         """Exclusive edge-range end of each cloth group."""
+        self._cloth_spring_start: list[int] = []
+        """Inclusive spring-range start of each cloth group."""
+        self._cloth_spring_end: list[int] = []
+        """Exclusive spring-range end of each cloth group."""
+        self._cloth_surface_density: list[float | None] = []
+        """Authored surface density [kg/m^2] of each cloth group."""
 
         self._soft_label: list[str] = []
-        """Prim-path labels of imported soft (volume) groups."""
+        """Labels of authored soft (volume) groups."""
         self._soft_world: list[int] = []
         """World index of each soft group."""
         self._soft_particle_start: list[int] = []
@@ -1625,6 +1639,16 @@ class ModelBuilder:
         """Inclusive tetrahedron-range start of each soft group."""
         self._soft_tet_end: list[int] = []
         """Exclusive tetrahedron-range end of each soft group."""
+        self._soft_tri_start: list[int] = []
+        """Inclusive surface-triangle-range start of each soft group."""
+        self._soft_tri_end: list[int] = []
+        """Exclusive surface-triangle-range end of each soft group."""
+        self._soft_edge_start: list[int] = []
+        """Inclusive surface-edge-range start of each soft group."""
+        self._soft_edge_end: list[int] = []
+        """Exclusive surface-edge-range end of each soft group."""
+        self._soft_density: list[float | None] = []
+        """Authored volume density [kg/m^3] of each soft group."""
 
         self.joint_dof_count: int = 0
         """Total joint DoF count propagated to :attr:`Model.joint_dof_count`."""
@@ -1809,6 +1833,7 @@ class ModelBuilder:
             and existing.articulation_owner_attribute == incoming.articulation_owner_attribute
             and existing.articulation_owner_resolver is incoming.articulation_owner_resolver
             and existing.label_attribute == incoming.label_attribute
+            and existing.count_resolver is incoming.count_resolver
         )
 
     def add_custom_attribute(self, attribute: CustomAttribute) -> None:
@@ -2026,6 +2051,35 @@ class ModelBuilder:
             owner_attribute.values = owners
             self._custom_frequency_owner_resolved_counts[frequency_key] = count
 
+    def _resolve_custom_frequency_counts(self) -> None:
+        """Update resolver-owned custom-frequency counts from final builder state."""
+        for frequency_key, frequency in self.custom_frequencies.items():
+            resolver = frequency.count_resolver
+            if resolver is None:
+                continue
+
+            resolved_count = resolver(self)
+            if not self._is_integer_scalar(resolved_count):
+                raise TypeError(
+                    f"Custom frequency count resolver for '{frequency_key}' returned "
+                    f"non-integer value {resolved_count!r}"
+                )
+            resolved_count = int(resolved_count)
+            if resolved_count < 0:
+                raise ValueError(
+                    f"Custom frequency count resolver for '{frequency_key}' returned negative count {resolved_count}"
+                )
+
+            for full_key, attribute in self.custom_attributes.items():
+                if attribute.frequency != frequency_key or not attribute.values:
+                    continue
+                if len(attribute.values) > resolved_count:
+                    raise ValueError(
+                        f"Custom attribute '{full_key}' has {len(attribute.values)} values but "
+                        f"frequency '{frequency_key}' resolves to {resolved_count} rows"
+                    )
+            self._custom_frequency_counts[frequency_key] = resolved_count
+
     def _finalize_custom_frequency_metadata(self, model: Model, device: Devicelike | None) -> None:
         """Materialize articulation ownership and label metadata on a model."""
         for frequency_key, frequency in self.custom_frequencies.items():
@@ -2189,11 +2243,6 @@ class ModelBuilder:
 
         while self._custom_frequency_counts.get(frequency, 0) < count:
             self.add_custom_values(**values)
-
-    def _sync_uipc_range_custom_frequencies(self) -> None:
-        """Keep UIPC range-frequency attributes aligned with authored ranges."""
-        self._ensure_custom_frequency_count("uipc:cloth", len(self.cloth_ranges))
-        self._ensure_custom_frequency_count("uipc:deformable_body", len(self.soft_body_ranges))
 
     def _process_custom_attributes(
         self,
@@ -3111,53 +3160,6 @@ class ModelBuilder:
                 int(joint_dof_starts[world_index]),
                 int(joint_coord_starts[world_index]),
             )
-            self._merge_builder_entity_ranges(builder, entity_offsets, label_prefixes[world_index])
-
-        if builder.cloth_ranges or builder.soft_body_ranges:
-            self._sync_uipc_range_custom_frequencies()
-
-    def _merge_builder_entity_ranges(
-        self,
-        builder: ModelBuilder,
-        entity_offsets: dict[str, int],
-        label_prefix: str | None,
-    ) -> None:
-        """Translate the source builder's UIPC entity ranges into this builder's index space."""
-
-        def prefixed(label: str | None) -> str | None:
-            return f"{label_prefix}/{label}" if label_prefix and label else label
-
-        for cloth_range in builder.cloth_ranges:
-            self.cloth_ranges.append(
-                ClothRange(
-                    label=prefixed(cloth_range.label),
-                    particle_start=cloth_range.particle_start + entity_offsets["particle"],
-                    particle_end=cloth_range.particle_end + entity_offsets["particle"],
-                    tri_start=cloth_range.tri_start + entity_offsets["triangle"],
-                    tri_end=cloth_range.tri_end + entity_offsets["triangle"],
-                    edge_start=cloth_range.edge_start + entity_offsets["edge"],
-                    edge_end=cloth_range.edge_end + entity_offsets["edge"],
-                    spring_start=cloth_range.spring_start + entity_offsets["spring"],
-                    spring_end=cloth_range.spring_end + entity_offsets["spring"],
-                    surface_density=cloth_range.surface_density,
-                )
-            )
-
-        for soft_range in builder.soft_body_ranges:
-            self.soft_body_ranges.append(
-                SoftBodyRange(
-                    label=prefixed(soft_range.label),
-                    particle_start=soft_range.particle_start + entity_offsets["particle"],
-                    particle_end=soft_range.particle_end + entity_offsets["particle"],
-                    tet_start=soft_range.tet_start + entity_offsets["tetrahedron"],
-                    tet_end=soft_range.tet_end + entity_offsets["tetrahedron"],
-                    tri_start=soft_range.tri_start + entity_offsets["triangle"],
-                    tri_end=soft_range.tri_end + entity_offsets["triangle"],
-                    edge_start=soft_range.edge_start + entity_offsets["edge"],
-                    edge_end=soft_range.edge_end + entity_offsets["edge"],
-                    density=soft_range.density,
-                )
-            )
 
     @staticmethod
     @functools.cache
@@ -3230,10 +3232,16 @@ class ModelBuilder:
             declared_builder_attributes.update((f"_{group}_label", f"_{group}_world"))
             for suffix, reference in references.items():
                 name = f"_{group}_{suffix}"
+                if suffix.endswith("_start"):
+                    compaction_policy = "start"
+                elif suffix.endswith("_end"):
+                    compaction_policy = "end"
+                else:
+                    compaction_policy = "generic"
                 specs[name] = Model.AttributeSpec(
                     group,
                     references=reference,
-                    compaction_policy="start" if suffix.endswith("_start") else "end",
+                    compaction_policy=compaction_policy,
                 )
                 declared_builder_attributes.add(name)
 
@@ -3462,13 +3470,15 @@ class ModelBuilder:
 
     def _record_cloth_group(
         self,
-        label: str,
+        label: str | None,
         particle_range: tuple[int, int],
         tri_range: tuple[int, int],
         edge_range: tuple[int, int],
+        spring_range: tuple[int, int] = (0, 0),
+        surface_density: float | None = None,
     ) -> None:
-        """Register an imported cloth as an addressable, world-tagged group."""
-        self._cloth_label.append(label)
+        """Register a cloth as an addressable, world-tagged group."""
+        self._cloth_label.append(label or "")
         self._cloth_world.append(self.current_world)
         self._cloth_particle_start.append(particle_range[0])
         self._cloth_particle_end.append(particle_range[1])
@@ -3476,20 +3486,31 @@ class ModelBuilder:
         self._cloth_tri_end.append(tri_range[1])
         self._cloth_edge_start.append(edge_range[0])
         self._cloth_edge_end.append(edge_range[1])
+        self._cloth_spring_start.append(spring_range[0])
+        self._cloth_spring_end.append(spring_range[1])
+        self._cloth_surface_density.append(surface_density)
 
     def _record_soft_group(
         self,
-        label: str,
+        label: str | None,
         particle_range: tuple[int, int],
         tet_range: tuple[int, int],
+        tri_range: tuple[int, int] = (0, 0),
+        edge_range: tuple[int, int] = (0, 0),
+        density: float | None = None,
     ) -> None:
-        """Register an imported soft volume as an addressable, world-tagged group."""
-        self._soft_label.append(label)
+        """Register a soft volume as an addressable, world-tagged group."""
+        self._soft_label.append(label or "")
         self._soft_world.append(self.current_world)
         self._soft_particle_start.append(particle_range[0])
         self._soft_particle_end.append(particle_range[1])
         self._soft_tet_start.append(tet_range[0])
         self._soft_tet_end.append(tet_range[1])
+        self._soft_tri_start.append(tri_range[0])
+        self._soft_tri_end.append(tri_range[1])
+        self._soft_edge_start.append(edge_range[0])
+        self._soft_edge_end.append(edge_range[1])
+        self._soft_density.append(density)
 
     # region importers
     def add_urdf(
@@ -9492,7 +9513,7 @@ class ModelBuilder:
         custom_attributes_edges: dict[str, Any] | None = None,
         custom_attributes_triangles: dict[str, Any] | None = None,
         label: str | None = None,
-    ):
+    ) -> None:
         """Helper to create a regular planar cloth grid
 
         Creates a rectangular grid of particles with FEM triangles and bending elements
@@ -9543,7 +9564,7 @@ class ModelBuilder:
         total_area = cell_x * cell_y * dim_x * dim_y
         density = total_mass / total_area
 
-        cloth_range = self.add_cloth_mesh(
+        self.add_cloth_mesh(
             pos=pos,
             rot=rot,
             scale=1.0,
@@ -9586,8 +9607,6 @@ class ModelBuilder:
                 self.particle_flags[start_vertex + vertex_id] = particle_flag
                 self.particle_mass[start_vertex + vertex_id] = particle_mass
                 vertex_id = vertex_id + 1
-
-        return cloth_range
 
     @deprecate_nonkeyword_arguments
     def add_cloth_mesh(
@@ -9741,21 +9760,14 @@ class ModelBuilder:
             for i, j in spring_indices:
                 self.add_spring(i, j, spring_ke, spring_kd, control=0.0, custom_attributes=custom_attributes_springs)
 
-        cloth_range = ClothRange(
-            label=label,
-            particle_start=start_vertex,
-            particle_end=len(self.particle_q),
-            tri_start=start_tri,
-            tri_end=len(self.tri_indices),
-            edge_start=start_edge,
-            edge_end=len(self.edge_indices),
-            spring_start=start_spring,
-            spring_end=len(self.spring_indices) // 2,
-            surface_density=density,
+        self._record_cloth_group(
+            label,
+            (start_vertex, len(self.particle_q)),
+            (start_tri, len(self.tri_indices)),
+            (start_edge, len(self.edge_indices)),
+            (start_spring, len(self.spring_indices) // 2),
+            density,
         )
-        self.cloth_ranges.append(cloth_range)
-        self._sync_uipc_range_custom_frequencies()
-        return cloth_range
 
     @deprecate_nonkeyword_arguments
     def add_particle_grid(
@@ -9776,7 +9788,7 @@ class ModelBuilder:
         radius_std: float = 0.0,
         flags: list[int] | int | None = None,
         custom_attributes: dict[str, Any] | None = None,
-    ):
+    ) -> None:
         """
         Adds a regular 3D grid of particles to the model.
 
@@ -9892,7 +9904,7 @@ class ModelBuilder:
         edge_kd: float = 0.0,
         particle_radius: float | None = None,
         label: str | None = None,
-    ):
+    ) -> None:
         """Helper to create a rectangular tetrahedral FEM grid
 
         Creates a regular grid of FEM tetrahedra and surface triangles. Useful for example
@@ -9927,7 +9939,7 @@ class ModelBuilder:
             edge_ke: Bending edge stiffness used when ``add_surface_mesh_edges`` is True. Defaults to 0.0.
             edge_kd: Bending edge damping used when ``add_surface_mesh_edges`` is True. Defaults to 0.0.
             particle_radius: particle's contact radius (controls rigidbody-particle contact distance)
-            label: Optional name stored with the generated soft-body range.
+            label: Optional name stored with the generated soft-body group.
 
         Note:
             The generated surface triangles and optional edges are for collision purposes.
@@ -10031,21 +10043,14 @@ class ModelBuilder:
             if end_tri > start_tri:
                 self._add_soft_mesh_edges_from_triangles(start_tri, end_tri, edge_ke=edge_ke, edge_kd=edge_kd)
 
-        soft_range = SoftBodyRange(
-            label=label,
-            particle_start=start_vertex,
-            particle_end=len(self.particle_q),
-            tet_start=start_tet,
-            tet_end=len(self.tet_indices),
-            tri_start=start_tri,
-            tri_end=len(self.tri_indices),
-            edge_start=start_edge,
-            edge_end=len(self.edge_indices),
-            density=density,
+        self._record_soft_group(
+            label,
+            (start_vertex, len(self.particle_q)),
+            (start_tet, len(self.tet_indices)),
+            (start_tri, len(self.tri_indices)),
+            (start_edge, len(self.edge_indices)),
+            density,
         )
-        self.soft_body_ranges.append(soft_range)
-        self._sync_uipc_range_custom_frequencies()
-        return soft_range
 
     @deprecate_nonkeyword_arguments
     def add_soft_mesh(
@@ -10268,21 +10273,14 @@ class ModelBuilder:
             if end_tri > start_tri:
                 self._add_soft_mesh_edges_from_triangles(start_tri, end_tri, edge_ke=edge_ke, edge_kd=edge_kd)
 
-        soft_range = SoftBodyRange(
-            label=label,
-            particle_start=start_vertex,
-            particle_end=len(self.particle_q),
-            tet_start=start_tet,
-            tet_end=len(self.tet_indices),
-            tri_start=start_tri,
-            tri_end=len(self.tri_indices),
-            edge_start=start_edge,
-            edge_end=len(self.edge_indices),
-            density=density,
+        self._record_soft_group(
+            label,
+            (start_vertex, len(self.particle_q)),
+            (start_tet, len(self.tet_indices)),
+            (start_tri, len(self.tri_indices)),
+            (start_edge, len(self.edge_indices)),
+            density,
         )
-        self.soft_body_ranges.append(soft_range)
-        self._sync_uipc_range_custom_frequencies()
-        return soft_range
 
     # incrementally updates rigid body mass with additional mass and inertia expressed at a local to the body
     def _update_body_mass(self, i: int, m: float, inertia: Mat33, p: Vec3, q: Quat):
@@ -11736,8 +11734,6 @@ class ModelBuilder:
             m.particle_world = wp.array(self.particle_world, dtype=wp.int32)
             m.particle_max_radius = np.max(self.particle_radius) if len(self.particle_radius) > 0 else 0.0
             m.particle_max_velocity = self.particle_max_velocity
-            m.soft_body_ranges = list(self.soft_body_ranges)
-            m.cloth_ranges = list(self.cloth_ranges)
 
             particle_colors = np.empty(self.particle_count, dtype=int)
             for color in range(len(self.particle_color_groups)):
@@ -12941,6 +12937,7 @@ class ModelBuilder:
                 m.actuators.append(actuator)
 
             # Add custom attributes onto the model (with lazy evaluation)
+            self._resolve_custom_frequency_counts()
             self._resolve_custom_frequency_articulation_owners()
 
             # Early return if no custom attributes exist to avoid overhead

@@ -83,7 +83,7 @@ class Example:
         builder.color()
 
         self.model = builder.finalize()
-        self.model.uipc.cloth_model[:] = [args.cloth_model] * len(self.model.cloth_ranges)
+        self.model.uipc.cloth_model[:] = [args.cloth_model] * len(self.model.uipc.cloth_model)
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
         self.control = self.model.control()

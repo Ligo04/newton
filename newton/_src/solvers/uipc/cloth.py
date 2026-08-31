@@ -23,6 +23,7 @@ from uipc.geometry import trimesh as uipc_trimesh
 from newton import Model
 
 from .converter import UIpcMappingInfo
+from .deformable_groups import cloth_groups_from_model
 from .utils import _view_attr
 
 
@@ -47,7 +48,7 @@ class ClothBuilder:
     By default the membrane model is UIPC's
     ``StrainLimitingBaraffWitkinShell``.  Set an entry in
     ``model.uipc.cloth_model`` to ``"neo_hookean"`` to use ``NeoHookeanShell``
-    for that authored cloth range.
+    for that authored cloth group.
     """
 
     CLOTH_MODEL_STRAIN_LIMITING_BARAFF_WITKIN = "strain_limiting_baraff_witkin"
@@ -101,19 +102,22 @@ class ClothBuilder:
         if model.tri_count == 0 or model.tri_indices is None or model.particle_q is None:
             return
 
-        if model.cloth_ranges:
-            for cloth_index, cloth_range in enumerate(model.cloth_ranges):
-                if not self._range_in_particle_range(cloth_range.particle_range, particle_range):
+        cloth_groups = cloth_groups_from_model(model)
+        if cloth_groups:
+            for cloth_index, cloth_group in enumerate(cloth_groups):
+                if not self._range_in_particle_range(cloth_group.particle_range, particle_range):
                     continue
-                selected_particles, cloth_faces, selected_tri_ids = self._select_range_cloth(model, cloth_range)
+                selected_particles, cloth_faces, selected_tri_ids = self._select_range_cloth(
+                    model, cloth_group.triangle_range
+                )
                 self._build_geometry(
                     contact_elem,
                     selected_particles,
                     cloth_faces,
                     selected_tri_ids,
-                    cloth_range.edge_range,
+                    cloth_group.edge_range,
                     subscene_elem,
-                    cloth_range.surface_density,
+                    cloth_group.surface_density,
                     cloth_index,
                 )
             return
@@ -123,11 +127,13 @@ class ClothBuilder:
             contact_elem, selected_particles, cloth_faces, selected_tri_ids, None, subscene_elem, None, None
         )
 
-    def _select_range_cloth(self, model: Model, cloth_range: Any) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Return particles, local faces, and triangle IDs for one authored cloth range."""
+    def _select_range_cloth(
+        self, model: Model, triangle_range: tuple[int, int]
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Return particles, local faces, and triangle IDs for one authored cloth group."""
         assert model.tri_indices is not None
         tri_indices_np = model.tri_indices.numpy().reshape(-1, 3)
-        tstart, tend = cloth_range.tri_range
+        tstart, tend = triangle_range
         selected_tri_ids = np.arange(tstart, tend, dtype=np.int32)
         selected_tris = tri_indices_np[tstart:tend]
         if selected_tris.size == 0:
@@ -440,7 +446,7 @@ class ClothBuilder:
             raise ValueError(f"Unknown UIPC cloth model {cloth_model!r}. Expected one of: {valid}") from exc
 
     def _cloth_model_from_model(self, model: Model, cloth_index: int | None) -> str:
-        """Return the selected UIPC cloth membrane model for one cloth range."""
+        """Return the selected UIPC cloth membrane model for one cloth group."""
         uipc_attrs = getattr(model, "uipc", None)
         if uipc_attrs is None or not hasattr(uipc_attrs, "cloth_model"):
             return self._cloth_model

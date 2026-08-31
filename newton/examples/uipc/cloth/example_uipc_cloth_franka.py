@@ -62,7 +62,7 @@ class Example:
         # builder.gravity = 0.0
         self.model = builder.finalize()
         if hasattr(self.model.uipc, "cloth_model"):
-            self.model.uipc.cloth_model[:] = [args.cloth_model] * len(self.model.cloth_ranges)
+            self.model.uipc.cloth_model[:] = [args.cloth_model] * len(self.model.uipc.cloth_model)
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
         self.control = self.model.control()

@@ -323,10 +323,11 @@ def _assert_tet_graph_coloring(test, tet_indices: np.ndarray, colors: np.ndarray
 
 
 class TestSoftBody(unittest.TestCase):
-    def test_soft_grid_returns_and_finalizes_entity_ranges(self):
+    def test_soft_grid_records_entity_group(self):
+        """Record soft-grid topology and density in the builder group registry."""
         builder = ModelBuilder()
 
-        soft_range = builder.add_soft_grid(
+        builder.add_soft_grid(
             pos=wp.vec3(0.0, 0.0, 0.0),
             rot=wp.quat_identity(),
             vel=wp.vec3(0.0, 0.0, 0.0),
@@ -343,21 +344,18 @@ class TestSoftBody(unittest.TestCase):
             label="soft_grid",
         )
 
-        self.assertEqual(soft_range.label, "soft_grid")
-        self.assertEqual(soft_range.particle_range, (0, builder.particle_count))
-        self.assertEqual(soft_range.tet_range, (0, builder.tet_count))
-        self.assertEqual(soft_range.tri_range, (0, builder.tri_count))
-        self.assertEqual(soft_range.edge_range, (0, builder.edge_count))
-        self.assertEqual(soft_range.density, 1000.0)
-        self.assertEqual(builder.soft_body_ranges, [soft_range])
+        self.assertEqual(builder._soft_label, ["soft_grid"])
+        self.assertEqual((builder._soft_particle_start[0], builder._soft_particle_end[0]), (0, builder.particle_count))
+        self.assertEqual((builder._soft_tet_start[0], builder._soft_tet_end[0]), (0, builder.tet_count))
+        self.assertEqual((builder._soft_tri_start[0], builder._soft_tri_end[0]), (0, builder.tri_count))
+        self.assertEqual((builder._soft_edge_start[0], builder._soft_edge_end[0]), (0, builder.edge_count))
+        self.assertEqual(builder._soft_density, [1000.0])
 
-        model = builder.finalize()
-        self.assertEqual(model.soft_body_ranges, [soft_range])
-
-    def test_soft_mesh_returns_entity_ranges(self):
+    def test_soft_mesh_records_entity_group(self):
+        """Record soft-mesh topology in the builder group registry."""
         builder = ModelBuilder()
 
-        soft_range = builder.add_soft_mesh(
+        builder.add_soft_mesh(
             pos=wp.vec3(0.0, 0.0, 0.0),
             rot=wp.quat_identity(),
             scale=1.0,
@@ -376,17 +374,17 @@ class TestSoftBody(unittest.TestCase):
             label="soft_mesh",
         )
 
-        self.assertEqual(soft_range.label, "soft_mesh")
-        self.assertEqual(soft_range.particle_range, (0, builder.particle_count))
-        self.assertEqual(soft_range.tet_range, (0, builder.tet_count))
-        self.assertEqual(soft_range.tri_range, (0, builder.tri_count))
-        self.assertEqual(soft_range.edge_range, (0, builder.edge_count))
-        self.assertEqual(soft_range.density, 1000.0)
-        self.assertEqual(builder.soft_body_ranges, [soft_range])
+        self.assertEqual(builder._soft_label, ["soft_mesh"])
+        self.assertEqual((builder._soft_particle_start[0], builder._soft_particle_end[0]), (0, builder.particle_count))
+        self.assertEqual((builder._soft_tet_start[0], builder._soft_tet_end[0]), (0, builder.tet_count))
+        self.assertEqual((builder._soft_tri_start[0], builder._soft_tri_end[0]), (0, builder.tri_count))
+        self.assertEqual((builder._soft_edge_start[0], builder._soft_edge_end[0]), (0, builder.edge_count))
+        self.assertEqual(builder._soft_density, [1000.0])
 
-    def test_add_builder_offsets_soft_body_ranges(self):
+    def test_add_builder_offsets_soft_body_groups(self):
+        """Offset every soft-body-group index domain when merging builders."""
         source = ModelBuilder()
-        source_range = source.add_soft_grid(
+        source.add_soft_grid(
             pos=wp.vec3(0.0, 0.0, 0.0),
             rot=wp.quat_identity(),
             vel=wp.vec3(0.0, 0.0, 0.0),
@@ -404,7 +402,7 @@ class TestSoftBody(unittest.TestCase):
         )
 
         builder = ModelBuilder()
-        prefix_range = builder.add_soft_grid(
+        builder.add_soft_grid(
             pos=wp.vec3(0.0, 2.0, 0.0),
             rot=wp.quat_identity(),
             vel=wp.vec3(0.0, 0.0, 0.0),
@@ -420,19 +418,21 @@ class TestSoftBody(unittest.TestCase):
             k_damp=1.0e-3,
             label="prefix",
         )
+        prefix_particle_end = builder.particle_count
+        prefix_tet_end = builder.tet_count
+        prefix_tri_end = builder.tri_count
+        prefix_edge_end = builder.edge_count
         builder.add_builder(source, label_prefix="copy")
 
-        self.assertEqual(len(builder.soft_body_ranges), 2)
-        merged_range = builder.soft_body_ranges[1]
-        self.assertEqual(merged_range.label, f"copy/{source_range.label}")
-        self.assertEqual(merged_range.particle_start, prefix_range.particle_end)
-        self.assertEqual(merged_range.tet_start, prefix_range.tet_end)
-        self.assertEqual(merged_range.tri_start, prefix_range.tri_end)
-        self.assertEqual(merged_range.edge_start, prefix_range.edge_end)
-        self.assertEqual(merged_range.particle_end, prefix_range.particle_end + source_range.particle_end)
-        self.assertEqual(merged_range.tet_end, prefix_range.tet_end + source_range.tet_end)
-        self.assertEqual(merged_range.tri_end, prefix_range.tri_end + source_range.tri_end)
-        self.assertEqual(merged_range.edge_end, prefix_range.edge_end + source_range.edge_end)
+        self.assertEqual(builder._soft_label, ["prefix", "copy/source"])
+        self.assertEqual(builder._soft_particle_start[1], prefix_particle_end)
+        self.assertEqual(builder._soft_tet_start[1], prefix_tet_end)
+        self.assertEqual(builder._soft_tri_start[1], prefix_tri_end)
+        self.assertEqual(builder._soft_edge_start[1], prefix_edge_end)
+        self.assertEqual(builder._soft_particle_end[1], prefix_particle_end + source.particle_count)
+        self.assertEqual(builder._soft_tet_end[1], prefix_tet_end + source.tet_count)
+        self.assertEqual(builder._soft_tri_end[1], prefix_tri_end + source.tri_count)
+        self.assertEqual(builder._soft_edge_end[1], prefix_edge_end + source.edge_count)
 
 
 def test_tet_adjacency_single_tet(test, device):

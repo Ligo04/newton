@@ -32,6 +32,7 @@ class Example:
         self.sim_dt = self.frame_dt / self.sim_substeps
 
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+        SolverUIPC.register_custom_attributes(builder)
         builder.add_ground_plane()
 
         dim_x = 10

@@ -82,7 +82,6 @@ __all__ += [
 # ==================================================================================
 from ._src.sim import (  # noqa: E402
     BodyFlags,
-    ClothRange,
     CollisionPipeline,
     Contacts,
     Control,
@@ -92,7 +91,6 @@ from ._src.sim import (  # noqa: E402
     Model,
     ModelBuilder,
     ModelFlags,
-    SoftBodyRange,
     State,
     StateFlags,
     add_armature_to_mass_matrix,
@@ -107,7 +105,6 @@ from ._src.sim import (  # noqa: E402
 
 __all__ += [
     "BodyFlags",
-    "ClothRange",
     "CollisionPipeline",
     "Contacts",
     "Control",
@@ -117,7 +114,6 @@ __all__ += [
     "Model",
     "ModelBuilder",
     "ModelFlags",
-    "SoftBodyRange",
     "State",
     "StateFlags",
     "add_armature_to_mass_matrix",

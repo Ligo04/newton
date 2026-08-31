@@ -188,7 +188,7 @@ class Example:
 
         # Finalize model
         self.model = builder.finalize()
-        self.model.uipc.cloth_model[:] = [args.cloth_model] * len(self.model.cloth_ranges)
+        self.model.uipc.cloth_model[:] = [args.cloth_model] * len(self.model.uipc.cloth_model)
 
         # Create UIPC solver with cloth self-contact enabled through actor-actor contact.
         self.solver = newton.solvers.SolverUIPC(

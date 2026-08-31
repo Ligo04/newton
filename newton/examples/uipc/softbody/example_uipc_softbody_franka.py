@@ -50,6 +50,7 @@ class Example:
 
         self.viewer = viewer
         self.scene = ModelBuilder(up_axis=newton.Axis.Z)
+        SolverUIPC.register_custom_attributes(self.scene)
 
         self.create_articulation(self.scene)
         self.scene.add_ground_plane()

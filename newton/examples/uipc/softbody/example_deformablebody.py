@@ -34,6 +34,7 @@ class Example:
         self.sim_dt = self.frame_dt / self.sim_substeps
 
         builder = ModelBuilder(up_axis=newton.Axis.Z)
+        SolverUIPC.register_custom_attributes(builder)
         builder.add_ground_plane()
 
         table_body = builder.add_link(

@@ -79,7 +79,9 @@ class TestUIPCClothConfiguration(unittest.TestCase):
 @unittest.skipUnless(_HAS_UIPC, "uipc is not installed")
 class TestUIPCClothSoftPosition(unittest.TestCase):
     def test_disconnected_cloth_grids_use_authored_ranges(self):
+        """Build one UIPC cloth geometry per authored custom-frequency row."""
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z, gravity=0.0)
+        newton.solvers.SolverUIPC.register_custom_attributes(builder)
         for i in range(2):
             builder.add_cloth_grid(
                 pos=wp.vec3(0.0, i * 0.4, 0.0),
@@ -100,7 +102,10 @@ class TestUIPCClothSoftPosition(unittest.TestCase):
         solver = newton.solvers.SolverUIPC(model, backend="none", dt=1.0 / 60.0)
         solver.initialize(model.state())
 
-        self.assertEqual(len(model.cloth_ranges), 2)
+        self.assertEqual(model.custom_frequency_counts["uipc:cloth"], 2)
+        np.testing.assert_array_equal(model.uipc.cloth_particle_first.numpy(), [0, 9])
+        np.testing.assert_array_equal(model.uipc.cloth_particle_last.numpy(), [8, 17])
+        self.assertEqual(model.uipc.cloth_label, ["cloth_0", "cloth_1"])
         self.assertEqual(len(solver.mapping.cloth_geo_slots), 2)
         self.assertEqual(len(solver.mapping.cloth_particle_indices), 2)
 
@@ -121,6 +126,7 @@ class TestUIPCClothSoftPosition(unittest.TestCase):
         )
 
     def test_register_custom_attributes_adds_default_cloth_model(self):
+        """Materialize default constitutions and range metadata for cloth rows."""
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z, gravity=0.0)
         newton.solvers.SolverUIPC.register_custom_attributes(builder)
         self._add_minimal_cloth(builder)
@@ -132,6 +138,46 @@ class TestUIPCClothSoftPosition(unittest.TestCase):
         self.assertTrue(hasattr(model.uipc, "cloth_model"))
         self.assertEqual(model.custom_frequency_counts["uipc:cloth"], 2)
         self.assertEqual(model.uipc.cloth_model, ["strain_limiting_baraff_witkin", "strain_limiting_baraff_witkin"])
+        np.testing.assert_array_equal(model.uipc.cloth_triangle_first.numpy(), [0, 2])
+        np.testing.assert_array_equal(model.uipc.cloth_triangle_last.numpy(), [1, 3])
+
+    def test_late_registration_materializes_cloth_group_rows(self):
+        """Resolve cloth rows when SolverUIPC metadata is registered after authoring."""
+        builder = newton.ModelBuilder(up_axis=newton.Axis.Z, gravity=0.0)
+        self._add_minimal_cloth(builder)
+        self._add_minimal_cloth(builder)
+        newton.solvers.SolverUIPC.register_custom_attributes(builder)
+
+        model = builder.finalize()
+
+        self.assertEqual(model.custom_frequency_counts["uipc:cloth"], 2)
+        np.testing.assert_array_equal(model.uipc.cloth_particle_first.numpy(), [0, 4])
+        np.testing.assert_array_equal(model.uipc.cloth_particle_last.numpy(), [3, 7])
+
+    def test_replicated_cloth_group_rows_are_offset_and_prefixed(self):
+        """Preserve cloth ranges, worlds, and labels through batched replication."""
+        source = newton.ModelBuilder(up_axis=newton.Axis.Z, gravity=0.0)
+        source.add_cloth_grid(
+            pos=wp.vec3(0.0, 0.0, 0.0),
+            rot=wp.quat_identity(),
+            vel=wp.vec3(0.0, 0.0, 0.0),
+            dim_x=1,
+            dim_y=1,
+            cell_x=0.1,
+            cell_y=0.1,
+            mass=0.01,
+            label="sheet",
+        )
+        builder = newton.ModelBuilder(up_axis=newton.Axis.Z, gravity=0.0)
+        newton.solvers.SolverUIPC.register_custom_attributes(builder)
+        builder.replicate(source, 2, label_prefixes=["left", "right"])
+
+        model = builder.finalize()
+
+        self.assertEqual(model.uipc.cloth_label, ["left/sheet", "right/sheet"])
+        np.testing.assert_array_equal(model.uipc.cloth_world.numpy(), [0, 1])
+        np.testing.assert_array_equal(model.uipc.cloth_particle_first.numpy(), [0, 4])
+        np.testing.assert_array_equal(model.uipc.cloth_particle_last.numpy(), [3, 7])
 
     def test_cloth_model_custom_attribute_selects_per_range_constitution(self):
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z, gravity=0.0)
@@ -237,7 +283,9 @@ class TestUIPCClothSoftPosition(unittest.TestCase):
         self.assertLess(float(np.min(final_q[~fixed_mask, 2] - initial_q[~fixed_mask, 2])), -1.0e-5)
 
     def test_particle_radius_sets_uipc_thickness(self):
+        """Use authored surface density together with per-particle thickness."""
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z, gravity=0.0)
+        newton.solvers.SolverUIPC.register_custom_attributes(builder)
         builder.add_cloth_grid(
             pos=wp.vec3(0.0, 0.0, 0.0),
             rot=wp.quat_identity(),

@@ -23,12 +23,11 @@ from .enums import (
     StateFlags,
 )
 from .inverse_dynamics import eval_inverse_dynamics_passive
-from .model import ClothRange, Model, SoftBodyRange
+from .model import Model
 from .state import State
 
 __all__ = [
     "BodyFlags",
-    "ClothRange",
     "CollisionPipeline",
     "Contacts",
     "Control",
@@ -38,7 +37,6 @@ __all__ = [
     "Model",
     "ModelBuilder",
     "ModelFlags",
-    "SoftBodyRange",
     "State",
     "StateFlags",
     "add_armature_to_mass_matrix",

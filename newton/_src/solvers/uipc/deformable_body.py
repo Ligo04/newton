@@ -17,6 +17,7 @@ from uipc.geometry import tetmesh as uipc_tetmesh
 from newton import Model
 
 from .converter import UIpcMappingInfo
+from .deformable_groups import deformable_body_groups_from_model
 from .utils import _view_attr
 
 
@@ -65,12 +66,13 @@ class DeformableBodyBuilder:
         if model.tet_count == 0 or particle_q is None or tet_indices is None:
             return
 
-        if model.soft_body_ranges:
-            for soft_index, soft_range in enumerate(model.soft_body_ranges):
-                if not self._range_in_particle_range(soft_range.particle_range, particle_range):
+        deformable_groups = deformable_body_groups_from_model(model)
+        if deformable_groups:
+            for soft_index, soft_group in enumerate(deformable_groups):
+                if not self._range_in_particle_range(soft_group.particle_range, particle_range):
                     continue
                 selected_particle_indices, local_tets, selected_tet_ids = self._select_tetrahedra(
-                    model, tet_range=soft_range.tet_range
+                    model, tet_range=soft_group.tetrahedron_range
                 )
                 self._build_tet_set(
                     contact_elem,
@@ -78,7 +80,7 @@ class DeformableBodyBuilder:
                     local_tets,
                     selected_tet_ids,
                     subscene_elem,
-                    soft_range.density,
+                    soft_group.density,
                     soft_index,
                 )
             return
@@ -219,7 +221,7 @@ class DeformableBodyBuilder:
         return pstart <= start and end <= pend
 
     def _deformable_model_from_model(self, model: Model, soft_index: int | None) -> str:
-        """Return the selected UIPC tet constitution for one deformable range."""
+        """Return the selected UIPC tet constitution for one deformable group."""
         uipc_attrs = getattr(model, "uipc", None)
         if uipc_attrs is None or not hasattr(uipc_attrs, "deformable_model"):
             return self._deformable_model

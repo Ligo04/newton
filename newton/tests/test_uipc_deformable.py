@@ -58,7 +58,9 @@ class TestUIPCDeformableBuilder(unittest.TestCase):
         )
 
     def test_disconnected_soft_grids_use_authored_ranges(self):
+        """Build one UIPC deformable geometry per authored metadata row."""
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+        newton.solvers.SolverUIPC.register_custom_attributes(builder)
         stiffness_values = [2.0e4, 5.0e4, 1.0e5, 2.0e5]
         for i, stiffness in enumerate(stiffness_values):
             builder.add_soft_grid(
@@ -89,12 +91,15 @@ class TestUIPCDeformableBuilder(unittest.TestCase):
 
         solver.initialize(state)
 
+        self.assertEqual(model.custom_frequency_counts["uipc:deformable_body"], len(stiffness_values))
         self.assertEqual(len(solver.mapping.deformable_geo_slots), len(stiffness_values))
         self.assertEqual(len(solver.mapping.deformable_rest_geo_slots), len(stiffness_values))
         self.assertEqual(len(solver.mapping.deformable_particle_indices), len(stiffness_values))
 
     def test_authored_soft_density_is_used_by_uipc(self):
+        """Use the authored custom-frequency density for UIPC mass density."""
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+        newton.solvers.SolverUIPC.register_custom_attributes(builder)
         builder.add_soft_grid(
             pos=wp.vec3(0.0, 0.0, 0.6),
             rot=wp.quat_identity(),
@@ -127,7 +132,9 @@ class TestUIPCDeformableBuilder(unittest.TestCase):
         self.assertAlmostEqual(float(uipc.view(mass_density_attr)[0]), 123.0)
 
     def test_disconnected_soft_grids_with_same_material_use_authored_ranges(self):
+        """Keep equally configured soft bodies in separate metadata rows."""
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+        newton.solvers.SolverUIPC.register_custom_attributes(builder)
         for i in range(2):
             builder.add_soft_grid(
                 pos=wp.vec3(0.0, i * 0.4, 0.6),
@@ -157,13 +164,16 @@ class TestUIPCDeformableBuilder(unittest.TestCase):
 
         solver.initialize(model.state())
 
-        self.assertEqual(len(model.soft_body_ranges), 2)
+        self.assertEqual(model.custom_frequency_counts["uipc:deformable_body"], 2)
+        self.assertEqual(model.uipc.deformable_body_label, ["soft_0", "soft_1"])
         self.assertEqual(len(solver.mapping.deformable_geo_slots), 2)
         self.assertEqual(len(solver.mapping.deformable_rest_geo_slots), 2)
         self.assertEqual(len(solver.mapping.deformable_particle_indices), 2)
 
     def test_single_soft_range_with_disconnected_tets_builds_one_deformable(self):
+        """Keep disconnected tetrahedra from one authored call in one metadata row."""
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+        newton.solvers.SolverUIPC.register_custom_attributes(builder)
         self._add_disconnected_tet_soft_mesh(builder)
 
         model = builder.finalize()
@@ -176,13 +186,14 @@ class TestUIPCDeformableBuilder(unittest.TestCase):
 
         solver.initialize(model.state())
 
-        self.assertEqual(len(model.soft_body_ranges), 1)
+        self.assertEqual(model.custom_frequency_counts["uipc:deformable_body"], 1)
         self.assertEqual(len(solver.mapping.deformable_geo_slots), 1)
         self.assertEqual(len(solver.mapping.deformable_rest_geo_slots), 1)
         self.assertEqual(len(solver.mapping.deformable_particle_indices), 1)
         self.assertEqual(len(solver.mapping.deformable_particle_indices[0]), 8)
 
     def test_register_custom_attributes_adds_default_deformable_model(self):
+        """Materialize default constitutions and range metadata for soft-body rows."""
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
         newton.solvers.SolverUIPC.register_custom_attributes(builder)
         self._add_disconnected_tet_soft_mesh(builder)
@@ -194,6 +205,8 @@ class TestUIPCDeformableBuilder(unittest.TestCase):
         self.assertTrue(hasattr(model.uipc, "deformable_model"))
         self.assertEqual(model.custom_frequency_counts["uipc:deformable_body"], 2)
         self.assertEqual(model.uipc.deformable_model, ["stable_neo_hookean", "stable_neo_hookean"])
+        np.testing.assert_array_equal(model.uipc.deformable_body_tetrahedron_first.numpy(), [0, 2])
+        np.testing.assert_array_equal(model.uipc.deformable_body_tetrahedron_last.numpy(), [1, 3])
 
     def test_disconnected_tet_materials_are_copied_per_tet(self):
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
@@ -307,12 +320,12 @@ class TestUIPCDeformableBuilder(unittest.TestCase):
         solver.clear_deformable_soft_position_constraints([0])
         self.assertEqual(int(constrained[0]), 0)
 
-    def test_deformable_fallback_without_ranges_builds_one_deformable(self):
+    def test_deformable_fallback_without_registered_group_rows_builds_one_deformable(self):
+        """Use the legacy topology selector when UIPC metadata is not registered."""
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
         self._add_disconnected_tet_soft_mesh(builder)
 
         model = builder.finalize()
-        model.soft_body_ranges.clear()
         solver = newton.solvers.SolverUIPC(
             model=model,
             backend="none",
@@ -328,6 +341,7 @@ class TestUIPCDeformableBuilder(unittest.TestCase):
         self.assertEqual(len(solver.mapping.deformable_particle_indices[0]), 8)
 
     def test_replicated_soft_grids_build_one_deformable_per_world(self):
+        """Resolve replicated soft-body rows after their index ranges are offset."""
         base_builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
         base_builder.add_soft_grid(
             pos=wp.vec3(0.0, 0.0, 0.6),
@@ -347,6 +361,7 @@ class TestUIPCDeformableBuilder(unittest.TestCase):
         )
 
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+        newton.solvers.SolverUIPC.register_custom_attributes(builder)
         builder.replicate(base_builder, 2, spacing=(0.0, 0.8, 0.0))
         builder.add_ground_plane()
 

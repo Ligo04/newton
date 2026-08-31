@@ -19,6 +19,7 @@ from newton import BodyFlags, Contacts, Control, JointType, Model, ModelBuilder,
 
 from ...sim import ModelFlags
 from ..solver import SolverBase
+from .deformable_groups import register_deformable_group_attributes
 
 try:
     from typing import override  # ty: ignore[unresolved-import]
@@ -168,7 +169,7 @@ class SolverUIPC(SolverBase):
         [Pa].  A negative value leaves the solver-level ``kappa`` default in
         effect for that body. ``uipc:cloth_model`` and
         ``uipc:deformable_model`` select constitutions per authored cloth or
-        deformable range.
+        deformable group.
         """
         cls.import_uipc()
         builder.add_custom_attribute(
@@ -181,8 +182,7 @@ class SolverUIPC(SolverBase):
                 namespace="uipc",
             )
         )
-        builder.add_custom_frequency(ModelBuilder.CustomFrequency(name="cloth", namespace="uipc"))
-        builder.add_custom_frequency(ModelBuilder.CustomFrequency(name="deformable_body", namespace="uipc"))
+        register_deformable_group_attributes(builder)
         builder.add_custom_attribute(
             ModelBuilder.CustomAttribute(
                 name="deformable_model",
@@ -203,7 +203,6 @@ class SolverUIPC(SolverBase):
                 namespace="uipc",
             )
         )
-        builder._sync_uipc_range_custom_frequencies()
 
     @classmethod
     def import_uipc(cls) -> None:
